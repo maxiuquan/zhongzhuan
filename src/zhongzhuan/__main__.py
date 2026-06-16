@@ -40,6 +40,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stop", action="store_true", help="Stop Windows service")
     p.add_argument("--autostart", nargs="?", const="status", help="Auto-start on/off/status")
     p.add_argument("--open-admin", action="store_true", help="Open admin UI in browser")
+    # Convenience flag to run directly without subcommand
+    p.add_argument("args", nargs=argparse.REMAINDER)
     return p.parse_args()
 
 
