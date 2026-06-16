@@ -92,10 +92,16 @@ def load_config(path: str | None) -> Config:
             data = yaml.safe_load(f) or {}
         _merge(cfg, data)
 
-    # .env overrides for server ports
+    # .env overrides for server hosts/ports
+    proxy_host = os.getenv("ZHONGZHUAN_PROXY_HOST")
+    if proxy_host:
+        cfg.server.proxy.host = proxy_host
     proxy_port = os.getenv("ZHONGZHUAN_PROXY_PORT")
     if proxy_port:
         cfg.server.proxy.port = int(proxy_port)
+    admin_host = os.getenv("ZHONGZHUAN_ADMIN_HOST")
+    if admin_host:
+        cfg.server.admin.host = admin_host
     admin_port = os.getenv("ZHONGZHUAN_ADMIN_PORT")
     if admin_port:
         cfg.server.admin.port = int(admin_port)
