@@ -155,7 +155,7 @@ class Handler:
                     return await self._stream_proxy(
                         request, path, base_headers, body, requested_model,
                     )
-                _lg.info(f"[{_req_id}] key_id={k.key_id} sending request to {k.upstream_base.rstrip('/')}{path}")
+                _lg.info(f"[{_req_id}] key_id={k.key_id} sending request to {path}")
                 resp = await client.request(
                     request.method, path, headers=headers, content=final_body,
                 )
@@ -273,7 +273,7 @@ class Handler:
                 headers["Content-Length"] = str(len(final_body))
 
             try:
-                _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} connecting to {k.upstream_base.rstrip('/')}{path}")
+                _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} connecting to {path}")
                 async for upstream_resp in client.stream(
                     request.method, path, headers=headers, content=final_body,
                 ):
