@@ -5,12 +5,13 @@ from aiohttp import web
 
 from ..crypto import mask
 from ..store.keys import ApiKey, create_key, list_keys, delete_key, update_key
+from .notify import notify_proxy_reload
 
 
 def register_routes(app: web.Application, ctx) -> None:
     async def list_(request):
         model_id = request.query.get("model_id")
-        rows = list_keys(ctx.store, int(model_id) if model_id else None)
+        rows = await list_keys(ctx.store, int(model_id) if model_id else None)
         return web.json_response({"data": [
             {
                 "id": r.id, "model_id": r.model_id, "label": r.label,
@@ -28,7 +29,8 @@ def register_routes(app: web.Application, ctx) -> None:
             enabled=bool(data.get("enabled", True)),
             priority=int(data.get("priority", 0)),
         )
-        k = create_key(ctx.store, k)
+        k = await create_key(ctx.store, k)
+        await notify_proxy_reload()
         return web.json_response({
             "id": k.id, "model_id": k.model_id, "label": k.label,
             "key_masked": mask(k.key_value), "enabled": k.enabled,
@@ -37,18 +39,20 @@ def register_routes(app: web.Application, ctx) -> None:
 
     async def delete(request):
         key_id = int(request.match_info["id"])
-        delete_key(ctx.store, key_id)
+        await delete_key(ctx.store, key_id)
+        await notify_proxy_reload()
         return web.json_response({"ok": True})
 
     async def update(request):
         key_id = int(request.match_info["id"])
         data = await request.json()
-        update_key(
+        await update_key(
             ctx.store, key_id,
             label=data.get("label"),
             enabled=data.get("enabled"),
             priority=data.get("priority"),
         )
+        await notify_proxy_reload()
         return web.json_response({"ok": True})
 
     app.router.add_get("/api/keys", list_)

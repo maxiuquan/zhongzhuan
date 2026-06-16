@@ -1,4 +1,4 @@
-"""Request logs + stats."""
+"""Request logs + stats (async)."""
 from __future__ import annotations
 
 import uuid
@@ -6,7 +6,7 @@ import uuid
 from .store import Store
 
 
-def log_request(
+async def log_request(
     s: Store,
     *,
     client_ip: str = "",
@@ -21,21 +21,20 @@ def log_request(
     request_id: str | None = None,
 ) -> None:
     rid = request_id or str(uuid.uuid4())
-    s.connect().execute(
+    await s.execute(
         """INSERT INTO request_logs(ts, client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, request_id)
            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
         (Store.now(), client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, rid),
     )
 
 
-def list_logs(
+async def list_logs(
     s: Store,
     cursor: int = 0,
     limit: int = 50,
     model: str | None = None,
     status: int | None = None,
 ) -> dict:
-    conn = s.connect()
     sql = "SELECT id, ts, client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, request_id FROM request_logs WHERE id > ?"
     params: list = [cursor]
     if model:
@@ -46,7 +45,7 @@ def list_logs(
         params.append(status)
     sql += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
-    rows = conn.execute(sql, params).fetchall()
+    rows = await s.fetchall(sql, tuple(params))
     return {
         "data": [
             {
@@ -61,25 +60,27 @@ def list_logs(
     }
 
 
-def get_stats(s: Store, range_hours: int = 1) -> dict:
+async def get_stats(s: Store, range_hours: int = 1) -> dict:
     """Get QPS, success rate, top errors."""
     since = Store.now() - range_hours * 3600
-    conn = s.connect()
-    total = conn.execute("SELECT COUNT(*) FROM request_logs WHERE ts>=?", (since,)).fetchone()[0]
-    success = conn.execute("SELECT COUNT(*) FROM request_logs WHERE ts>=? AND status>=200 AND status<300", (since,)).fetchone()[0]
-    errors = conn.execute(
+    total_row = await s.fetchone("SELECT COUNT(*) FROM request_logs WHERE ts>=?", (since,))
+    total = total_row[0] if total_row else 0
+    success_row = await s.fetchone("SELECT COUNT(*) FROM request_logs WHERE ts>=? AND status>=200 AND status<300", (since,))
+    success = success_row[0] if success_row else 0
+    errors = await s.fetchall(
         "SELECT status, COUNT(*) as cnt FROM request_logs WHERE ts>=? AND status>=400 GROUP BY status ORDER BY cnt DESC LIMIT 5",
         (since,),
-    ).fetchall()
+    )
 
-    avg_latency_row = conn.execute(
+    avg_row = await s.fetchone(
         "SELECT AVG(latency_ms) FROM request_logs WHERE ts>=?", (since,),
-    ).fetchone()
-    avg_latency = avg_latency_row[0] or 0
+    )
+    avg_latency = avg_row[0] or 0 if avg_row else 0
 
-    active_keys = conn.execute(
+    active_row = await s.fetchone(
         "SELECT COUNT(DISTINCT key_id) FROM request_logs WHERE ts>=?", (since,),
-    ).fetchone()[0]
+    )
+    active_keys = active_row[0] if active_row else 0
 
     return {
         "qps": round(total / (range_hours * 3600), 2) if total else 0,
@@ -91,6 +92,6 @@ def get_stats(s: Store, range_hours: int = 1) -> dict:
     }
 
 
-def cleanup_old_logs(s: Store, retention_days: int = 14) -> None:
+async def cleanup_old_logs(s: Store, retention_days: int = 14) -> None:
     cutoff = Store.now() - retention_days * 86400
-    s.connect().execute("DELETE FROM request_logs WHERE ts<?", (cutoff,))
+    await s.execute("DELETE FROM request_logs WHERE ts<?", (cutoff,))

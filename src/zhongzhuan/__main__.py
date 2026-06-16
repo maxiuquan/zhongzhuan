@@ -19,6 +19,7 @@ from zhongzhuan.observability import setup_logging
 from zhongzhuan.proxy import ProxyServer
 from zhongzhuan.proxy.ratelimit import KeyHealth, SlidingWindow
 from zhongzhuan.store import Store
+from zhongzhuan.store.store import create_store
 from zhongzhuan.store.keys import list_keys, get_key_cipher
 from zhongzhuan.store.models import list_models, get_model_by_id
 from zhongzhuan.upstream import UpstreamClient
@@ -61,17 +62,17 @@ def make_default_config(path: Path) -> None:
         )
 
 
-def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
+async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
     """Load keys from DB into KeyHealth objects."""
-    key_rows = list_keys(store)
+    key_rows = await list_keys(store)
     health_list: list[KeyHealth] = []
     for kr in key_rows:
         if not kr.enabled:
             continue
-        plain = get_key_cipher(store, kr.id)
+        plain = await get_key_cipher(store, kr.id)
         if not plain:
             continue
-        model = get_model_by_id(store, kr.model_id)
+        model = await get_model_by_id(store, kr.model_id)
         rpm_limit = model.rpm_limit if model and model.rpm_limit > 0 else cfg.limits.default_rpm_per_key
         health_list.append(KeyHealth(
             key_id=kr.id, api_key=plain,
@@ -100,16 +101,41 @@ async def run_foreground(
     setup_logging(data_dir / cfg.storage.log_dir)
     logger.info(f"zhongzhuan {__version__} starting", cfg=str(cfg_path), data_dir=str(data_dir))
 
-    from pathlib import Path
-    db_path = cfg.storage.db_path
-    if Path(db_path).is_absolute():
-        store_path = db_path
-    else:
-        store_path = str(data_dir / db_path)
-    store = Store(store_path)
+    # Create async store (TiDB or SQLite based on config)
+    store = await create_store(cfg)
+
+    # Initialize crypto with store (for AES key in TiDB system_config)
+    from zhongzhuan.crypto import init as crypto_init
+    async def _get_config(key_name: str) -> str | None:
+        row = await store.fetchone(
+            "SELECT value FROM system_config WHERE `key`=?", (key_name,)
+        )
+        return row[0] if row else None
+    await crypto_init(data_dir, store_get_key=_get_config)
+
+    # Create default admin user if auth is enabled and no admin exists
+    from zhongzhuan.admin.auth import auth_enabled
+    if auth_enabled():
+        from zhongzhuan.store.admin_users import admin_exists, create_admin
+        if not await admin_exists(store):
+            admin_user = os.getenv("ZHONGZHUAN_ADMIN_USER", "admin")
+            admin_pass = os.getenv("ZHONGZHUAN_ADMIN_PASSWORD", "")
+            if not admin_pass:
+                logger.warning("ZHONGZHUAN_ADMIN_PASSWORD not set in .env, admin will not be created")
+            else:
+                await create_admin(store, admin_user, admin_pass)
+                logger.info(f"默认管理员已创建: {admin_user}")
+
+    # Create default access token if proxy auth is enabled and no tokens exist
+    from zhongzhuan.proxy.auth import proxy_auth_enabled
+    if proxy_auth_enabled():
+        from zhongzhuan.store.access_tokens import token_count, create_token as create_access_token
+        if await token_count(store) == 0:
+            token = await create_access_token(store, "default")
+            logger.info(f"自动生成访问令牌: {token.token}")
 
     # Build keys from DB (with per-model upstream info)
-    keys = _load_keys_from_store(store, cfg)
+    keys = await _load_keys_from_store(store, cfg)
 
     # Fallback: env/CLI key
     if not keys:
@@ -146,8 +172,6 @@ async def run_foreground(
 
     from loguru import logger
     logger.info(f"loaded {len(keys)} keys, {len(upstream_urls)} upstreams")
-    for k in keys:
-        logger.info(f"  key id={k.key_id} model_name={k.model_name!r} upstream_base={k.upstream_base!r} upstream_model={k.upstream_model!r}")
 
     upstream_clients: dict[str, UpstreamClient] = {}
     for base_url in upstream_urls:
@@ -156,14 +180,15 @@ async def run_foreground(
         upstream_clients[base_url] = client
 
     # Load models and groups for /v1/models
-    models_data = [{"name": m.name} for m in list_models(store)]
+    models_data = [{"name": m.name} for m in await list_models(store)]
     from zhongzhuan.store.groups import list_groups as list_groups_db
-    groups_data = [{"name": g["name"]} for g in list_groups_db(store)]
+    groups_data = [{"name": g["name"]} for g in await list_groups_db(store)]
 
     proxy = ProxyServer(
         upstream_clients=upstream_clients, keys=keys,
         proxy_timeout=cfg.limits.proxy_request_timeout,
         models=models_data, groups=groups_data, store=store,
+        load_keys_fn=lambda: _load_keys_from_store(store, cfg),
     )
     proxy_runner = web.AppRunner(proxy.app())
     await proxy_runner.setup()
@@ -206,7 +231,7 @@ async def run_foreground(
         await admin_runner.cleanup()
         for client in upstream_clients.values():
             await client.close()
-        store.close()
+        await store.close()
         logger.info("shutdown complete")
     return 0
 

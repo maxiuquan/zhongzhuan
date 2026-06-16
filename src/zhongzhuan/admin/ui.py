@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from aiohttp import web
+from .auth import auth_enabled
+
 
 INDEX_HTML = """<!doctype html>
 <html lang="zh-CN">
@@ -37,6 +39,7 @@ tr:hover{background:#1c2128}
 .btn.danger:hover{background:#f85149}
 .btn.small{padding:3px 10px;font-size:12px}
 textarea{background:#0d1117;border:1px solid #30363d;color:#e1e4e8;padding:6px 10px;border-radius:6px;font-size:13px;width:100%;min-height:120px;font-family:monospace}
+input,select{background:#0d1117;border:1px solid #30363d;color:#e1e4e8;padding:6px 10px;border-radius:6px;font-size:13px;width:100%}
 label{font-size:13px;color:#8b949e;display:block;margin-bottom:4px}
 .form-group{margin-bottom:12px}
 .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px}
@@ -52,9 +55,24 @@ label{font-size:13px;color:#8b949e;display:block;margin-bottom:4px}
 .health-bar.good{background:#3fb950}
 .health-bar.warn{background:#d29922}
 .health-bar.bad{background:#f85149}
+.login-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:200;align-items:center;justify-content:center}
+.login-overlay.show{display:flex}
+.login-box{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:32px;width:360px;text-align:center}
+.login-box h2{color:#58a6ff;margin-bottom:20px;font-size:20px}
+.login-box .error{color:#f85149;font-size:12px;margin-top:8px}
+.token-value{font-family:monospace;font-size:12px;word-break:break-all}
 </style>
 </head>
 <body>
+<div class="login-overlay" id="loginOverlay">
+  <div class="login-box">
+    <h2>Zhongzhuan</h2>
+    <div class="form-group"><input id="loginUser" placeholder="用户名"></div>
+    <div class="form-group"><input id="loginPass" type="password" placeholder="密码"></div>
+    <button class="btn primary" onclick="doLogin()" style="width:100%">登录</button>
+    <div class="error" id="loginError"></div>
+  </div>
+</div>
 <header>
   <h1><span style="margin-right:8px">&#9881;</span>Zhongzhuan</h1>
   <div style="display:flex;align-items:center;gap:12px">
@@ -62,6 +80,7 @@ label{font-size:13px;color:#8b949e;display:block;margin-bottom:4px}
     <button class="btn" onclick="svcToggle()" id="svcBtn">启动</button>
     <button class="btn" onclick="exportConfig()">导出配置</button>
     <button class="btn" onclick="importConfig()">导入配置</button>
+    <button class="btn" onclick="doLogout()" id="logoutBtn" style="display:none">登出</button>
   </div>
 </header>
 <nav>
@@ -69,6 +88,7 @@ label{font-size:13px;color:#8b949e;display:block;margin-bottom:4px}
   <a onclick="showTab('models', event)">模型</a>
   <a onclick="showTab('keys', event)">Key池</a>
   <a onclick="showTab('groups', event)">分组</a>
+  <a onclick="showTab('tokens', event)" id="navTokens" style="display:none">令牌</a>
   <a onclick="showTab('logs', event)">日志</a>
 </nav>
 <main>
@@ -88,6 +108,10 @@ label{font-size:13px;color:#8b949e;display:block;margin-bottom:4px}
     <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>分组列表</h2><button class="btn primary" onclick="showGroupModal()">+ 添加分组</button></div>
     <table><thead><tr><th>名称</th><th>策略</th><th>成员</th><th>操作</th></tr></thead><tbody id="groupTable"></tbody></table></div>
   </div>
+  <div class="tab" id="tab-tokens">
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>访问令牌</h2><button class="btn primary" onclick="showTokenModal()">+ 创建令牌</button></div>
+    <table><thead><tr><th>标签</th><th>令牌值</th><th>启用</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="tokenTable"></tbody></table></div>
+  </div>
   <div class="tab" id="tab-logs">
     <div class="card"><h2>请求日志</h2><div id="logsTable"></div></div>
   </div>
@@ -101,6 +125,7 @@ let models = [];
 let keys = [];
 let groups = [];
 let loading = 0;
+let authToken = localStorage.getItem("zhongzhuan_token") || "";
 
 function showLoading(show) {
   if (show) {
@@ -115,20 +140,75 @@ function showLoading(show) {
 async function api(path, opts = {}) {
   try {
     showLoading(true);
-    const r = await fetch(API + path, {headers: {"Content-Type": "application/json"}, ...opts});
+    const headers = {"Content-Type": "application/json"};
+    if (authToken) headers["Authorization"] = "Bearer " + authToken;
+    const r = await fetch(API + path, {headers, ...opts});
     showLoading(false);
+    if (r.status === 401) {
+      authToken = "";
+      localStorage.removeItem("zhongzhuan_token");
+      checkAuth();
+      return null;
+    }
     if (!r.ok) {
       const err = await r.json().catch(() => ({error: {message: r.statusText}}));
       console.error("API error:", path, err);
-      alert("请求失败: " + (err.error?.message || r.statusText));
       return null;
     }
     return r.json();
   } catch(e) {
     console.error("API fetch error:", e);
-    alert("网络错误，请检查后端是否正常运行: " + e.message);
     return null;
   }
+}
+
+async function checkAuth() {
+  const s = await api("/api/auth/status");
+  if (!s) return;
+  if (s.auth_enabled) {
+    if (!authToken) {
+      document.getElementById("loginOverlay").classList.add("show");
+      return;
+    }
+    const me = await api("/api/auth/me");
+    if (!me || !me.username) {
+      authToken = "";
+      localStorage.removeItem("zhongzhuan_token");
+      document.getElementById("loginOverlay").classList.add("show");
+      return;
+    }
+    document.getElementById("logoutBtn").style.display = "";
+    document.getElementById("navTokens").style.display = "";
+  }
+  document.getElementById("loginOverlay").classList.remove("show");
+  loadOverview(); loadSvcStatus();
+}
+
+async function doLogin() {
+  const user = document.getElementById("loginUser").value;
+  const pass = document.getElementById("loginPass").value;
+  const r = await fetch(API + "/api/auth/login", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({username: user, password: pass})
+  });
+  if (!r.ok) {
+    document.getElementById("loginError").textContent = "用户名或密码错误";
+    return;
+  }
+  const data = await r.json();
+  authToken = data.token;
+  localStorage.setItem("zhongzhuan_token", authToken);
+  document.getElementById("loginError").textContent = "";
+  checkAuth();
+}
+
+function doLogout() {
+  authToken = "";
+  localStorage.removeItem("zhongzhuan_token");
+  document.getElementById("logoutBtn").style.display = "none";
+  document.getElementById("navTokens").style.display = "none";
+  checkAuth();
 }
 
 function showTab(name, evt) {
@@ -140,6 +220,7 @@ function showTab(name, evt) {
   if (name === "models") loadModels();
   if (name === "keys") { loadModels(); loadKeys(); }
   if (name === "groups") loadGroups();
+  if (name === "tokens") loadTokens();
   if (name === "logs") loadLogs();
 }
 
@@ -213,7 +294,6 @@ async function loadKeys() {
   const modelMap = {};
   models.forEach(m => modelMap[m.id] = m);
 
-  // Group keys by model_id; preserve model list order; include models with 0 keys.
   const groups = new Map();
   for (const m of models) groups.set(m.id, { model: m, keys: [] });
   for (const k of keys) {
@@ -269,10 +349,11 @@ function toggleKeyGroup(modelId) {
   localStorage.setItem("keyGroupCollapsed", JSON.stringify(collapsed));
   const header = document.querySelector('tr.group-header[data-model="' + modelId + '"]');
   if (!header) { loadKeys(); return; }
-  const allRows = Array.from(header.parentElement.children);
-  const startIdx = allRows.indexOf(header) + 1;
-  while (startIdx < allRows.length && !allRows[startIdx].classList.contains("group-header")) {
-    allRows[startIdx].remove();
+  let nextRow = header.nextElementSibling;
+  while (nextRow && !nextRow.classList.contains("group-header")) {
+    const toRemove = nextRow;
+    nextRow = nextRow.nextElementSibling;
+    toRemove.remove();
   }
   header.querySelector(".kg-arrow").textContent = collapsed[modelId] ? '\u25B6' : '\u25BC';
   if (!collapsed[modelId]) {
@@ -343,9 +424,9 @@ async function batchImportKeys() {
   const modelId = parseInt(document.getElementById("f_batch_model_id").value);
   const text = document.getElementById("f_batch_keys").value.trim();
   const defaultPriority = parseInt(document.getElementById("f_batch_priority").value)||0;
-  if (!text) { alert("请输入 Key 列表"); return; }
+  if (!text) { return; }
   
-  const lines = text.split('\n').filter(l => l.trim());
+  const lines = text.split('\\n').filter(l => l.trim());
   let success = 0;
   let failed = 0;
   
@@ -369,7 +450,6 @@ async function batchImportKeys() {
   }
   
   closeModal();
-  alert("导入完成: 成功 " + success + " 个, 失败 " + failed + " 个");
   loadKeys();
 }
 
@@ -408,6 +488,48 @@ async function addGroup() {
     members,
   })});
   if (r !== null) { closeModal(); loadGroups(); }
+}
+
+// Token management
+async function loadTokens() {
+  const d = await api("/api/tokens");
+  const tokens = d?.data || [];
+  document.getElementById("tokenTable").innerHTML = tokens.map(t => `
+    <tr>
+      <td>${esc(t.label)}</td>
+      <td><code class="token-value">${esc(t.token)}</code> <button class="btn small" onclick="copyToken('${t.token}')">复制</button></td>
+      <td>${t.enabled?"是":"否"} <button class="btn small" onclick="toggleToken(${t.id}, ${!t.enabled})">${t.enabled?"禁用":"启用"}</button></td>
+      <td>${new Date(t.created_at*1000).toLocaleString()}</td>
+      <td><button class="btn danger" onclick="delToken(${t.id})">删除</button></td>
+    </tr>`).join("");
+}
+
+function copyToken(token) {
+  navigator.clipboard.writeText(token).then(() => alert("已复制"));
+}
+
+async function showTokenModal() {
+  document.getElementById("modalContent").innerHTML = `
+    <h3>创建访问令牌</h3>
+    <div class="form-group"><label>标签</label><input id="f_tlabel" placeholder="例如：Trae专用"></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="addToken()">创建</button></div>`;
+  document.getElementById("modal").classList.add("show");
+}
+
+async function addToken() {
+  const label = document.getElementById("f_tlabel").value;
+  const r = await api("/api/tokens", {method:"POST", body:JSON.stringify({label})});
+  if (r !== null) { closeModal(); loadTokens(); }
+}
+
+async function delToken(id) {
+  const r = await api("/api/tokens/" + id, {method:"DELETE"});
+  if (r !== null) loadTokens();
+}
+
+async function toggleToken(id, enabled) {
+  await api("/api/tokens/" + id, {method:"PUT", body:JSON.stringify({enabled})});
+  loadTokens();
 }
 
 async function loadLogs() {
@@ -450,7 +572,9 @@ async function svcToggle() {
 
 async function exportConfig() {
   try {
-    const r = await fetch(API + "/api/export");
+    const headers = {};
+    if (authToken) headers["Authorization"] = "Bearer " + authToken;
+    const r = await fetch(API + "/api/export", {headers});
     if (!r.ok) throw new Error(r.statusText);
     const blob = await r.blob();
     const a = document.createElement("a");
@@ -458,7 +582,7 @@ async function exportConfig() {
     a.download = "zhongzhuan-export.zip";
     a.click();
   } catch(e) {
-    alert("导出失败: " + e.message);
+    console.error("导出失败", e);
   }
 }
 
@@ -468,25 +592,26 @@ function importConfig() {
   input.accept = ".zip";
   input.onchange = async () => {
     try {
-      const r = await fetch(API + "/api/import", {method:"POST", body: input.files[0]});
+      const headers = {};
+      if (authToken) headers["Authorization"] = "Bearer " + authToken;
+      const r = await fetch(API + "/api/import", {method:"POST", body: input.files[0], headers});
       if (!r.ok) throw new Error(r.statusText);
-      alert("导入完成");
       loadModels(); loadKeys(); loadGroups();
     } catch(e) {
-      alert("导入失败: " + e.message);
+      console.error("导入失败", e);
     }
   };
   input.click();
 }
 
-loadOverview(); loadSvcStatus();
+checkAuth();
 setInterval(loadOverview, 10000);
 </script>
 </body>
 </html>"""
 
 
-def mount_ui(app: web.Application) -> None:
+def mount_ui(app: web.Application, ctx) -> None:
     async def index(_request: web.Request) -> web.Response:
         return web.Response(text=INDEX_HTML, content_type="text/html", charset="utf-8")
     app.router.add_get("/", index)

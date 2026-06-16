@@ -11,6 +11,9 @@ from .api_stats import register_routes as register_stats
 from .api_logs import register_routes as register_logs
 from .api_service import register_routes as register_service
 from .api_export_import import register_routes as register_export
+from .api_auth import register_routes as register_auth
+from .api_tokens import register_routes as register_tokens
+from .auth import make_auth_middleware, init_jwt_secret, auth_enabled
 from .ui import mount_ui
 
 
@@ -36,6 +39,12 @@ class AdminServer:
                 )
         app.middlewares.append(error_middleware)
 
+        # JWT auth middleware
+        init_jwt_secret()
+        app.middlewares.append(make_auth_middleware())
+
+        # API routes
+        register_auth(app, self)
         register_models(app, self)
         register_keys(app, self)
         register_groups(app, self)
@@ -43,5 +52,8 @@ class AdminServer:
         register_logs(app, self)
         register_service(app, self)
         register_export(app, self)
-        mount_ui(app)
+        register_tokens(app, self)
+
+        # UI
+        mount_ui(app, self)
         return app

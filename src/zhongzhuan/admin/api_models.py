@@ -7,11 +7,12 @@ from ..store.models import (
     Model, create_model, get_model, get_model_by_id,
     list_models, update_model, delete_model,
 )
+from .notify import notify_proxy_reload
 
 
 def register_routes(app: web.Application, ctx) -> None:
     async def list_(request):
-        ms = list_models(ctx.store)
+        ms = await list_models(ctx.store)
         return web.json_response({"data": [_to_dict(m) for m in ms]})
 
     async def create(request):
@@ -24,7 +25,8 @@ def register_routes(app: web.Application, ctx) -> None:
             enabled=bool(data.get("enabled", True)),
             weight=int(data.get("weight", 1)),
         )
-        m = create_model(ctx.store, m)
+        m = await create_model(ctx.store, m)
+        await notify_proxy_reload()
         return web.json_response(_to_dict(m), status=201)
 
     async def update(request):
@@ -38,12 +40,14 @@ def register_routes(app: web.Application, ctx) -> None:
             enabled=bool(data.get("enabled", True)),
             weight=int(data.get("weight", 1)),
         )
-        update_model(ctx.store, model_id, m)
+        await update_model(ctx.store, model_id, m)
+        await notify_proxy_reload()
         return web.json_response({"ok": True})
 
     async def delete(request):
         model_id = int(request.match_info["id"])
-        delete_model(ctx.store, model_id)
+        await delete_model(ctx.store, model_id)
+        await notify_proxy_reload()
         return web.json_response({"ok": True})
 
     app.router.add_get("/api/models", list_)

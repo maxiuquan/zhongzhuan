@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from aiohttp import web
 
+from .auth import make_proxy_auth_middleware
 from .handler import make_handler
 from ..store import Store
 from ..upstream import UpstreamClient
@@ -18,6 +19,7 @@ class ProxyServer:
         models: list[dict] | None = None,
         groups: list[dict] | None = None,
         store: Store | None = None,
+        load_keys_fn=None,
     ) -> None:
         self.upstream_clients = upstream_clients
         self.api_key = api_key
@@ -26,9 +28,14 @@ class ProxyServer:
         self.models = models or []
         self.groups = groups or []
         self.store = store
+        self.load_keys_fn = load_keys_fn
 
     def app(self) -> web.Application:
         app = web.Application(client_max_size=64 * 1024 * 1024)
+
+        # Proxy access token auth middleware (VPS mode)
+        if self.store is not None:
+            app.middlewares.append(make_proxy_auth_middleware(self.store))
 
         # Build keys list
         the_keys = list(self.keys)
@@ -44,12 +51,20 @@ class ProxyServer:
         handler = make_handler(
             upstream_clients=self.upstream_clients, keys=the_keys,
             proxy_timeout=self.proxy_timeout, store=self.store,
+            load_keys_fn=self.load_keys_fn,
         )
         app.router.add_route("*", "/v1/{tail:.*}", handler)
         app.router.add_get("/healthz", lambda r: web.Response(text="ok"))
         app.router.add_get("/version", self._version)
         app.router.add_get("/v1/models", self._list_models)
+        app.router.add_post("/api/reload", lambda r: self._reload(r, handler))
         return app
+
+    async def _reload(self, _request: web.Request, handler) -> web.Response:
+        n = await handler.reload_keys()
+        from loguru import logger
+        logger.info(f"reloaded {n} keys from store")
+        return web.json_response({"ok": True, "keys": n})
 
     async def _version(self, _request: web.Request) -> web.Response:
         from zhongzhuan import __version__

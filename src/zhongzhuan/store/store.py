@@ -1,43 +1,56 @@
-"""SQLite storage."""
+"""Abstract Store base class + factory."""
 from __future__ import annotations
 
-import sqlite3
-import threading
+import os
 import time
+from abc import ABC, abstractmethod
 
-from .schema import SCHEMA
 
+class Store(ABC):
+    """Cross-platform async storage interface."""
 
-class Store:
-    """Single-file SQLite store (WAL mode)."""
+    @abstractmethod
+    async def execute(self, sql: str, params: tuple | None = None) -> int:
+        """Execute a write statement. Returns lastrowid."""
+        ...
 
-    def __init__(self, path: str) -> None:
-        self.path = path
-        self._lock = threading.RLock()
-        self._conn: sqlite3.Connection | None = None
-        self._open()
+    @abstractmethod
+    async def fetchone(self, sql: str, params: tuple | None = None) -> tuple | None:
+        ...
 
-    def _open(self) -> None:
-        self._conn = sqlite3.connect(
-            self.path, check_same_thread=False, isolation_level=None,
-        )
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.executescript(SCHEMA)
+    @abstractmethod
+    async def fetchall(self, sql: str, params: tuple | None = None) -> list[tuple]:
+        ...
 
-    def connect(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._open()
-        assert self._conn is not None
-        return self._conn
-
-    def close(self) -> None:
-        with self._lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
+    @abstractmethod
+    async def close(self) -> None:
+        ...
 
     @staticmethod
     def now() -> int:
         return int(time.time())
+
+
+async def create_store(config) -> Store:
+    """Factory: create TiDBStore or SqliteStore based on config/env."""
+    from loguru import logger
+
+    tidb_host = os.getenv("ZHONGZHUAN_TIDB_HOST", "")
+
+    if config.storage.backend == "tidb" or tidb_host:
+        from .tidb_store import TiDBStore
+        store = await TiDBStore.create(
+            host=tidb_host or os.getenv("ZHONGZHUAN_TIDB_HOST", ""),
+            port=int(os.getenv("ZHONGZHUAN_TIDB_PORT", "4000")),
+            user=os.getenv("ZHONGZHUAN_TIDB_USER", ""),
+            password=os.getenv("ZHONGZHUAN_TIDB_PASSWORD", ""),
+            database=os.getenv("ZHONGZHUAN_TIDB_DATABASE", "zhongzhuan"),
+            ssl=os.getenv("ZHONGZHUAN_TIDB_SSL", "true") == "true",
+            pool_size=int(os.getenv("ZHONGZHUAN_TIDB_POOL_SIZE", "5")),
+        )
+        logger.info("使用 TiDB Cloud 存储")
+        return store
+
+    from .sqlite_store import SqliteStore
+    logger.info("使用 SQLite 本地存储")
+    return await SqliteStore.create(config.storage.sqlite_db_path)

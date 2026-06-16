@@ -1,4 +1,4 @@
-"""Model CRUD."""
+"""Model CRUD (async)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -28,51 +28,50 @@ def _row(r: tuple) -> Model:
     )
 
 
-def create_model(s: Store, m: Model) -> Model:
+async def create_model(s: Store, m: Model) -> Model:
     now = Store.now()
-    cur = s.connect().execute(
+    m.id = await s.execute(
         """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, created_at, updated_at)
            VALUES(?,?,?,?,?,?,?,?,?)""",
         (m.name, m.upstream_base, m.upstream_model, m.rpm_limit, m.tpm_limit,
          int(m.enabled), m.weight, now, now),
     )
-    m.id = cur.lastrowid
     m.created_at = now
     m.updated_at = now
     return m
 
 
-def get_model(s: Store, name: str) -> Model | None:
-    r = s.connect().execute(
+async def get_model(s: Store, name: str) -> Model | None:
+    r = await s.fetchone(
         "SELECT id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,created_at,updated_at FROM models WHERE name=?",
         (name,),
-    ).fetchone()
+    )
     return _row(r) if r else None
 
 
-def get_model_by_id(s: Store, model_id: int) -> Model | None:
-    r = s.connect().execute(
+async def get_model_by_id(s: Store, model_id: int) -> Model | None:
+    r = await s.fetchone(
         "SELECT id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,created_at,updated_at FROM models WHERE id=?",
         (model_id,),
-    ).fetchone()
+    )
     return _row(r) if r else None
 
 
-def list_models(s: Store) -> list[Model]:
-    rows = s.connect().execute(
+async def list_models(s: Store) -> list[Model]:
+    rows = await s.fetchall(
         "SELECT id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,created_at,updated_at FROM models ORDER BY id"
-    ).fetchall()
+    )
     return [_row(r) for r in rows]
 
 
-def update_model(s: Store, model_id: int, m: Model) -> None:
+async def update_model(s: Store, model_id: int, m: Model) -> None:
     now = Store.now()
-    s.connect().execute(
+    await s.execute(
         """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, updated_at=? WHERE id=?""",
         (m.name, m.upstream_base, m.upstream_model, m.rpm_limit, m.tpm_limit,
          int(m.enabled), m.weight, now, model_id),
     )
 
 
-def delete_model(s: Store, model_id: int) -> None:
-    s.connect().execute("DELETE FROM models WHERE id=?", (model_id,))
+async def delete_model(s: Store, model_id: int) -> None:
+    await s.execute("DELETE FROM models WHERE id=?", (model_id,))

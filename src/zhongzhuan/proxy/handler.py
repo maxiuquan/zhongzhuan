@@ -35,6 +35,7 @@ class Handler:
         keys: list[KeyHealth],
         proxy_timeout: float,
         store: Store | None = None,
+        load_keys_fn=None,
     ) -> None:
         if not keys:
             raise ValueError("keys must not be empty")
@@ -42,6 +43,15 @@ class Handler:
         self.keys = keys
         self.proxy_timeout = proxy_timeout
         self.store = store
+        self.load_keys_fn = load_keys_fn
+
+    async def reload_keys(self) -> int:
+        """Reload keys from the store and update self.keys. Returns new count."""
+        if self.load_keys_fn is None:
+            return len(self.keys)
+        new_keys = await self.load_keys_fn()
+        self.keys = new_keys
+        return len(new_keys)
 
     async def __call__(self, request: web.Request) -> web.StreamResponse:
         # Handle /v1/models locally: return the list of custom model names
@@ -91,11 +101,22 @@ class Handler:
         _req_id = str(uuid.uuid4())[:8]
         _lg.info(f"[{_req_id}] processing {request.method} {path} model={requested_model!r} stream={is_stream}")
 
+        # Filter keys by requested model (if model name is specified)
+        candidates = self.keys
+        if requested_model:
+            candidates = [k for k in self.keys if k.model_name == requested_model]
+            if not candidates:
+                _lg.error(f"[{_req_id}] no keys configured for model {requested_model!r}")
+                return web.json_response(
+                    {"error": {"message": f"no keys configured for model '{requested_model}'", "type": "model_not_found"}},
+                    status=503,
+                )
+
         tried: set[int] = set()
         last_error: tuple[int, bytes] | None = None
         attempt = 0
-        for _ in range(len(self.keys)):
-            k = pick_key([x for x in self.keys if x.key_id not in tried])
+        for _ in range(len(candidates)):
+            k = pick_key([x for x in candidates if x.key_id not in tried])
             if k is None:
                 _lg.warning(f"[{_req_id}] no more available keys to try (tried={len(tried)})")
                 break
@@ -170,8 +191,8 @@ class Handler:
 
             # Log successful request
             if self.store:
-                log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
-                            key_id=k.key_id, status=resp.status_code, latency_ms=0)
+                await log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
+                                  key_id=k.key_id, status=resp.status_code, latency_ms=0)
 
             return web.Response(status=resp.status_code, body=data, headers=resp_headers)
 
@@ -180,8 +201,8 @@ class Handler:
             status, body = last_error
             # Log failed request
             if self.store:
-                log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
-                            status=status, latency_ms=0, error="upstream failed")
+                await log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
+                                  status=status, latency_ms=0, error="upstream failed")
             return web.Response(status=status, body=body)
         return web.json_response(
             {"error": {"message": "upstream failed after retries", "type": "upstream_error"}},
@@ -209,8 +230,19 @@ class Handler:
         last_error: tuple[int, bytes] | None = None
         attempt = 0
 
-        for _ in range(len(self.keys)):
-            k = pick_key([x for x in self.keys if x.key_id not in tried])
+        # Filter keys by requested model
+        candidates = self.keys
+        if requested_model:
+            candidates = [k for k in self.keys if k.model_name == requested_model]
+            if not candidates:
+                _lg.error(f"[{_req_id}] streaming: no keys configured for model {requested_model!r}")
+                return web.json_response(
+                    {"error": {"message": f"no keys configured for model '{requested_model}'", "type": "model_not_found"}},
+                    status=503,
+                )
+
+        for _ in range(len(candidates)):
+            k = pick_key([x for x in candidates if x.key_id not in tried])
             if k is None:
                 _lg.warning(f"[{_req_id}] streaming: no more available keys (tried={len(tried)})")
                 break
@@ -272,9 +304,9 @@ class Handler:
                     mark_success(k)
 
                     if self.store:
-                        log_request(self.store, client_ip=request.remote,
-                                    model_name=requested_model or "",
-                                    key_id=k.key_id, status=200, latency_ms=0)
+                        await log_request(self.store, client_ip=request.remote,
+                                          model_name=requested_model or "",
+                                          key_id=k.key_id, status=200, latency_ms=0)
                     return resp
             except Exception as e:
                 mark_failure(k)
@@ -288,10 +320,10 @@ class Handler:
         # All keys failed
         _lg.error(f"[{_req_id}] streaming: all {attempt} key(s) failed")
         if self.store:
-            log_request(self.store, client_ip=request.remote,
-                        model_name=requested_model or "",
-                        status=last_error[0] if last_error else 502,
-                        latency_ms=0, error="upstream failed")
+            await log_request(self.store, client_ip=request.remote,
+                              model_name=requested_model or "",
+                              status=last_error[0] if last_error else 502,
+                              latency_ms=0, error="upstream failed")
         if last_error:
             status, err_body = last_error
             return web.Response(status=status, body=err_body)
@@ -313,7 +345,7 @@ class Handler:
         data: list[dict] = []
         if self.store is not None:
             from ..store.models import list_models as _list_models_db
-            for m in _list_models_db(self.store):
+            for m in await _list_models_db(self.store):
                 if m.name in seen:
                     continue
                 seen.add(m.name)
@@ -337,5 +369,5 @@ class Handler:
         return web.json_response({"object": "list", "data": data})
 
 
-def make_handler(upstream_clients, keys, proxy_timeout, store=None) -> Handler:
-    return Handler(upstream_clients=upstream_clients, keys=keys, proxy_timeout=proxy_timeout, store=store)
+def make_handler(upstream_clients, keys, proxy_timeout, store=None, load_keys_fn=None) -> Handler:
+    return Handler(upstream_clients=upstream_clients, keys=keys, proxy_timeout=proxy_timeout, store=store, load_keys_fn=load_keys_fn)

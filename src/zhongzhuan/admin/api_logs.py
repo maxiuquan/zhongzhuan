@@ -12,7 +12,7 @@ def register_routes(app: web.Application, ctx) -> None:
         limit = int(request.query.get("limit", 50))
         model = request.query.get("model")
         status = request.query.get("status")
-        result = list_logs(
+        result = await list_logs(
             ctx.store, cursor=cursor, limit=limit,
             model=model, status=int(status) if status else None,
         )

@@ -1,10 +1,11 @@
-"""Configuration model: YAML loading + defaults."""
+"""Configuration model: YAML loading + .env override + defaults."""
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
 
 import yaml
+from dotenv import load_dotenv
 
 
 @dataclass
@@ -38,8 +39,17 @@ class LimitsConfig:
 
 @dataclass
 class StorageConfig:
-    db_path: str = "data.db"
+    backend: str = "auto"  # auto | sqlite | tidb
+    sqlite_db_path: str = "data.db"
+    db_path: str = ""  # alias for sqlite_db_path (YAML compat)
     log_dir: str = "logs"
+
+    def __post_init__(self):
+        # db_path is an alias for sqlite_db_path in config.yaml
+        if self.db_path:
+            self.sqlite_db_path = self.db_path
+        elif self.sqlite_db_path:
+            self.db_path = self.sqlite_db_path
 
 
 @dataclass
@@ -73,12 +83,28 @@ def _merge(dc, data: dict) -> None:
 
 
 def load_config(path: str | None) -> Config:
-    """Load YAML config file; returns defaults if not found."""
+    """Load YAML config file; returns defaults if not found. .env overrides take priority."""
+    load_dotenv(".env")
+
     cfg = default_config()
     if path and os.path.isfile(path):
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
         _merge(cfg, data)
+
+    # .env overrides for server ports
+    proxy_port = os.getenv("ZHONGZHUAN_PROXY_PORT")
+    if proxy_port:
+        cfg.server.proxy.port = int(proxy_port)
+    admin_port = os.getenv("ZHONGZHUAN_ADMIN_PORT")
+    if admin_port:
+        cfg.server.admin.port = int(admin_port)
+
+    # .env override for storage backend
+    db_backend = os.getenv("ZHONGZHUAN_TIDB_HOST")
+    if db_backend:
+        cfg.storage.backend = "tidb"
+
     return cfg
 
 
