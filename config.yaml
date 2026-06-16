@@ -1,0 +1,13 @@
+server:
+  proxy:
+    host: 127.0.0.1
+    port: 8088
+  admin:
+    host: 127.0.0.1
+    port: 8089
+limits:
+  global_concurrent: 64
+  default_rpm_per_key: 60
+storage:
+  db_path: f:\xiangmu\zhongzhuan\data.db
+  log_dir: logs

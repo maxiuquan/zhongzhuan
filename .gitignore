@@ -1,0 +1,14 @@
+/dist/
+/build/
+*.exe
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.log
+data/
+logs/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
