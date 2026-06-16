@@ -239,8 +239,7 @@ async def run_foreground(
 def handle_service_commands(args: argparse.Namespace) -> int | None:
     """Handle install/uninstall/start/stop/autostart. Returns None if no service command."""
     if sys.platform != "win32":
-        print("Service commands are only supported on Windows.", file=sys.stderr)
-        return 0
+        return None
 
     from zhongzhuan.config import load_config
     cfg = load_config(args.config)
