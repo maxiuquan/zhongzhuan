@@ -1,9 +1,11 @@
-"""Windows service control via sc.exe."""
+"""Windows service control via sc.exe (Windows) or no-op (Linux)."""
 from __future__ import annotations
 
 import subprocess
 import sys
-import winreg
+
+if sys.platform == "win32":
+    import winreg
 
 
 def _sc(*args: str) -> tuple[int, str, str]:
@@ -13,6 +15,8 @@ def _sc(*args: str) -> tuple[int, str, str]:
 
 def install(svc_name: str, display_name: str, auto_start: bool = True) -> None:
     """Register as Windows service (requires admin)."""
+    if sys.platform != "win32":
+        raise OSError("Windows service not supported on this platform")
     exe = sys.executable
     if getattr(sys, "frozen", False):
         bin_path = f'"{exe}" --service'
@@ -29,20 +33,28 @@ def install(svc_name: str, display_name: str, auto_start: bool = True) -> None:
 
 def uninstall(svc_name: str) -> None:
     """Remove Windows service."""
+    if sys.platform != "win32":
+        return
     _sc("stop", svc_name)
     _sc("delete", svc_name)
 
 
 def start(svc_name: str) -> None:
+    if sys.platform != "win32":
+        return
     _sc("start", svc_name)
 
 
 def stop(svc_name: str) -> None:
+    if sys.platform != "win32":
+        return
     _sc("stop", svc_name)
 
 
 def status(svc_name: str) -> str:
     """Return 'running', 'stopped', or 'not_installed'."""
+    if sys.platform != "win32":
+        return "not_installed"
     code, out, _ = _sc("query", svc_name)
     if code != 0:
         return "not_installed"
@@ -54,12 +66,16 @@ def status(svc_name: str) -> str:
 
 
 def set_autostart(svc_name: str, enabled: bool) -> None:
+    if sys.platform != "win32":
+        return
     start_type = "auto" if enabled else "demand"
     _sc("config", svc_name, f"start={start_type}")
 
 
 def register_user_autostart(exe_path: str, svc_name: str) -> None:
-    """Register HKCU Run key for user-level auto-start (green version)."""
+    """Register HKCU Run key for user-level auto-start (Windows only)."""
+    if sys.platform != "win32":
+        return
     try:
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
@@ -73,7 +89,9 @@ def register_user_autostart(exe_path: str, svc_name: str) -> None:
 
 
 def unregister_user_autostart(svc_name: str) -> None:
-    """Remove HKCU Run key."""
+    """Remove HKCU Run key (Windows only)."""
+    if sys.platform != "win32":
+        return
     try:
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
