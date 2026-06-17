@@ -233,11 +233,14 @@ class Handler:
         """SSE streaming pass-through with multi-key retry.
 
         Sends 200+SSE headers IMMEDIATELY to prevent client timeout,
-        then finds a working upstream key and forwards the stream.
-        If all keys fail, sends the error as an SSE event instead of 502.
+        then keeps retrying upstream keys until one succeeds.
+        Sends SSE keepalive pings during retry waits to keep the
+        connection alive. Never returns errors — retries indefinitely
+        to avoid interrupting the client's workflow.
         """
         from loguru import logger as _lg
         import uuid
+        import asyncio
         _req_id = str(uuid.uuid4())[:8]
 
         # --- Send 200+SSE headers immediately ---
@@ -261,95 +264,113 @@ class Handler:
             candidates = [k for k in self.keys if k.model_name == requested_model]
             if not candidates:
                 _lg.error(f"[{_req_id}] streaming: no keys configured for model {requested_model!r}")
-                err = json.dumps({"error": {"message": f"no keys configured for model '{requested_model}'", "type": "model_not_found"}})
+                return resp  # 200 with empty SSE stream, no error
+
+        # --- Start keepalive task (sends SSE comment every 10s to prevent idle timeout) ---
+        keepalive_running = True
+
+        async def _keepalive():
+            while keepalive_running:
                 try:
-                    await resp.write(f"data: {err}\n\ndata: [DONE]\n\n".encode())
+                    await asyncio.sleep(10)
+                    # SSE comment lines are ignored by clients but reset idle timeout
+                    await resp.write(b': keepalive\n\n')
+                except (ConnectionResetError, ConnectionError, OSError, asyncio.CancelledError):
+                    break
                 except Exception:
-                    pass
-                return resp
+                    break
 
-        # --- Try each key, skip rate-limited or failed ones ---
-        tried: set[int] = set()
-        attempt = 0
-        for _ in range(len(candidates)):
-            k = pick_key([x for x in candidates if x.key_id not in tried])
-            if k is None:
-                _lg.warning(f"[{_req_id}] streaming: no more available keys (tried={len(tried)})")
-                break
-            tried.add(k.key_id)
-            attempt += 1
+        keepalive_task = asyncio.create_task(_keepalive())
 
-            if k.window is not None and not k.window.allow(1):
-                _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} rate-limited (rpm={k.rpm_limit}), skipping")
-                continue
-            _lg.info(f"[{_req_id}] streaming: attempt={attempt} key_id={k.key_id} model={k.model_name!r} upstream={k.upstream_base!r}")
-
-            client = self.upstream_clients.get(k.upstream_base)
-            if client is None:
-                _lg.error(f"[{_req_id}] streaming: key_id={k.key_id} upstream_base={k.upstream_base!r} no matching client, skipping")
-                continue
-
-            # Swap model name
-            final_body = body
-            if requested_model and k.upstream_model and k.model_name and requested_model == k.model_name:
-                final_body = _swap_model_name(body, requested_model, k.upstream_model)
-                _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} swapped model {requested_model!r} -> {k.upstream_model!r}")
-
-            headers = dict(base_headers)
-            headers["Authorization"] = f"Bearer {k.api_key}"
-            _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} using key {k.api_key[:8]}...{k.api_key[-4:]}")
-            headers["Accept-Encoding"] = "identity"
-            if final_body is not body:
-                headers["Content-Length"] = str(len(final_body))
-
-            try:
-                _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} connecting to {path}")
-                async for upstream_resp in client.stream(
-                    request.method, path, headers=headers, content=final_body,
-                ):
-                    if upstream_resp.status_code >= 500 or upstream_resp.status_code == 429:
-                        mark_failure(k)
-                        _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} upstream returned {upstream_resp.status_code}, trying next key")
-                        break  # Try next key
-
-                    # Forward upstream chunks to the already-open SSE stream
-                    _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} upstream ready, forwarding SSE stream")
-                    chunk_count = 0
-                    try:
-                        async for chunk in upstream_resp.aiter_raw():
-                            if chunk:
-                                await resp.write(chunk)
-                                chunk_count += 1
-                    except (ConnectionResetError, ConnectionError, OSError):
-                        _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected during stream")
-                    _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)")
-                    mark_success(k)
-
-                    if self.store:
-                        await log_request(self.store, client_ip=request.remote,
-                                          model_name=requested_model or "",
-                                          key_id=k.key_id, status=200, latency_ms=0)
-                    return resp
-            except (ConnectionResetError, ConnectionError, OSError):
-                # Client already disconnected — 200 was already sent, just stop
-                _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected")
-                return resp
-            except Exception as e:
-                mark_failure(k)
-                _lg.error(f"[{_req_id}] streaming: key_id={k.key_id} exception: {type(e).__name__}: {e}")
-                continue  # Try next key
-
-        # All keys failed — send error as SSE event, NOT as HTTP 502
-        _lg.error(f"[{_req_id}] streaming: all {attempt} key(s) failed")
-        if self.store:
-            await log_request(self.store, client_ip=request.remote,
-                              model_name=requested_model or "",
-                              status=200, latency_ms=0, error="all upstream keys failed")
-        err = json.dumps({"error": {"message": "all upstream keys failed after retries", "type": "upstream_error"}})
         try:
-            await resp.write(f"data: {err}\n\ndata: [DONE]\n\n".encode())
-        except Exception:
+            # --- Retry loop: keeps trying until a key works or client disconnects ---
+            retry_delay = 2.0
+            while True:
+                tried: set[int] = set()
+                attempt = 0
+                for _ in range(len(candidates)):
+                    k = pick_key([x for x in candidates if x.key_id not in tried])
+                    if k is None:
+                        break
+                    tried.add(k.key_id)
+                    attempt += 1
+
+                    if k.window is not None and not k.window.allow(1):
+                        continue
+
+                    client = self.upstream_clients.get(k.upstream_base)
+                    if client is None:
+                        continue
+
+                    # Swap model name
+                    final_body = body
+                    if requested_model and k.upstream_model and k.model_name and requested_model == k.model_name:
+                        final_body = _swap_model_name(body, requested_model, k.upstream_model)
+
+                    headers = dict(base_headers)
+                    headers["Authorization"] = f"Bearer {k.api_key}"
+                    headers["Accept-Encoding"] = "identity"
+                    if final_body is not body:
+                        headers["Content-Length"] = str(len(final_body))
+
+                    try:
+                        async for upstream_resp in client.stream(
+                            request.method, path, headers=headers, content=final_body,
+                        ):
+                            if upstream_resp.status_code >= 500 or upstream_resp.status_code == 429:
+                                mark_failure(k)
+                                break
+
+                            # Success! Cancel keepalive and forward stream
+                            keepalive_running = False
+                            keepalive_task.cancel()
+                            try:
+                                await keepalive_task
+                            except (asyncio.CancelledError, Exception):
+                                pass
+
+                            _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} upstream ready, forwarding SSE stream")
+                            chunk_count = 0
+                            try:
+                                async for chunk in upstream_resp.aiter_raw():
+                                    if chunk:
+                                        await resp.write(chunk)
+                                        chunk_count += 1
+                            except (ConnectionResetError, ConnectionError, OSError):
+                                _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected during stream")
+                            _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)")
+                            mark_success(k)
+
+                            if self.store:
+                                await log_request(self.store, client_ip=request.remote,
+                                                  model_name=requested_model or "",
+                                                  key_id=k.key_id, status=200, latency_ms=0)
+                            return resp
+                    except (ConnectionResetError, ConnectionError, OSError):
+                        _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected")
+                        return resp
+                    except Exception as e:
+                        mark_failure(k)
+                        _lg.error(f"[{_req_id}] streaming: key_id={k.key_id} exception: {type(e).__name__}: {e}")
+                        continue
+
+                # All keys in this round failed — wait with backoff, then retry
+                _lg.warning(f"[{_req_id}] streaming: all {attempt} key(s) failed this round, retrying in {retry_delay:.0f}s")
+                try:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 1.5, 30.0)
+                except (asyncio.CancelledError, Exception):
+                    break
+
+        except asyncio.CancelledError:
             pass
+        finally:
+            keepalive_running = False
+            try:
+                keepalive_task.cancel()
+            except Exception:
+                pass
+
         return resp
 
     async def _list_models(self) -> web.Response:
