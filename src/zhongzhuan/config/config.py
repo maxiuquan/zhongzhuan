@@ -111,6 +111,11 @@ def load_config(path: str | None) -> Config:
     if db_backend:
         cfg.storage.backend = "tidb"
 
+    # .env override for proxy request timeout
+    timeout = os.getenv("ZHONGZHUAN_PROXY_REQUEST_TIMEOUT")
+    if timeout:
+        cfg.limits.proxy_request_timeout = int(timeout)
+
     return cfg
 
 
