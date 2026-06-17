@@ -175,8 +175,8 @@ class Handler:
             except Exception as e:
                 mark_failure(k)
                 _lg.error(f"[{_req_id}] key_id={k.key_id} request exception: {type(e).__name__}: {e}")
-                # Use a structured error for the last_error so the client sees the real reason
-                last_error = (502, json.dumps({
+                # Upstream unreachable — return 503 (Service Unavailable), never 502
+                last_error = (503, json.dumps({
                     "error": {"message": f"upstream unreachable: {type(e).__name__}: {e}", "type": "upstream_error"}
                 }).encode())
                 continue
@@ -218,8 +218,8 @@ class Handler:
                                   status=status, latency_ms=0, error="upstream failed")
             return web.Response(status=status, body=body)
         return web.json_response(
-            {"error": {"message": "upstream failed after retries", "type": "upstream_error"}},
-            status=502,
+            {"error": {"message": "all upstream keys failed after retries", "type": "upstream_error"}},
+            status=503,
         )
 
     async def _stream_proxy(
