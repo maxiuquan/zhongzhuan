@@ -149,6 +149,12 @@ class Handler:
                 headers["Content-Length"] = str(len(final_body))
 
             try:
+                # Check if client is still connected before making expensive upstream calls
+                transport = request.transport
+                if transport is not None and transport.is_closing():
+                    _lg.warning(f"[{_req_id}] client transport closing before upstream request, aborting")
+                    return web.Response(status=499, text="Client Closed Request")
+
                 if is_stream:
                     full_url = f"{k.upstream_base.rstrip('/')}{path}"
                     _lg.info(f"[{_req_id}] key_id={k.key_id} streaming request to {full_url}")
@@ -159,6 +165,13 @@ class Handler:
                 resp = await client.request(
                     request.method, path, headers=headers, content=final_body,
                 )
+            except (ConnectionResetError, ConnectionError, OSError) as e:
+                # Client-side disconnect (timeout or cancel).
+                # This is NOT an upstream failure — do NOT mark the key as failed.
+                transport = request.transport
+                _lg.warning(f"[{_req_id}] key_id={k.key_id} client disconnected: {type(e).__name__}: {e} "
+                            f"transport_closing={transport is not None and transport.is_closing()}")
+                return web.Response(status=499, text="Client Closed Request")
             except Exception as e:
                 mark_failure(k)
                 _lg.error(f"[{_req_id}] key_id={k.key_id} request exception: {type(e).__name__}: {e}")
@@ -219,28 +232,45 @@ class Handler:
     ) -> web.StreamResponse:
         """SSE streaming pass-through with multi-key retry.
 
-        Tries each key in sequence. Only sends 200 to the client after
-        the upstream has confirmed it can handle the request.
+        Sends 200+SSE headers IMMEDIATELY to prevent client timeout,
+        then finds a working upstream key and forwards the stream.
+        If all keys fail, sends the error as an SSE event instead of 502.
         """
         from loguru import logger as _lg
         import uuid
         _req_id = str(uuid.uuid4())[:8]
 
-        tried: set[int] = set()
-        last_error: tuple[int, bytes] | None = None
-        attempt = 0
+        # --- Send 200+SSE headers immediately ---
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        try:
+            await resp.prepare(request)
+        except (ConnectionResetError, ConnectionError, OSError):
+            _lg.warning(f"[{_req_id}] streaming: client already disconnected before SSE prep")
+            return resp
 
-        # Filter keys by requested model
+        # --- Filter keys by requested model ---
         candidates = self.keys
         if requested_model:
             candidates = [k for k in self.keys if k.model_name == requested_model]
             if not candidates:
                 _lg.error(f"[{_req_id}] streaming: no keys configured for model {requested_model!r}")
-                return web.json_response(
-                    {"error": {"message": f"no keys configured for model '{requested_model}'", "type": "model_not_found"}},
-                    status=503,
-                )
+                err = json.dumps({"error": {"message": f"no keys configured for model '{requested_model}'", "type": "model_not_found"}})
+                try:
+                    await resp.write(f"data: {err}\n\ndata: [DONE]\n\n".encode())
+                except Exception:
+                    pass
+                return resp
 
+        # --- Try each key, skip rate-limited or failed ones ---
+        tried: set[int] = set()
+        attempt = 0
         for _ in range(len(candidates)):
             k = pick_key([x for x in candidates if x.key_id not in tried])
             if k is None:
@@ -280,26 +310,18 @@ class Handler:
                     if upstream_resp.status_code >= 500 or upstream_resp.status_code == 429:
                         mark_failure(k)
                         _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} upstream returned {upstream_resp.status_code}, trying next key")
-                        last_error = (upstream_resp.status_code, await upstream_resp.aread())
                         break  # Try next key
 
-                    # Upstream is good — now send 200 and start streaming
-                    _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} upstream ready, starting SSE stream")
-                    resp = web.StreamResponse(
-                        status=200,
-                        headers={
-                            "Content-Type": "text/event-stream",
-                            "Cache-Control": "no-cache",
-                            "Connection": "keep-alive",
-                        },
-                    )
-                    await resp.prepare(request)
-
+                    # Forward upstream chunks to the already-open SSE stream
+                    _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} upstream ready, forwarding SSE stream")
                     chunk_count = 0
-                    async for chunk in upstream_resp.aiter_raw():
-                        if chunk:
-                            await resp.write(chunk)
-                            chunk_count += 1
+                    try:
+                        async for chunk in upstream_resp.aiter_raw():
+                            if chunk:
+                                await resp.write(chunk)
+                                chunk_count += 1
+                    except (ConnectionResetError, ConnectionError, OSError):
+                        _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected during stream")
                     _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)")
                     mark_success(k)
 
@@ -308,29 +330,27 @@ class Handler:
                                           model_name=requested_model or "",
                                           key_id=k.key_id, status=200, latency_ms=0)
                     return resp
+            except (ConnectionResetError, ConnectionError, OSError):
+                # Client already disconnected — 200 was already sent, just stop
+                _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected")
+                return resp
             except Exception as e:
                 mark_failure(k)
                 _lg.error(f"[{_req_id}] streaming: key_id={k.key_id} exception: {type(e).__name__}: {e}")
-                last_error = (502, json.dumps({
-                    "error": {"message": f"upstream unreachable: {type(e).__name__}: {e}",
-                              "type": "upstream_error"}
-                }).encode())
                 continue  # Try next key
 
-        # All keys failed
+        # All keys failed — send error as SSE event, NOT as HTTP 502
         _lg.error(f"[{_req_id}] streaming: all {attempt} key(s) failed")
         if self.store:
             await log_request(self.store, client_ip=request.remote,
                               model_name=requested_model or "",
-                              status=last_error[0] if last_error else 502,
-                              latency_ms=0, error="upstream failed")
-        if last_error:
-            status, err_body = last_error
-            return web.Response(status=status, body=err_body)
-        return web.json_response(
-            {"error": {"message": "upstream failed after retries", "type": "upstream_error"}},
-            status=502,
-        )
+                              status=200, latency_ms=0, error="all upstream keys failed")
+        err = json.dumps({"error": {"message": "all upstream keys failed after retries", "type": "upstream_error"}})
+        try:
+            await resp.write(f"data: {err}\n\ndata: [DONE]\n\n".encode())
+        except Exception:
+            pass
+        return resp
 
     async def _list_models(self) -> web.Response:
         """Return the list of custom model names configured in the admin UI.
