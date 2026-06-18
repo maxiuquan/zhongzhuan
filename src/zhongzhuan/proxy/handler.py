@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 
 from aiohttp import web
 
@@ -156,7 +157,13 @@ class Handler:
                     return web.Response(status=499, text="Client Closed Request")
 
                 if is_stream:
-                    full_url = f"{k.upstream_base.rstrip('/')}{path}"
+                    # Strip upstream_base's path prefix from the request path
+                    # to avoid duplication (e.g. base=/v1 + path=/v1/chat/completions)
+                    base_path = urllib.parse.urlparse(k.upstream_base).path.rstrip('/')
+                    request_path = path
+                    if base_path and request_path.startswith(base_path):
+                        request_path = request_path[len(base_path):]
+                    full_url = k.upstream_base.rstrip('/') + request_path
                     _lg.info(f"[{_req_id}] key_id={k.key_id} streaming request to {full_url}")
                     return await self._stream_proxy(
                         request, path, base_headers, body, requested_model,
