@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.parse
 
 from aiohttp import web
@@ -72,6 +73,7 @@ class Handler:
         return len(new_keys)
 
     async def __call__(self, request: web.Request) -> web.StreamResponse:
+        _request_start = time.time()
         # Handle /v1/models locally: return the list of custom model names
         if request.method == "GET" and request.path == "/v1/models":
             return await self._list_models()
@@ -228,8 +230,9 @@ class Handler:
 
             # Log successful request
             if self.store:
+                latency_ms = int((time.time() - _request_start) * 1000)
                 await log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
-                                  key_id=k.key_id, status=resp.status_code, latency_ms=0)
+                                  key_id=k.key_id, status=resp.status_code, latency_ms=latency_ms)
 
             return web.Response(status=resp.status_code, body=data, headers=resp_headers)
 
@@ -238,8 +241,9 @@ class Handler:
             status, body = last_error
             # Log failed request
             if self.store:
+                latency_ms = int((time.time() - _request_start) * 1000)
                 await log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
-                                  status=status, latency_ms=0, error="upstream failed")
+                                  status=status, latency_ms=latency_ms, error="upstream failed")
             return web.Response(status=status, body=body)
         return web.json_response(
             {"error": {"message": "all upstream keys failed after retries", "type": "upstream_error"}},
@@ -366,9 +370,10 @@ class Handler:
                             mark_success(k)
 
                             if self.store:
+                                latency_ms = int((time.time() - _request_start) * 1000)
                                 await log_request(self.store, client_ip=request.remote,
                                                   model_name=requested_model or "",
-                                                  key_id=k.key_id, status=200, latency_ms=0)
+                                                  key_id=k.key_id, status=200, latency_ms=latency_ms)
                             return resp
                     except (ConnectionResetError, ConnectionError, OSError):
                         _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected")
