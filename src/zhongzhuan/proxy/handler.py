@@ -46,6 +46,23 @@ class Handler:
         self.store = store
         self.load_keys_fn = load_keys_fn
 
+    async def _ensure_client(self, upstream_base: str) -> UpstreamClient | None:
+        """Lazy-initialize upstream client if not already registered."""
+        client = self.upstream_clients.get(upstream_base)
+        if client is not None:
+            return client
+        try:
+            from loguru import logger as _lg
+            _lg.info(f"lazy-creating upstream client for {upstream_base!r}")
+            client = UpstreamClient(base_url=upstream_base, timeout=self.proxy_timeout)
+            await client.start()
+            self.upstream_clients[upstream_base] = client
+            return client
+        except Exception as e:
+            from loguru import logger as _lg
+            _lg.error(f"failed to create upstream client for {upstream_base!r}: {e}")
+            return None
+
     async def reload_keys(self) -> int:
         """Reload keys from the store and update self.keys. Returns new count."""
         if self.load_keys_fn is None:
@@ -130,9 +147,9 @@ class Handler:
                 continue
             _lg.info(f"[{_req_id}] attempt={attempt} key_id={k.key_id} model={k.model_name!r} upstream={k.upstream_base!r} upstream_model={k.upstream_model!r}")
 
-            client = self.upstream_clients.get(k.upstream_base)
+            client = await self._ensure_client(k.upstream_base)
             if client is None:
-                _lg.error(f"[{_req_id}] key_id={k.key_id} upstream_base={k.upstream_base!r} no matching upstream client, skipping")
+                _lg.error(f"[{_req_id}] key_id={k.key_id} upstream_base={k.upstream_base!r} lazy-init failed, skipping")
                 continue
 
             # Swap model name only when the request's model matches this key's model name
@@ -305,7 +322,7 @@ class Handler:
                     if k.window is not None and not k.window.allow(1):
                         continue
 
-                    client = self.upstream_clients.get(k.upstream_base)
+                    client = await self._ensure_client(k.upstream_base)
                     if client is None:
                         continue
 
