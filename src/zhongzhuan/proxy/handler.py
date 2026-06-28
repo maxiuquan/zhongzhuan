@@ -270,6 +270,7 @@ class Handler:
         import uuid
         import asyncio
         _req_id = str(uuid.uuid4())[:8]
+        _stream_start = time.time()
 
         # --- Send 200+SSE headers immediately ---
         resp = web.StreamResponse(
@@ -370,7 +371,7 @@ class Handler:
                             mark_success(k)
 
                             if self.store:
-                                latency_ms = int((time.time() - _request_start) * 1000)
+                                latency_ms = int((time.time() - _stream_start) * 1000)
                                 await log_request(self.store, client_ip=request.remote,
                                                   model_name=requested_model or "",
                                                   key_id=k.key_id, status=200, latency_ms=latency_ms)
