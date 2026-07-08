@@ -162,23 +162,36 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
     keys_to_test = []
     for row in rows:
         try:
-            key_cipher = row[2]  # key_cipher is stored as BLOB/text in TiDB
+            key_cipher = row[2]  # key_cipher from TiDB
             
             # Handle different data types from TiDB
             if isinstance(key_cipher, bytes):
-                raw_bytes = key_cipher
+                key_str = key_cipher.decode('utf-8', errors='replace')
             else:
-                raw_bytes = key_cipher.encode('utf-8') if key_cipher else b''
+                key_str = str(key_cipher) if key_cipher else ''
             
-            # Try to decrypt, if it fails assume it's already plain text
-            try:
-                plain_key = decrypt(raw_bytes).decode("utf-8", errors="replace")
-                # If decryption result starts with "AES:", it's not actually encrypted
-                if plain_key.startswith("AES:"):
-                    plain_key = str(key_cipher) if not isinstance(key_cipher, str) else key_cipher
-            except Exception:
-                # If decryption fails, assume the value is already plain text
-                plain_key = str(key_cipher)
+            # Remove Python bytes representation artifacts like "b'...'"
+            if key_str.startswith("b'") and key_str.endswith("'"):
+                key_str = key_str[2:-1]
+            elif key_str.startswith('b"') and key_str.endswith('"'):
+                key_str = key_str[2:-1]
+            
+            plain_key = None
+            
+            # Try to decrypt if it looks like encrypted data (starts with AES:)
+            if key_str.startswith("AES:"):
+                try:
+                    # Extract the base64 part after "AES:"
+                    b64_part = key_str[4:]
+                    encrypted_bytes = b64_part.encode('utf-8')
+                    plain_key = decrypt(encrypted_bytes).decode("utf-8", errors="replace")
+                except Exception:
+                    # Decryption failed, use raw value
+                    plain_key = key_str
+            
+            # If decryption didn't work or key doesn't start with AES:, use as-is
+            if not plain_key:
+                plain_key = key_str
 
             model_name = (row[4] or "").replace("`", "").replace('"', '').strip()
             upstream_base = ((row[5] or "")).replace("`", "").replace('"', '').strip()
