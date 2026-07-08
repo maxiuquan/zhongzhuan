@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Batch test API keys from database to check their validity."""
 import asyncio
-import sqlite3
+import os
 import sys
 import time
 from dataclasses import dataclass
@@ -100,13 +100,117 @@ async def test_single_key(
     return result
 
 
-async def test_all_keys(db_path: str = "data.db", concurrent: int = 5) -> None:
-    """Test all enabled API keys from the database."""
-    print(f"\n{'='*80}")
-    print(f"API Key Tester - Testing keys from {db_path}")
-    print(f"{'='*80}\n")
+async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
+    """Test all API keys from TiDB database."""
+    import aiomysql
+    from zhongzhuan.crypto import decrypt
 
-    # Connect to SQLite (synchronous for reading)
+    print(f"\nConnecting to TiDB: {tidb_config['host']}:{tidb_config['port']}...")
+
+    ssl_ctx = None
+    if tidb_config.get("ssl"):
+        import ssl as _ssl
+        ssl_ctx = _ssl.create_default_context()
+
+    pool = await aiomysql.create_pool(
+        host=tidb_config["host"],
+        port=tidb_config["port"],
+        user=tidb_config["user"],
+        password=tidb_config["password"],
+        db=tidb_config["database"],
+        autocommit=True,
+        minsize=1,
+        maxsize=3,
+        connect_timeout=10,
+        ssl=ssl_ctx,
+        charset="utf8mb4",
+    )
+
+    print("Connected to TiDB\n")
+
+    # Get all enabled keys with their model info
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("""
+                SELECT ak.id, ak.label, ak.key_cipher, ak.enabled,
+                       m.name as model_name, m.upstream_base, m.upstream_model
+                FROM api_keys ak
+                LEFT JOIN models m ON ak.model_id = m.id
+                WHERE ak.enabled = 1
+                ORDER BY ak.id
+            """)
+            rows = await cur.fetchall()
+
+    if not rows:
+        print("No enabled API keys found in TiDB database.")
+        await pool.close()
+        return
+
+    print(f"Found {len(rows)} enabled API key(s)\n")
+
+    # Decrypt and prepare keys
+    keys_to_test = []
+    for row in rows:
+        try:
+            key_cipher = row[2]  # key_cipher is already decrypted by TiDB (stored as text)
+            # Try to decrypt, if it fails assume it's already plain text
+            try:
+                plain_key = decrypt(key_cipher).decode("utf-8", errors="replace")
+            except Exception:
+                # If decryption fails, assume the value is already plain text
+                plain_key = key_cipher.decode("utf-8", errors="replace") if isinstance(key_cipher, bytes) else str(key_cipher)
+
+            model_name = (row[4] or "").replace("`", "").replace('"', '').strip()
+            upstream_base = ((row[5] or "")).replace("`", "").replace('"', '').strip()
+            upstream_model = ((row[6] or "")).replace("`", "").replace('"', '').strip()
+
+            keys_to_test.append({
+                "key_id": row[0],
+                "label": row[1] or f"key_{row[0]}",
+                "api_key": plain_key,
+                "upstream_base": upstream_base,
+                "upstream_model": upstream_model,
+                "model_name": model_name,
+            })
+        except Exception as e:
+            print(f"Warning: Failed to process key_id={row[0]}: {e}")
+
+    await pool.close()
+
+    if not keys_to_test:
+        print("No keys could be processed.")
+        return
+
+    # Test keys concurrently
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        semaphore = asyncio.Semaphore(concurrent)
+
+        async def test_with_semaphore(key_info):
+            async with semaphore:
+                return await test_single_key(
+                    client,
+                    key_info["key_id"],
+                    key_info["api_key"],
+                    key_info["upstream_base"],
+                    key_info["upstream_model"],
+                    key_info["model_name"],
+                )
+
+        print("Testing keys... (this may take a moment)\n")
+        tasks = [test_with_semaphore(k) for k in keys_to_test]
+        results = await asyncio.gather(*tasks)
+
+    # Print results
+    print_results(results)
+
+
+async def test_sqlite_keys(db_path: str, concurrent: int = 5) -> None:
+    """Test all enabled API keys from SQLite database."""
+    import sqlite3
+    from zhongzhuan.crypto import decrypt
+
+    print(f"\nLoading keys from SQLite: {db_path}\n")
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -124,21 +228,19 @@ async def test_all_keys(db_path: str = "data.db", concurrent: int = 5) -> None:
     conn.close()
 
     if not rows:
-        print("No enabled API keys found in database.")
+        print("No enabled API keys found in SQLite database.")
         return
 
     print(f"Found {len(rows)} enabled API key(s)\n")
 
-    # Decrypt keys (simple implementation matching the crypto module)
-    from zhongzhuan.crypto import decrypt
-
+    # Decrypt keys
     keys_to_test = []
     for row in rows:
         try:
             plain_key = decrypt(row["key_cipher"]).decode("utf-8", errors="replace")
-            model_name = row["model_name"] or ""
-            upstream_base = (row["upstream_base"] or "").replace("`", "").replace('"', '').strip()
-            upstream_model = (row["upstream_model"] or "").replace("`", "").replace('"', '').strip()
+            model_name = (row["model_name"] or "").replace("`", "").replace('"', '').strip()
+            upstream_base = ((row["upstream_base"] or "")).replace("`", "").replace('"', '').strip()
+            upstream_model = ((row["upstream_model"] or "")).replace("`", "").replace('"', '').strip()
 
             keys_to_test.append({
                 "key_id": row["id"],
@@ -175,6 +277,11 @@ async def test_all_keys(db_path: str = "data.db", concurrent: int = 5) -> None:
         results = await asyncio.gather(*tasks)
 
     # Print results
+    print_results(results)
+
+
+def print_results(results: list) -> None:
+    """Print test results in a formatted way."""
     print(f"\n{'='*80}")
     print(f"Results")
     print(f"{'='*80}\n")
@@ -216,9 +323,45 @@ async def test_all_keys(db_path: str = "data.db", concurrent: int = 5) -> None:
         print(f"NOTE: {invalid_count} key(s) are invalid. Consider replacing them.")
 
 
+async def detect_and_test() -> None:
+    """Auto-detect database type and test keys."""
+    # Check for TiDB config in environment variables
+    tidb_host = os.environ.get("ZHONGZHUAN_TIDB_HOST")
+
+    if tidb_host:
+        # TiDB mode
+        print("="*80)
+        print("TiDB Mode Detected")
+        print("="*80)
+
+        tidb_config = {
+            "host": tidb_host,
+            "port": int(os.environ.get("ZHONGZHUAN_TIDB_PORT", "4000")),
+            "user": os.environ.get("ZHONGZHUAN_TIDB_USER", ""),
+            "password": os.environ.get("ZHONGZHUAN_TIDB_PASSWORD", ""),
+            "database": os.environ.get("ZHONGZHUAN_TIDB_DATABASE", "zhongzhuan"),
+            "ssl": os.environ.get("ZHONGZHUAN_TIDB_SSL", "true").lower() == "true",
+        }
+
+        await test_tidb_keys(tidb_config)
+    else:
+        # SQLite mode - check command line args or default
+        db_path = sys.argv[1] if len(sys.argv) > 1 else "data.db"
+
+        if not os.path.exists(db_path):
+            print(f"Error: SQLite database not found: {db_path}")
+            print("Please specify the database path or set TiDB environment variables.")
+            sys.exit(1)
+
+        print("="*80)
+        print("SQLite Mode Detected")
+        print("="*80)
+
+        await test_sqlite_keys(db_path)
+
+
 def main():
-    db_path = sys.argv[1] if len(sys.argv) > 1 else "data.db"
-    asyncio.run(test_all_keys(db_path))
+    asyncio.run(detect_and_test())
 
 
 if __name__ == "__main__":
