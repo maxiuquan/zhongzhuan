@@ -161,7 +161,9 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
                     test_plain = _decrypt(test_row[0]).decode("utf-8")
                     print(f"Decryption test SUCCESS: key starts with {test_plain[:10]}...")
                 except Exception as e:
+                    import traceback
                     print(f"Decryption test FAILED: {e}")
+                    traceback.print_exc()
 
     # Get all enabled keys with their model info
     async with pool.acquire() as conn:
