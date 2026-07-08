@@ -42,12 +42,22 @@ async def test_single_key(
         is_valid=False,
     )
 
-    # Clean URL
+    # Clean URL - remove backticks and quotes
     upstream_base = upstream_base.replace("`", "").replace('"', '').strip().rstrip("/")
+    if not upstream_base:
+        upstream_base = "https://macc.eu.cc"
     if not upstream_base.startswith(("http://", "https://")):
         upstream_base = "https://" + upstream_base
-
-    test_url = f"{upstream_base}/v1/chat/completions"
+    
+    # Ensure the test endpoint doesn't duplicate path
+    # If upstream_base already ends with /v1, test endpoint is /chat/completions
+    # Otherwise, test endpoint is /v1/chat/completions
+    if upstream_base.endswith("/v1"):
+        test_endpoint = "/chat/completions"
+    else:
+        test_endpoint = "/v1/chat/completions"
+    
+    test_url = f"{upstream_base}{test_endpoint}"
     payload = {
         "model": upstream_model or model_name,
         "messages": [{"role": "user", "content": "hi"}],
@@ -152,13 +162,23 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
     keys_to_test = []
     for row in rows:
         try:
-            key_cipher = row[2]  # key_cipher is already decrypted by TiDB (stored as text)
+            key_cipher = row[2]  # key_cipher is stored as BLOB/text in TiDB
+            
+            # Handle different data types from TiDB
+            if isinstance(key_cipher, bytes):
+                raw_bytes = key_cipher
+            else:
+                raw_bytes = key_cipher.encode('utf-8') if key_cipher else b''
+            
             # Try to decrypt, if it fails assume it's already plain text
             try:
-                plain_key = decrypt(key_cipher).decode("utf-8", errors="replace")
+                plain_key = decrypt(raw_bytes).decode("utf-8", errors="replace")
+                # If decryption result starts with "AES:", it's not actually encrypted
+                if plain_key.startswith("AES:"):
+                    plain_key = str(key_cipher) if not isinstance(key_cipher, str) else key_cipher
             except Exception:
                 # If decryption fails, assume the value is already plain text
-                plain_key = key_cipher.decode("utf-8", errors="replace") if isinstance(key_cipher, bytes) else str(key_cipher)
+                plain_key = str(key_cipher)
 
             model_name = (row[4] or "").replace("`", "").replace('"', '').strip()
             upstream_base = ((row[5] or "")).replace("`", "").replace('"', '').strip()
