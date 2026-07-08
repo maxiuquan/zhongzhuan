@@ -113,7 +113,8 @@ async def test_single_key(
 async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
     """Test all API keys from TiDB database."""
     import aiomysql
-    from zhongzhuan.crypto import decrypt
+    from zhongzhuan.crypto import init as crypto_init, decrypt
+    from pathlib import Path
 
     print(f"\nConnecting to TiDB: {tidb_config['host']}:{tidb_config['port']}...")
 
@@ -138,6 +139,17 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
 
     print("Connected to TiDB\n")
 
+    # Initialize crypto with TiDB store
+    async def _get_config(key_name: str) -> str | None:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT value FROM system_config WHERE `key`=%s", (key_name,))
+                row = await cur.fetchone()
+                return row[0] if row else None
+    
+    await crypto_init(Path("."), store_get_key=_get_config)
+    print("Crypto initialized\n")
+
     # Get all enabled keys with their model info
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
@@ -153,7 +165,8 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
 
     if not rows:
         print("No enabled API keys found in TiDB database.")
-        await pool.close()
+        pool.close()
+        await pool.wait_closed()
         return
 
     print(f"Found {len(rows)} enabled API key(s)\n")
@@ -166,32 +179,14 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
             
             # Handle different data types from TiDB
             if isinstance(key_cipher, bytes):
-                key_str = key_cipher.decode('utf-8', errors='replace')
+                cipher_bytes = key_cipher
+            elif isinstance(key_cipher, str):
+                cipher_bytes = key_cipher.encode('utf-8')
             else:
-                key_str = str(key_cipher) if key_cipher else ''
+                cipher_bytes = str(key_cipher).encode('utf-8') if key_cipher else b''
             
-            # Remove Python bytes representation artifacts like "b'...'"
-            if key_str.startswith("b'") and key_str.endswith("'"):
-                key_str = key_str[2:-1]
-            elif key_str.startswith('b"') and key_str.endswith('"'):
-                key_str = key_str[2:-1]
-            
-            plain_key = None
-            
-            # Try to decrypt if it looks like encrypted data (starts with AES:)
-            if key_str.startswith("AES:"):
-                try:
-                    # Extract the base64 part after "AES:"
-                    b64_part = key_str[4:]
-                    encrypted_bytes = b64_part.encode('utf-8')
-                    plain_key = decrypt(encrypted_bytes).decode("utf-8", errors="replace")
-                except Exception:
-                    # Decryption failed, use raw value
-                    plain_key = key_str
-            
-            # If decryption didn't work or key doesn't start with AES:, use as-is
-            if not plain_key:
-                plain_key = key_str
+            # Decrypt the key using initialized crypto
+            plain_key = decrypt(cipher_bytes).decode("utf-8", errors="replace")
 
             model_name = (row[4] or "").replace("`", "").replace('"', '').strip()
             upstream_base = ((row[5] or "")).replace("`", "").replace('"', '').strip()
@@ -206,7 +201,7 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
                 "model_name": model_name,
             })
         except Exception as e:
-            print(f"Warning: Failed to process key_id={row[0]}: {e}")
+            print(f"Warning: Failed to decrypt key_id={row[0]}: {e}")
 
     pool.close()
     await pool.wait_closed()
@@ -241,9 +236,13 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
 async def test_sqlite_keys(db_path: str, concurrent: int = 5) -> None:
     """Test all enabled API keys from SQLite database."""
     import sqlite3
-    from zhongzhuan.crypto import decrypt
+    from zhongzhuan.crypto import init as crypto_init, decrypt
+    from pathlib import Path
 
     print(f"\nLoading keys from SQLite: {db_path}\n")
+
+    # Initialize crypto with local key file
+    await crypto_init(Path("."))
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -271,7 +270,10 @@ async def test_sqlite_keys(db_path: str, concurrent: int = 5) -> None:
     keys_to_test = []
     for row in rows:
         try:
-            plain_key = decrypt(row["key_cipher"]).decode("utf-8", errors="replace")
+            cipher_bytes = row["key_cipher"]
+            if isinstance(cipher_bytes, str):
+                cipher_bytes = cipher_bytes.encode('utf-8')
+            plain_key = decrypt(cipher_bytes).decode("utf-8", errors="replace")
             model_name = (row["model_name"] or "").replace("`", "").replace('"', '').strip()
             upstream_base = ((row["upstream_base"] or "")).replace("`", "").replace('"', '').strip()
             upstream_model = ((row["upstream_model"] or "")).replace("`", "").replace('"', '').strip()
