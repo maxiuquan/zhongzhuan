@@ -76,13 +76,16 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             continue
         model = await get_model_by_id(store, kr.model_id)
         rpm_limit = model.rpm_limit if model and model.rpm_limit > 0 else cfg.limits.default_rpm_per_key
+        upstream_base = (model.upstream_base if model else "").replace("`", "").replace('"', '').strip()
+        upstream_model = (model.upstream_model if model else "").replace("`", "").replace('"', '').strip()
+        model_name = (model.name if model else "").replace("`", "").replace('"', '').strip()
         health_list.append(KeyHealth(
             key_id=kr.id, api_key=plain,
             window=SlidingWindow(cfg.limits.per_key_window_seconds, rpm_limit),
             rpm_limit=rpm_limit,
-            upstream_base=model.upstream_base if model else "",
-            upstream_model=model.upstream_model if model else "",
-            model_name=model.name if model else "",
+            upstream_base=upstream_base,
+            upstream_model=upstream_model,
+            model_name=model_name,
         ))
     return health_list
 

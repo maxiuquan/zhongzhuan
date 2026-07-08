@@ -6,8 +6,14 @@ from typing import AsyncIterator
 import httpx
 
 
+def _sanitize_url(url: str) -> str:
+    """Remove backticks and other common formatting artifacts from URLs."""
+    return url.replace("`", "").replace('"', '').strip()
+
+
 class UpstreamClient:
     def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+        base_url = _sanitize_url(base_url)
         self.base_url = base_url.rstrip("/")
         # Extract path prefix from base_url (e.g., "/v1" from "https://api.example.com/v1")
         # to avoid duplicating it when the request path also starts with the same prefix.
