@@ -175,7 +175,8 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
         except Exception as e:
             print(f"Warning: Failed to process key_id={row[0]}: {e}")
 
-    await pool.close()
+    pool.close()
+    await pool.wait_closed()
 
     if not keys_to_test:
         print("No keys could be processed.")
