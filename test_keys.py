@@ -149,6 +149,19 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
     
     await crypto_init(Path("."), store_get_key=_get_config)
     print("Crypto initialized\n")
+    
+    # Test decryption with first key
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT key_cipher FROM api_keys WHERE id=1")
+            test_row = await cur.fetchone()
+            if test_row:
+                try:
+                    from zhongzhuan.crypto import decrypt as _decrypt
+                    test_plain = _decrypt(test_row[0]).decode("utf-8")
+                    print(f"Decryption test SUCCESS: key starts with {test_plain[:10]}...")
+                except Exception as e:
+                    print(f"Decryption test FAILED: {e}")
 
     # Get all enabled keys with their model info
     async with pool.acquire() as conn:
@@ -189,7 +202,7 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
             try:
                 plain_key = decrypt(cipher_bytes).decode("utf-8", errors="replace")
             except Exception as dec_err:
-                raise Exception(f"Decrypt failed for key_id={row[0]}, cipher_type={type(key_cipher)}, cipher_preview={str(key_cipher)[:50]}: {dec_err}")
+                raise Exception(f"Decrypt failed for key_id={row[0]}, cipher_type={type(key_cipher)}, cipher_hex={cipher_bytes[:30].hex() if cipher_bytes else 'empty'}: {dec_err}")
 
             model_name = (row[4] or "").replace("`", "").replace('"', '').strip()
             upstream_base = ((row[5] or "")).replace("`", "").replace('"', '').strip()
