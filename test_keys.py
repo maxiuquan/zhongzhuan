@@ -186,7 +186,10 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
                 cipher_bytes = str(key_cipher).encode('utf-8') if key_cipher else b''
             
             # Decrypt the key using initialized crypto
-            plain_key = decrypt(cipher_bytes).decode("utf-8", errors="replace")
+            try:
+                plain_key = decrypt(cipher_bytes).decode("utf-8", errors="replace")
+            except Exception as dec_err:
+                raise Exception(f"Decrypt failed for key_id={row[0]}, cipher_type={type(key_cipher)}, cipher_preview={str(key_cipher)[:50]}: {dec_err}")
 
             model_name = (row[4] or "").replace("`", "").replace('"', '').strip()
             upstream_base = ((row[5] or "")).replace("`", "").replace('"', '').strip()
