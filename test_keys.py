@@ -147,6 +147,16 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
                 row = await cur.fetchone()
                 return row[0] if row else None
     
+    # Debug: check if secret_key exists in TiDB
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT value FROM system_config WHERE `key`=%s", ("secret_key",))
+            row = await cur.fetchone()
+            if row:
+                print(f"secret_key from TiDB (hex): {row[0][:64]}...")
+            else:
+                print("WARNING: secret_key NOT FOUND in TiDB system_config!")
+    
     await crypto_init(Path("."), store_get_key=_get_config)
     print("Crypto initialized\n")
     
