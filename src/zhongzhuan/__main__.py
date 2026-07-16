@@ -40,6 +40,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stop", action="store_true", help="Stop Windows service")
     p.add_argument("--autostart", nargs="?", const="status", help="Auto-start on/off/status")
     p.add_argument("--open-admin", action="store_true", help="Open admin UI in browser")
+    # TLS subcommand
+    p.add_argument("--tls-selfsign", action="store_true", help="Generate self-signed TLS certificate")
+    p.add_argument("--cn", default="localhost", help="Common Name for self-signed cert")
+    p.add_argument("--san-ip", action="append", default=[], help="IP SAN for self-signed cert")
+    p.add_argument("--san-dns", action="append", default=[], help="DNS SAN for self-signed cert")
+    p.add_argument("--out-cert", default="data/server.crt", help="Output cert file path")
+    p.add_argument("--out-key", default="data/server.key", help="Output key file path")
+    p.add_argument("--out-ca", default="data/local-ca.crt", help="Output CA file path")
+    p.add_argument("--days", type=int, default=3650, help="Certificate validity in days")
     # Convenience flag to run directly without subcommand
     p.add_argument("args", nargs=argparse.REMAINDER)
     return p.parse_args()
@@ -86,6 +95,9 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             upstream_base=upstream_base,
             upstream_model=upstream_model,
             model_name=model_name,
+            upstream_protocol=model.protocol if model else "openai",
+            anthropic_version=model.anthropic_version if model else "2023-06-01",
+            max_tokens_default=model.max_tokens_default if model else 4096,
         ))
     return health_list
 
@@ -197,9 +209,17 @@ async def run_foreground(
     )
     proxy_runner = web.AppRunner(proxy.app())
     await proxy_runner.setup()
-    proxy_site = web.TCPSite(proxy_runner, cfg.server.proxy.host, cfg.server.proxy.port)
+
+    # Build SSL context for proxy port (TLS for VPS / Claude Code)
+    from zhongzhuan.proxy.tls import build_ssl_context
+    ssl_ctx = build_ssl_context(cfg.server.tls)
+    proxy_site = web.TCPSite(
+        proxy_runner, cfg.server.proxy.host, cfg.server.proxy.port,
+        ssl_context=ssl_ctx,
+    )
     await proxy_site.start()
-    logger.info(f"proxy listening on {cfg.server.proxy.host}:{cfg.server.proxy.port}")
+    scheme = "https" if ssl_ctx else "http"
+    logger.info(f"proxy listening on {scheme}://{cfg.server.proxy.host}:{cfg.server.proxy.port}")
 
     admin = AdminServer(store=store, version=__version__, config=cfg)
     admin_runner = web.AppRunner(admin.app())
@@ -298,6 +318,23 @@ def handle_service_commands(args: argparse.Namespace) -> int | None:
 
 def main() -> int:
     args = parse_args()
+
+    # Handle TLS selfsign
+    if args.tls_selfsign:
+        from zhongzhuan.proxy.tls import selfsign
+        from pathlib import Path as _P
+        for p in (args.out_cert, args.out_key, args.out_ca):
+            _P(p).parent.mkdir(parents=True, exist_ok=True)
+        san_dns = args.san_dns or (["localhost"] if not args.san_ip else [])
+        selfsign(
+            out_cert=args.out_cert, out_key=args.out_key, out_ca=args.out_ca,
+            cn=args.cn, san_dns=san_dns, san_ip=args.san_ip, days=args.days,
+        )
+        print(f"[zhongzhuan] TLS certificate generated:")
+        print(f"  cert: {args.out_cert}")
+        print(f"  key:  {args.out_key}")
+        print(f"  CA:   {args.out_ca}")
+        return 0
 
     # Handle service commands
     result = handle_service_commands(args)

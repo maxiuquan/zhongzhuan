@@ -19,12 +19,15 @@ async def log_request(
     tokens_out: int = 0,
     error: str = "",
     request_id: str | None = None,
+    inbound_protocol: str = "",
+    outbound_protocol: str = "",
+    translated: bool = False,
 ) -> None:
     rid = request_id or str(uuid.uuid4())
     await s.execute(
-        """INSERT INTO request_logs(ts, client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, request_id)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-        (Store.now(), client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, rid),
+        """INSERT INTO request_logs(ts, client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, request_id, inbound_protocol, outbound_protocol, translated)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (Store.now(), client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, rid, inbound_protocol, outbound_protocol, int(translated)),
     )
 
 
@@ -35,7 +38,7 @@ async def list_logs(
     model: str | None = None,
     status: int | None = None,
 ) -> dict:
-    sql = "SELECT id, ts, client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, request_id FROM request_logs WHERE id > ?"
+    sql = "SELECT id, ts, client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, request_id, inbound_protocol, outbound_protocol, translated FROM request_logs WHERE id > ?"
     params: list = [cursor]
     if model:
         sql += " AND model_name=?"
@@ -53,6 +56,9 @@ async def list_logs(
                 "resolved_model_id": r[4], "key_id": r[5], "status": r[6],
                 "latency_ms": r[7], "tokens_in": r[8], "tokens_out": r[9],
                 "error": r[10], "request_id": r[11],
+                "inbound_protocol": r[12] if len(r) > 12 else "",
+                "outbound_protocol": r[13] if len(r) > 13 else "",
+                "translated": bool(r[14]) if len(r) > 14 else False,
             }
             for r in rows
         ],

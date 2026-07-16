@@ -1,5 +1,26 @@
 """SQLite and MySQL/TiDB schema strings."""
 
+# Migration statements for existing databases (add new columns if missing).
+# These use IF NOT EXISTS-style checks via pragma_table_info on SQLite
+# and information_schema on MySQL.
+SQLITE_MIGRATIONS = [
+    "ALTER TABLE models ADD COLUMN protocol TEXT NOT NULL DEFAULT 'openai'",
+    "ALTER TABLE models ADD COLUMN anthropic_version TEXT NOT NULL DEFAULT '2023-06-01'",
+    "ALTER TABLE models ADD COLUMN max_tokens_default INTEGER NOT NULL DEFAULT 4096",
+    "ALTER TABLE request_logs ADD COLUMN inbound_protocol TEXT DEFAULT ''",
+    "ALTER TABLE request_logs ADD COLUMN outbound_protocol TEXT DEFAULT ''",
+    "ALTER TABLE request_logs ADD COLUMN translated INTEGER DEFAULT 0",
+]
+
+MYSQL_MIGRATIONS = [
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS protocol VARCHAR(16) NOT NULL DEFAULT 'openai'",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS anthropic_version VARCHAR(32) NOT NULL DEFAULT '2023-06-01'",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS max_tokens_default INT NOT NULL DEFAULT 4096",
+    "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS inbound_protocol VARCHAR(16) DEFAULT ''",
+    "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS outbound_protocol VARCHAR(16) DEFAULT ''",
+    "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS translated TINYINT DEFAULT 0",
+]
+
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS models (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -10,6 +31,9 @@ CREATE TABLE IF NOT EXISTS models (
     tpm_limit     INTEGER NOT NULL DEFAULT 0,
     enabled       INTEGER NOT NULL DEFAULT 1,
     weight        INTEGER NOT NULL DEFAULT 1,
+    protocol      TEXT NOT NULL DEFAULT 'openai',
+    anthropic_version TEXT NOT NULL DEFAULT '2023-06-01',
+    max_tokens_default INTEGER NOT NULL DEFAULT 4096,
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL
 );
@@ -52,7 +76,10 @@ CREATE TABLE IF NOT EXISTS request_logs (
     tokens_in   INTEGER DEFAULT 0,
     tokens_out  INTEGER DEFAULT 0,
     error       TEXT DEFAULT '',
-    request_id  TEXT NOT NULL
+    request_id  TEXT NOT NULL,
+    inbound_protocol TEXT DEFAULT '',
+    outbound_protocol TEXT DEFAULT '',
+    translated  INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS system_config (
@@ -89,6 +116,9 @@ CREATE TABLE IF NOT EXISTS models (
     tpm_limit     INT NOT NULL DEFAULT 0,
     enabled       TINYINT NOT NULL DEFAULT 1,
     weight        INT NOT NULL DEFAULT 1,
+    protocol      VARCHAR(16) NOT NULL DEFAULT 'openai',
+    anthropic_version VARCHAR(32) NOT NULL DEFAULT '2023-06-01',
+    max_tokens_default INT NOT NULL DEFAULT 4096,
     created_at    BIGINT NOT NULL,
     updated_at    BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -134,7 +164,10 @@ CREATE TABLE IF NOT EXISTS request_logs (
     tokens_in   INT DEFAULT 0,
     tokens_out  INT DEFAULT 0,
     error       TEXT,
-    request_id  VARCHAR(64) NOT NULL
+    request_id  VARCHAR(64) NOT NULL,
+    inbound_protocol VARCHAR(16) DEFAULT '',
+    outbound_protocol VARCHAR(16) DEFAULT '',
+    translated  TINYINT DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS system_config (

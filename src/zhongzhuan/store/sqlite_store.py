@@ -5,7 +5,7 @@ import aiosqlite
 from pathlib import Path
 
 from .store import Store
-from .schema import SQLITE_SCHEMA
+from .schema import SQLITE_SCHEMA, SQLITE_MIGRATIONS
 
 
 class SqliteStore(Store):
@@ -27,6 +27,15 @@ class SqliteStore(Store):
         await db.execute("PRAGMA foreign_keys=ON")
         await db.executescript(SQLITE_SCHEMA)
         await db.commit()
+
+        # Run migrations: ALTER TABLE ADD COLUMN (ignore "duplicate column" errors)
+        for stmt in SQLITE_MIGRATIONS:
+            try:
+                await db.execute(stmt)
+            except Exception:
+                pass  # column already exists
+        await db.commit()
+
         return cls(db)
 
     async def execute(self, sql: str, params: tuple | None = None) -> int:

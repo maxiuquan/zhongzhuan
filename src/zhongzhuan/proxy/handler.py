@@ -1,4 +1,4 @@
-"""/v1/* route handler: pass-through with multi-key retry."""
+"""/v1/* route handler: pass-through with multi-key retry + protocol translation."""
 from __future__ import annotations
 
 import json
@@ -13,6 +13,12 @@ from ..upstream import UpstreamClient
 from .ratelimit import KeyHealth
 from .retry import mark_failure, mark_success
 from .scheduler import pick_key
+from .protocol.detect import detect_inbound_protocol
+from .protocol.translate_a2o import translate_request_a2o, translate_response_o2a
+from .protocol.translate_o2a import translate_request_o2a, translate_response_a2o
+from .protocol.errors import translate_error_a2o, translate_error_o2a
+from .protocol.stream_o2a import StreamO2A
+from .protocol.stream_a2o import StreamA2O
 
 
 def _json_loads(data: bytes) -> object:
@@ -119,7 +125,14 @@ class Handler:
 
         import uuid
         _req_id = str(uuid.uuid4())[:8]
-        _lg.info(f"[{_req_id}] processing {request.method} {path} model={requested_model!r} stream={is_stream}")
+
+        # Detect inbound protocol (openai vs anthropic)
+        inbound_protocol = detect_inbound_protocol(path, dict(request.headers))
+        _lg.info(f"[{_req_id}] processing {request.method} {path} model={requested_model!r} stream={is_stream} inbound={inbound_protocol}")
+
+        # Handle Anthropic count_tokens endpoint
+        if path == "/v1/messages/count_tokens" and request.method == "POST":
+            return await self._handle_count_tokens(request, body, inbound_protocol)
 
         # Filter keys by requested model (if model name is specified)
         candidates = self.keys
@@ -154,19 +167,60 @@ class Handler:
                 _lg.error(f"[{_req_id}] key_id={k.key_id} upstream_base={k.upstream_base!r} lazy-init failed, skipping")
                 continue
 
-            # Swap model name only when the request's model matches this key's model name
-            final_body = body
-            if requested_model and k.upstream_model and k.model_name and requested_model == k.model_name:
-                final_body = _swap_model_name(body, requested_model, k.upstream_model)
-                _lg.info(f"[{_req_id}] key_id={k.key_id} swapped model {requested_model!r} -> {k.upstream_model!r}")
+            # Determine if protocol translation is needed
+            outbound_protocol = k.upstream_protocol
+            need_translation = inbound_protocol != outbound_protocol
 
+            # Prepare body, path, and headers
+            upstream_path = path
+            final_body = body
             headers = dict(base_headers)
-            headers["Authorization"] = f"Bearer {k.api_key}"
-            _lg.info(f"[{_req_id}] key_id={k.key_id} using key {k.api_key[:8]}...{k.api_key[-4:]}")
             headers["Accept-Encoding"] = "identity"
-            # Update Content-Length if body was modified
-            if final_body is not body:
+
+            if need_translation:
+                # Translate request body
+                try:
+                    body_obj_t = json.loads(body) if body else {}
+                except (json.JSONDecodeError, ValueError):
+                    body_obj_t = {}
+
+                if inbound_protocol == "anthropic" and outbound_protocol == "openai":
+                    translated_req = translate_request_a2o(body_obj_t, k.max_tokens_default)
+                    upstream_path = "/v1/chat/completions"
+                elif inbound_protocol == "openai" and outbound_protocol == "anthropic":
+                    translated_req = translate_request_o2a(body_obj_t, k.anthropic_version)
+                    upstream_path = "/v1/messages"
+                else:
+                    translated_req = body_obj_t
+
+                # Swap model name
+                if k.upstream_model:
+                    translated_req["model"] = k.upstream_model
+
+                final_body = json.dumps(translated_req, ensure_ascii=False).encode()
+
+                # Build headers for outbound protocol
+                if outbound_protocol == "anthropic":
+                    headers["x-api-key"] = k.api_key
+                    headers["anthropic-version"] = k.anthropic_version
+                    headers.pop("Authorization", None)
+                else:
+                    headers["Authorization"] = f"Bearer {k.api_key}"
+                    headers.pop("x-api-key", None)
+                    headers.pop("anthropic-version", None)
+
                 headers["Content-Length"] = str(len(final_body))
+                _lg.info(f"[{_req_id}] key_id={k.key_id} translated {inbound_protocol}->{outbound_protocol} path={upstream_path}")
+            else:
+                # Passthrough: swap model name only when matching
+                if requested_model and k.upstream_model and k.model_name and requested_model == k.model_name:
+                    final_body = _swap_model_name(body, requested_model, k.upstream_model)
+                    _lg.info(f"[{_req_id}] key_id={k.key_id} swapped model {requested_model!r} -> {k.upstream_model!r}")
+                headers["Authorization"] = f"Bearer {k.api_key}"
+                if final_body is not body:
+                    headers["Content-Length"] = str(len(final_body))
+
+            _lg.info(f"[{_req_id}] key_id={k.key_id} using key {k.api_key[:8]}...{k.api_key[-4:]}")
 
             try:
                 # Check if client is still connected before making expensive upstream calls
@@ -176,20 +230,14 @@ class Handler:
                     return web.Response(status=499, text="Client Closed Request")
 
                 if is_stream:
-                    # Strip upstream_base's path prefix from the request path
-                    # to avoid duplication (e.g. base=/v1 + path=/v1/chat/completions)
-                    base_path = urllib.parse.urlparse(k.upstream_base).path.rstrip('/')
-                    request_path = path
-                    if base_path and request_path.startswith(base_path):
-                        request_path = request_path[len(base_path):]
-                    full_url = k.upstream_base.rstrip('/') + request_path
-                    _lg.info(f"[{_req_id}] key_id={k.key_id} streaming request to {full_url}")
+                    # For streaming, delegate to _stream_proxy with protocol info
                     return await self._stream_proxy(
                         request, path, base_headers, body, requested_model,
+                        inbound_protocol=inbound_protocol,
                     )
-                _lg.info(f"[{_req_id}] key_id={k.key_id} sending request to {path}")
+                _lg.info(f"[{_req_id}] key_id={k.key_id} sending request to {upstream_path}")
                 resp = await client.request(
-                    request.method, path, headers=headers, content=final_body,
+                    request.method, upstream_path, headers=headers, content=final_body,
                 )
             except (ConnectionResetError, ConnectionError, OSError) as e:
                 # Client-side disconnect (timeout or cancel).
@@ -228,11 +276,29 @@ class Handler:
             for h in ("content-length", "transfer-encoding", "connection", "content-encoding"):
                 resp_headers.pop(h, None)
 
+            # Translate response if protocols differ
+            if need_translation:
+                try:
+                    resp_data = json.loads(data)
+                    if inbound_protocol == "anthropic":
+                        # Outbound was openai, translate response back to anthropic
+                        translated_resp = translate_response_o2a(resp_data, requested_model or "")
+                    else:
+                        # Outbound was anthropic, translate response back to openai
+                        translated_resp = translate_response_a2o(resp_data, requested_model or "")
+                    data = json.dumps(translated_resp, ensure_ascii=False).encode()
+                    resp_headers["Content-Type"] = "application/json"
+                    _lg.info(f"[{_req_id}] key_id={k.key_id} response translated {outbound_protocol}->{inbound_protocol}")
+                except (json.JSONDecodeError, ValueError) as e:
+                    _lg.warning(f"[{_req_id}] key_id={k.key_id} failed to translate response: {e}, returning raw")
+
             # Log successful request
             if self.store:
                 latency_ms = int((time.time() - _request_start) * 1000)
                 await log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
-                                  key_id=k.key_id, status=resp.status_code, latency_ms=latency_ms)
+                                  key_id=k.key_id, status=resp.status_code, latency_ms=latency_ms,
+                                  inbound_protocol=inbound_protocol, outbound_protocol=outbound_protocol,
+                                  translated=need_translation)
 
             return web.Response(status=resp.status_code, body=data, headers=resp_headers)
 
@@ -257,6 +323,7 @@ class Handler:
         base_headers: dict,
         body: bytes,
         requested_model: str | None,
+        inbound_protocol: str = "openai",
     ) -> web.StreamResponse:
         """SSE streaming pass-through with multi-key retry.
 
@@ -331,20 +398,56 @@ class Handler:
                     if client is None:
                         continue
 
-                    # Swap model name
-                    final_body = body
-                    if requested_model and k.upstream_model and k.model_name and requested_model == k.model_name:
-                        final_body = _swap_model_name(body, requested_model, k.upstream_model)
+                    # Determine if translation is needed for this key
+                    outbound_protocol = k.upstream_protocol
+                    need_translation = inbound_protocol != outbound_protocol
 
+                    # Prepare body, path, headers
+                    upstream_path = path
+                    final_body = body
                     headers = dict(base_headers)
-                    headers["Authorization"] = f"Bearer {k.api_key}"
                     headers["Accept-Encoding"] = "identity"
-                    if final_body is not body:
+
+                    if need_translation:
+                        try:
+                            body_obj_s = json.loads(body) if body else {}
+                        except (json.JSONDecodeError, ValueError):
+                            body_obj_s = {}
+
+                        if inbound_protocol == "anthropic" and outbound_protocol == "openai":
+                            translated_req = translate_request_a2o(body_obj_s, k.max_tokens_default)
+                            upstream_path = "/v1/chat/completions"
+                        elif inbound_protocol == "openai" and outbound_protocol == "anthropic":
+                            translated_req = translate_request_o2a(body_obj_s, k.anthropic_version)
+                            upstream_path = "/v1/messages"
+                        else:
+                            translated_req = body_obj_s
+
+                        if k.upstream_model:
+                            translated_req["model"] = k.upstream_model
+
+                        final_body = json.dumps(translated_req, ensure_ascii=False).encode()
+
+                        if outbound_protocol == "anthropic":
+                            headers["x-api-key"] = k.api_key
+                            headers["anthropic-version"] = k.anthropic_version
+                            headers.pop("Authorization", None)
+                        else:
+                            headers["Authorization"] = f"Bearer {k.api_key}"
+                            headers.pop("x-api-key", None)
+                            headers.pop("anthropic-version", None)
+
                         headers["Content-Length"] = str(len(final_body))
+                    else:
+                        if requested_model and k.upstream_model and k.model_name and requested_model == k.model_name:
+                            final_body = _swap_model_name(body, requested_model, k.upstream_model)
+                        headers["Authorization"] = f"Bearer {k.api_key}"
+                        if final_body is not body:
+                            headers["Content-Length"] = str(len(final_body))
 
                     try:
                         async for upstream_resp in client.stream(
-                            request.method, path, headers=headers, content=final_body,
+                            request.method, upstream_path, headers=headers, content=final_body,
                         ):
                             if upstream_resp.status_code >= 500 or upstream_resp.status_code == 429:
                                 mark_failure(k)
@@ -358,12 +461,28 @@ class Handler:
                             except (asyncio.CancelledError, Exception):
                                 pass
 
-                            _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} upstream ready, forwarding SSE stream")
+                            _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} upstream ready, forwarding SSE stream (translated={need_translation})")
+
+                            # Create stream translator if needed
+                            stream_translator = None
+                            if need_translation:
+                                if inbound_protocol == "anthropic":
+                                    # OpenAI upstream → Anthropic client
+                                    stream_translator = StreamO2A(model=requested_model or "")
+                                else:
+                                    # Anthropic upstream → OpenAI client
+                                    stream_translator = StreamA2O(model=requested_model or "")
+
                             chunk_count = 0
                             try:
                                 async for chunk in upstream_resp.aiter_raw():
                                     if chunk:
-                                        await resp.write(chunk)
+                                        if stream_translator:
+                                            translated_chunks = await stream_translator.feed(chunk)
+                                            for tc in translated_chunks:
+                                                await resp.write(tc)
+                                        else:
+                                            await resp.write(chunk)
                                         chunk_count += 1
                             except (ConnectionResetError, ConnectionError, OSError):
                                 _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected during stream")
@@ -374,7 +493,10 @@ class Handler:
                                 latency_ms = int((time.time() - _stream_start) * 1000)
                                 await log_request(self.store, client_ip=request.remote,
                                                   model_name=requested_model or "",
-                                                  key_id=k.key_id, status=200, latency_ms=latency_ms)
+                                                  key_id=k.key_id, status=200, latency_ms=latency_ms,
+                                                  inbound_protocol=inbound_protocol,
+                                                  outbound_protocol=outbound_protocol,
+                                                  translated=need_translation)
                             return resp
                     except (ConnectionResetError, ConnectionError, OSError):
                         _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected")
@@ -438,6 +560,45 @@ class Handler:
                         "owned_by": "zhongzhuan",
                     })
         return web.json_response({"object": "list", "data": data})
+
+    async def _handle_count_tokens(
+        self, request: web.Request, body: bytes, inbound_protocol: str,
+    ) -> web.Response:
+        """Handle /v1/messages/count_tokens — estimate input tokens locally.
+
+        For Anthropic upstream: could passthrough, but local estimate is sufficient
+        for the client's quota planning. Uses len(text)/4 approximation.
+        """
+        from loguru import logger as _lg
+        try:
+            body_obj = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            body_obj = {}
+
+        # Extract all text from messages + system
+        total_chars = 0
+        system = body_obj.get("system", "")
+        if isinstance(system, str):
+            total_chars += len(system)
+        elif isinstance(system, list):
+            for block in system:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    total_chars += len(block.get("text", ""))
+
+        for msg in body_obj.get("messages", []):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        total_chars += len(block.get("text", ""))
+
+        # Rough estimate: ~4 chars per token
+        estimated_tokens = max(1, total_chars // 4)
+        _lg.info(f"count_tokens: estimated {estimated_tokens} tokens from {total_chars} chars")
+
+        return web.json_response({"input_tokens": estimated_tokens})
 
 
 def make_handler(upstream_clients, keys, proxy_timeout, store=None, load_keys_fn=None) -> Handler:

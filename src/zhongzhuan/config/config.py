@@ -116,6 +116,17 @@ def load_config(path: str | None) -> Config:
     if timeout:
         cfg.limits.proxy_request_timeout = int(timeout)
 
+    # .env overrides for TLS
+    tls_enabled = os.getenv("ZHONGZHUAN_TLS_ENABLED", "")
+    if tls_enabled:
+        cfg.server.tls.enabled = tls_enabled.lower() == "true"
+    tls_cert = os.getenv("ZHONGZHUAN_TLS_CERT", "")
+    if tls_cert:
+        cfg.server.tls.cert_file = tls_cert
+    tls_key = os.getenv("ZHONGZHUAN_TLS_KEY", "")
+    if tls_key:
+        cfg.server.tls.key_file = tls_key
+
     return cfg
 
 

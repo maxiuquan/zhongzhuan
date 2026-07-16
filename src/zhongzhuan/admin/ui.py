@@ -98,7 +98,7 @@ label{font-size:13px;color:#8b949e;display:block;margin-bottom:4px}
   </div>
   <div class="tab" id="tab-models">
     <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>模型列表</h2><button class="btn primary" onclick="showModelModal()">+ 添加模型</button></div>
-    <table><thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>RPM</th><th>TPM</th><th>启用</th><th>操作</th></tr></thead><tbody id="modelTable"></tbody></table></div>
+    <table><thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>启用</th><th>操作</th></tr></thead><tbody id="modelTable"></tbody></table></div>
   </div>
   <div class="tab" id="tab-keys">
     <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>Key 列表</h2><div style="display:flex;gap:8px"><button class="btn primary" onclick="showKeyModal()">+ 添加 Key</button><button class="btn primary" onclick="showBatchImportModal()">批量导入</button></div></div>
@@ -238,7 +238,7 @@ async function loadModels() {
   const d = await api("/api/models");
   models = d?.data || [];
   document.getElementById("modelTable").innerHTML = models.map(m => `
-    <tr><td>${m.name}</td><td>${m.upstream_base}</td><td>${m.upstream_model}</td>
+    <tr><td>${m.name}</td><td>${m.upstream_base}</td><td>${m.upstream_model}</td><td>${m.protocol||'openai'}</td>
     <td>${m.rpm_limit||"不限"}</td><td>${m.tpm_limit||"不限"}</td>
     <td>${m.enabled?"是":"否"}</td>
     <td><button class="btn" onclick="editModel(${m.id})">编辑</button> <button class="btn danger" onclick="delModel(${m.id})">删除</button></td></tr>`).join("");
@@ -256,6 +256,7 @@ function showModelModal(model) {
     <div class="form-group"><label>名称</label><input id="f_name" value="${isEdit ? model.name : ''}"></div>
     <div class="form-group"><label>上游地址</label><input id="f_upstream_base" placeholder="https://api.openai.com/v1" value="${isEdit ? model.upstream_base : ''}"></div>
     <div class="form-group"><label>上游模型名</label><input id="f_upstream_model" placeholder="gpt-4o" value="${isEdit ? model.upstream_model : ''}"></div>
+    <div class="form-group"><label>上游协议</label><select id="f_protocol"><option value="openai" ${isEdit && model.protocol === 'openai' ? 'selected' : ''}>OpenAI</option><option value="anthropic" ${isEdit && model.protocol === 'anthropic' ? 'selected' : ''}>Anthropic</option></select></div>
     <div class="form-group"><label>RPM限制</label><input id="f_rpm" type="number" value="${isEdit ? model.rpm_limit : 0}"></div>
     <div class="form-group"><label>TPM限制</label><input id="f_tpm" type="number" value="${isEdit ? model.tpm_limit : 0}"></div>
     <div class="form-group"><label>启用</label><select id="f_enabled"><option value="1" ${isEdit && model.enabled ? 'selected' : ''}>是</option><option value="0" ${isEdit && !model.enabled ? 'selected' : ''}>否</option></select></div>
@@ -273,6 +274,7 @@ async function saveModel(id) {
     name: document.getElementById("f_name").value,
     upstream_base: document.getElementById("f_upstream_base").value,
     upstream_model: document.getElementById("f_upstream_model").value,
+    protocol: document.getElementById("f_protocol").value,
     rpm_limit: parseInt(document.getElementById("f_rpm").value)||0,
     tpm_limit: parseInt(document.getElementById("f_tpm").value)||0,
     enabled: document.getElementById("f_enabled").value === "1",
