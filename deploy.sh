@@ -429,6 +429,73 @@ setup_letsencrypt() {
 
   FINAL_BASE_URL="https://$DOMAIN:$PROXY_PORT"
   log_info "Let's Encrypt 证书就绪: $CERT_FILE"
+
+  # 配置自动续期（systemd timer + deploy-hook 重启 zhongzhuan）
+  setup_certbot_renew
+}
+
+# ===========================================================================
+# 证书自动续期（仅 Let's Encrypt 路径需要）
+# ===========================================================================
+setup_certbot_renew() {
+  log_step "配置 Let's Encrypt 自动续期"
+
+  # 1. deploy-hook 脚本：证书续期后重启 zhongzhuan 重载证书
+  local hook_dir="/etc/letsencrypt/renewal-hooks/deploy"
+  mkdir -p "$hook_dir"
+  local hook_file="$hook_dir/restart-zhongzhuan.sh"
+  cat > "$hook_file" <<'EOF'
+#!/usr/bin/env bash
+# Let's Encrypt 证书续期后重启 zhongzhuan，重载 TLS 证书
+set -e
+systemctl restart zhongzhuan || true
+EOF
+  chmod +x "$hook_file"
+  log_info "deploy-hook 已安装: $hook_file"
+
+  # 2. systemd timer：每天检查续期（certbot renew 只在证书剩余 <30 天时才真正续）
+  #    优于 cron：有日志、受 systemd 管理、失败可 journalctl 查
+  local timer_name="certbot-renew-zhongzhuan"
+  cat > "/etc/systemd/system/${timer_name}.service" <<EOF
+[Unit]
+Description=Renew Let's Encrypt certificates for zhongzhuan
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# --no-random-sleep-on-renew 避免 systemd timer 重复随机延迟
+ExecStart=/usr/bin/env certbot renew --no-random-sleep-on-renew --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/restart-zhongzhuan.sh
+EOF
+
+  cat > "/etc/systemd/system/${timer_name}.timer" <<'EOF'
+[Unit]
+Description=Daily check for Let's Encrypt certificate renewal
+
+[Timer]
+# 每天凌晨 3:17 和下午 15:17 各检查一次（避开整点高峰）
+OnCalendar=*-*-* 03:17:00
+OnCalendar=*-*-* 15:17:00
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now "${timer_name}.timer" 2>/dev/null || true
+  log_info "systemd timer 已启用: ${timer_name}.timer"
+  log_note "续期策略: 每天检查，证书剩余 <30 天时自动续期并重启 zhongzhuan"
+
+  # 3. 立即做一次 dry-run 验证续期链路通
+  log_info "执行续期 dry-run 验证..."
+  if certbot renew --dry-run --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/restart-zhongzhuan.sh >/dev/null 2>&1; then
+    log_info "续期 dry-run 成功，自动续期链路正常"
+  else
+    log_warn "续期 dry-run 失败（可能 80 端口暂不可达或已到限频），不影响当前证书有效性"
+    log_warn "可稍后手动验证: certbot renew --dry-run"
+  fi
 }
 
 # ===========================================================================
@@ -756,9 +823,13 @@ print_client_config() {
   echo "  tail -f /var/log/zhongzhuan.log"
   echo
   if [[ "$CERT_PATH" == "letsencrypt" ]]; then
-    echo -e "${BOLD}证书续期:${NC}"
-    echo "  certbot renew --deploy-hook \"systemctl restart $SERVICE_NAME\""
-    echo "  或加 cron: 0 0,12 * * * certbot renew --deploy-hook \"systemctl restart $SERVICE_NAME\""
+    echo -e "${BOLD}证书续期:${NC} ${GREEN}已自动配置${NC}"
+    echo "  systemd timer: certbot-renew-zhongzhuan.timer"
+    echo "  每天检查，证书剩余 <30 天时自动续期并重启 zhongzhuan"
+    echo "  查看状态: systemctl status certbot-renew-zhongzhuan.timer"
+    echo "  手动验证: certbot renew --dry-run"
+  elif [[ "$CERT_PATH" == "selfsign" ]]; then
+    echo -e "${BOLD}证书续期:${NC} 自签证书有效期 10 年，到期前重跑 deploy.sh --tls-selfsign 即可"
   fi
 }
 
