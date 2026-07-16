@@ -145,6 +145,18 @@ class Handler:
                     status=503,
                 )
 
+        # Streaming path: delegate to _stream_proxy immediately.
+        # _stream_proxy handles its own pick_key + rate-limit + translation + retry,
+        # so we MUST NOT do any of that here — doing so caused duplicate
+        # translation work and an inconsistent key pick between __call__
+        # (selected key X, did translation) and _stream_proxy (selected key Y,
+        # did translation again, discarded __call__'s work).
+        if is_stream:
+            return await self._stream_proxy(
+                request, path, base_headers, body, requested_model,
+                inbound_protocol=inbound_protocol,
+            )
+
         tried: set[int] = set()
         last_error: tuple[int, bytes] | None = None
         attempt = 0
@@ -235,12 +247,6 @@ class Handler:
                     _lg.warning(f"[{_req_id}] client transport closing before upstream request, aborting")
                     return web.Response(status=499, text="Client Closed Request")
 
-                if is_stream:
-                    # For streaming, delegate to _stream_proxy with protocol info
-                    return await self._stream_proxy(
-                        request, path, base_headers, body, requested_model,
-                        inbound_protocol=inbound_protocol,
-                    )
                 _lg.info(f"[{_req_id}] key_id={k.key_id} sending request to {upstream_path}")
                 resp = await client.request(
                     request.method, upstream_path, headers=headers, content=final_body,
