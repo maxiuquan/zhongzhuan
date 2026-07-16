@@ -62,6 +62,15 @@ class StreamO2A:
         self._output_chars: int = 0  # rough estimate of output tokens
         self._finished: bool = False
         self._buffer: bytes = b""  # incomplete SSE line buffer
+        # Diagnostic counters: track what we actually saw from upstream.
+        # reasoning_content is the "thinking" field some providers (e.g. agnes)
+        # emit before the final answer — Anthropic has no equivalent in our
+        # current translation, so we drop it. Counting it lets us warn when a
+        # "empty" client reply was actually caused by content being routed
+        # into reasoning_content only.
+        self._reasoning_chars: int = 0
+        self._content_chars: int = 0
+        self._tool_call_count: int = 0
 
     def done(self) -> bool:
         """Whether the stream is finished (after emitting message_stop)."""
@@ -123,6 +132,7 @@ class StreamO2A:
         content_delta = delta.get("content")
         if content_delta:
             self._output_chars += len(str(content_delta))
+            self._content_chars += len(str(content_delta))
             if self.state == STARTED:
                 # Open text block at index 0.
                 self._current_index = 0
@@ -154,7 +164,18 @@ class StreamO2A:
         # Handle tool_calls delta.
         tool_calls = delta.get("tool_calls")
         if tool_calls:
+            self._tool_call_count += len(tool_calls)
             out.extend(self._handle_tool_calls(tool_calls))
+
+        # Track reasoning_content: some providers (e.g. agnes, deepseek-r1)
+        # emit delta.reasoning_content for the model's internal "thinking"
+        # before the final answer. Anthropic has no equivalent in our current
+        # translation (we'd need a thinking content block), so we drop it.
+        # Count it here so the empty-completion warning can distinguish
+        # "upstream really returned nothing" from "upstream only sent thinking".
+        reasoning_delta = delta.get("reasoning_content")
+        if reasoning_delta:
+            self._reasoning_chars += len(str(reasoning_delta))
 
         # Handle finish_reason or [DONE].
         if finish_reason:
@@ -249,15 +270,29 @@ class StreamO2A:
         # Anthropic message with no content blocks — the client sees a
         # "successful but empty" reply and the user thinks nothing happened.
         # Log loudly so the root cause (upstream empty stream) is visible.
-        if self._output_chars == 0 and not self._tool_index_map:
-            logger.warning(
-                "StreamO2A: empty completion — finish_reason={}, "
-                "state={}, no content/tool delta received from upstream. "
-                "Likely upstream returned empty stream (check upstream model/"
-                "key/max_tokens or content_filter).",
-                finish_reason,
-                self.state,
-            )
+        # Distinguish three sub-cases so the operator can act:
+        #   - content=0, reasoning=0: upstream really returned nothing
+        #   - content=0, reasoning>0: model only produced thinking, no answer
+        #     (common with reasoning models hitting content_filter or wrong
+        #     max_tokens targeting content not thinking)
+        #   - content>0: not actually empty — should not fire (sanity check)
+        if self._content_chars == 0 and self._tool_call_count == 0:
+            if self._reasoning_chars > 0:
+                logger.warning(
+                    "StreamO2A: empty completion but upstream sent {} chars of "
+                    "reasoning_content (thinking) — model produced only thinking, "
+                    "no final answer. finish_reason={}, state={}. "
+                    "Check upstream max_tokens / reasoning_effort / content_filter.",
+                    self._reasoning_chars, finish_reason, self.state,
+                )
+            else:
+                logger.warning(
+                    "StreamO2A: empty completion — finish_reason={}, state={}, "
+                    "no content/tool/reasoning delta received from upstream. "
+                    "Likely upstream returned empty stream (check upstream model/"
+                    "key/max_tokens or content_filter).",
+                    finish_reason, self.state,
+                )
 
         out: list[bytes] = []
         # If we never saw a chunk with choices (e.g. only [DONE] arrived),
