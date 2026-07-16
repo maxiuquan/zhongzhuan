@@ -17,6 +17,11 @@ def build_ssl_context(tls_cfg) -> ssl.SSLContext | None:
         raise RuntimeError("tls.enabled=true but cert_file/key_file not configured")
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(tls_cfg.cert_file, tls_cfg.key_file)
+    # Explicitly advertise HTTP/1.1 only via ALPN. Without this, some clients
+    # (e.g. Claude Code, modern HTTP clients with h2 support) negotiate h2
+    # via ALPN and send an HTTP/2 PRI upgrade request, which aiohttp's
+    # HTTP/1.1 parser rejects with "400, message: Pause on PRI/Upgrade".
+    ctx.set_alpn_protocols(["http/1.1"])
     return ctx
 
 
