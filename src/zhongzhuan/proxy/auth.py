@@ -29,9 +29,11 @@ def make_proxy_auth_middleware(store) -> web.middleware:
         if request.path == "/v1/models" and request.method == "GET":
             return await handler(request)
 
-        # Check Bearer token
-        auth = request.headers.get("Authorization", "")
-        token = auth.removeprefix("Bearer ").strip()
+        # Check token: prefer x-api-key (Anthropic clients), fallback Authorization: Bearer (OpenAI clients)
+        token = request.headers.get("x-api-key", "").strip()
+        if not token:
+            auth = request.headers.get("Authorization", "")
+            token = auth.removeprefix("Bearer ").strip()
         if not token or not await db_verify_token(store, token):
             return web.json_response(
                 {"error": {"message": "invalid or missing access token", "type": "unauthorized"}},

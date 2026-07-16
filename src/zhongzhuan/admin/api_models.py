@@ -24,6 +24,9 @@ def register_routes(app: web.Application, ctx) -> None:
             tpm_limit=int(data.get("tpm_limit", 0)),
             enabled=bool(data.get("enabled", True)),
             weight=int(data.get("weight", 1)),
+            protocol=data.get("protocol", "openai"),
+            anthropic_version=data.get("anthropic_version", "2023-06-01"),
+            max_tokens_default=int(data.get("max_tokens_default", 4096)),
         )
         m = await create_model(ctx.store, m)
         await notify_proxy_reload()
@@ -39,6 +42,9 @@ def register_routes(app: web.Application, ctx) -> None:
             tpm_limit=int(data.get("tpm_limit", 0)),
             enabled=bool(data.get("enabled", True)),
             weight=int(data.get("weight", 1)),
+            protocol=data.get("protocol", "openai"),
+            anthropic_version=data.get("anthropic_version", "2023-06-01"),
+            max_tokens_default=int(data.get("max_tokens_default", 4096)),
         )
         await update_model(ctx.store, model_id, m)
         await notify_proxy_reload()
@@ -62,5 +68,7 @@ def _to_dict(m: Model) -> dict:
         "upstream_base": m.upstream_base, "upstream_model": m.upstream_model,
         "rpm_limit": m.rpm_limit, "tpm_limit": m.tpm_limit,
         "enabled": m.enabled, "weight": m.weight,
+        "protocol": m.protocol, "anthropic_version": m.anthropic_version,
+        "max_tokens_default": m.max_tokens_default,
         "created_at": m.created_at, "updated_at": m.updated_at,
     }

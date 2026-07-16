@@ -4,7 +4,7 @@ from __future__ import annotations
 import aiomysql
 
 from .store import Store
-from .schema import MYSQL_SCHEMA
+from .schema import MYSQL_SCHEMA, MYSQL_MIGRATIONS
 
 
 class TiDBStore(Store):
@@ -50,6 +50,12 @@ class TiDBStore(Store):
                     stmt = stmt.strip()
                     if stmt:
                         await cur.execute(stmt)
+                # Run migrations (ALTER TABLE ADD COLUMN IF NOT EXISTS)
+                for stmt in MYSQL_MIGRATIONS:
+                    try:
+                        await cur.execute(stmt)
+                    except Exception:
+                        pass  # column already exists or syntax not supported
 
         return cls(pool)
 

@@ -56,6 +56,9 @@ class KeyHealth:
     success_count: int = 0
     failure_count: int = 0
     recent_429_count: int = 0
+    upstream_protocol: str = "openai"  # "openai" | "anthropic"
+    anthropic_version: str = "2023-06-01"
+    max_tokens_default: int = 4096
 
     def is_available(self) -> bool:
         if time.time() < self.cooldown_until:
