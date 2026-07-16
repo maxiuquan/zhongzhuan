@@ -24,30 +24,11 @@ class UpstreamClient:
 
     async def start(self) -> None:
         if self._client is None:
-            # Use a custom transport with a generous keepalive window.
-            #
-            # Why: httpx's default keepalive_expiry is 5.0s. Between user turns
-            # (typing, thinking, reading output), idle gaps routinely exceed
-            # 5s — after which httpx closes the pooled connection and the next
-            # request has to redo DNS (227ms on this VPS) + TCP + TLS handshake
-            # from scratch. Raising to 120s lets idle connections survive
-            # between turns, eliminating repeated handshake cost.
-            #
-            # DNS itself is handled by the OS resolver. If upstream DNS is
-            # consistently slow, the proper fix is at the OS level
-            # (/etc/resolv.conf -> 1.1.1.1 / 8.8.8.8) rather than in-process.
-            transport = httpx.AsyncHTTPTransport(
-                limits=httpx.Limits(
-                    max_connections=100,
-                    max_keepalive_connections=50,
-                    keepalive_expiry=120.0,
-                ),
-            )
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=self._timeout,
                 trust_env=False,
-                transport=transport,
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=50),
             )
 
     async def close(self) -> None:
