@@ -505,7 +505,7 @@ write_env_file() {
 # 监听
 ZHONGZHUAN_PROXY_HOST=0.0.0.0
 ZHONGZHUAN_PROXY_PORT=$PROXY_PORT
-ZHONGZHUAN_ADMIN_HOST=127.0.0.1
+ZHONGZHUAN_ADMIN_HOST=0.0.0.0
 ZHONGZHUAN_ADMIN_PORT=$ADMIN_PORT
 # TLS
 ZHONGZHUAN_TLS_ENABLED=true
@@ -527,9 +527,10 @@ setup_firewall() {
     # 先放行 SSH，避免把自己锁外面
     ufw allow 22/tcp >/dev/null 2>&1 || true
     ufw allow "$PROXY_PORT"/tcp >/dev/null 2>&1 || true
-    # admin 端口不放行
+    # admin 端口也放行（对外暴露，依赖 admin 登录鉴权保护）
+    ufw allow "$ADMIN_PORT"/tcp >/dev/null 2>&1 || true
     if ! ufw status | grep -q "Status: active"; then
-      log_warn "即将启用 ufw 防火墙。已放行 22/tcp 和 $PROXY_PORT/tcp，admin 端口 $ADMIN_PORT 不放行。"
+      log_warn "即将启用 ufw 防火墙。已放行: 22/tcp, $PROXY_PORT/tcp, $ADMIN_PORT/tcp (admin)"
       if confirm "确认启用 ufw?" "y"; then
         yes | ufw enable >/dev/null 2>&1 || true
         log_info "ufw 已启用"
@@ -545,10 +546,11 @@ setup_firewall() {
     systemctl enable firewalld >/dev/null 2>&1 || true
     firewall-cmd --permanent --add-service=ssh >/dev/null 2>&1 || true
     firewall-cmd --permanent --add-port="$PROXY_PORT"/tcp >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-port="$ADMIN_PORT"/tcp >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
-    log_info "firewalld 已配置（放行 22/tcp 和 $PROXY_PORT/tcp）"
+    log_info "firewalld 已配置（放行 22/tcp, $PROXY_PORT/tcp, $ADMIN_PORT/tcp）"
   else
-    log_warn "未找到 ufw 或 firewalld，请手动配置防火墙：放行 22/tcp 和 $PROXY_PORT/tcp"
+    log_warn "未找到 ufw 或 firewalld，请手动配置防火墙：放行 22/tcp, $PROXY_PORT/tcp, $ADMIN_PORT/tcp"
   fi
 }
 
@@ -655,10 +657,10 @@ maybe_create_token() {
     -d '{"label":"deploy-script-auto"}' 2>/dev/null || true)
 
   if [[ -z "$resp" ]]; then
-    log_warn "自动创建 token 失败（admin 可能启用了登录鉴权）"
-    log_note "请手动通过 SSH 隧道访问 admin 后台创建 token："
-    log_note "  本地执行: ssh -L $ADMIN_PORT:127.0.0.1:$ADMIN_PORT user@<VPS>"
-    log_note "  浏览器开: http://127.0.0.1:$ADMIN_PORT"
+    log_warn "自动创建 token 失败（admin 启用了登录鉴权，需先登录拿 JWT）"
+    log_note "请通过浏览器访问 admin 后台手动创建 token："
+    log_note "  浏览器开: http://<VPS公网IP>:$ADMIN_PORT"
+    log_note "  登录后到「令牌」页创建"
     return
   fi
 
@@ -712,9 +714,12 @@ print_client_config() {
   fi
 
   echo
-  echo -e "${BOLD}admin 后台访问（SSH 隧道）:${NC}"
-  echo "  本地执行: ssh -L $ADMIN_PORT:127.0.0.1:$ADMIN_PORT root@<VPS>"
-  echo "  浏览器开: http://127.0.0.1:$ADMIN_PORT"
+  echo -e "${BOLD}admin 后台访问:${NC}"
+  echo "  浏览器直接开: http://<VPS公网IP>:$ADMIN_PORT"
+  echo -e "  ${YELLOW}安全提示:${NC} admin 走明文 HTTP，登录密码会被嗅探。生产环境建议："
+  echo "    - 用 SSH 隧道替代公网暴露: ssh -L $ADMIN_PORT:127.0.0.1:$ADMIN_PORT root@<VPS>"
+  echo "    - 或用 nginx/caddy 反代 admin 走 HTTPS"
+  echo "    - 确保已设置强密码（首次登录后到 /api/auth/change-password 修改）"
   echo
   echo -e "${BOLD}服务管理:${NC}"
   echo "  systemctl status $SERVICE_NAME"
