@@ -80,20 +80,34 @@ class StreamO2A:
         """Feed a raw OpenAI SSE chunk, return list of Anthropic SSE event bytes.
 
         A single chunk may contain multiple ``data:`` lines. Partial lines are
-        buffered across calls.
+        buffered across calls. SSE events are separated by ``\\n\\n``; a single
+        ``data:`` line may itself be split across multiple raw chunks, so we
+        accumulate bytes until a full ``\\n``-terminated line is present before
+        attempting to parse it.
         """
         if self._finished:
             return []
 
         out: list[bytes] = []
-        # Append to buffer and split into complete lines.
+        # Stitching: if the previous chunk ended mid-line (buffer has content
+        # but no trailing \n), and the new chunk starts a new "data:" line,
+        # the upstream provider split a single SSE event across chunks without
+        # a separating newline. Inject a \n to recover the event boundary.
+        # Without this fix, the buffered partial "data: {..." gets concatenated
+        # with the new chunk's "data: {..." → invalid JSON → silent drop.
+        # This is the root cause of missing "999" content from agnes-2.0-flash.
+        if (
+            self._buffer
+            and not self._buffer.endswith(b"\n")
+            and chunk.startswith(b"data:")
+        ):
+            self._buffer += b"\n"
         self._buffer += chunk
-        # SSE events are separated by \n\n; but OpenAI uses "data: ...\n\n".
-        # Process line-by-line, accumulating data: lines.
         while b"\n" in self._buffer:
             line_bytes, self._buffer = self._buffer.split(b"\n", 1)
             line = line_bytes.decode("utf-8", errors="replace").rstrip("\r")
             if not line:
+                # Blank line between SSE events — ignore.
                 continue
             if line.startswith(":"):
                 # SSE comment / keepalive — ignore.
@@ -106,9 +120,16 @@ class StreamO2A:
                 try:
                     data = json.loads(data_str)
                 except (json.JSONDecodeError, ValueError):
-                    logger.warning("StreamO2A: failed to parse SSE data: {}", data_str[:200])
+                    # Drop the malformed line but preserve the buffer tail
+                    # (next chunk may continue an in-flight partial line).
+                    logger.warning(
+                        "StreamO2A: failed to parse SSE data: {}", data_str[:200]
+                    )
                     continue
                 out.extend(self._handle_openai_chunk(data))
+            else:
+                # Unknown line type (event:, id:, retry:, etc.) — ignore.
+                continue
         return out
 
     def _handle_openai_chunk(self, data: dict) -> list[bytes]:
