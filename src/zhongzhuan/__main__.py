@@ -98,6 +98,7 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             upstream_protocol=model.protocol if model else "openai",
             anthropic_version=model.anthropic_version if model else "2023-06-01",
             max_tokens_default=model.max_tokens_default if model else 4096,
+            upstream_path_override=model.upstream_path_override if model else "",
         ))
     return health_list
 
