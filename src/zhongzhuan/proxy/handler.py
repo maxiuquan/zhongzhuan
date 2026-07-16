@@ -261,45 +261,20 @@ class Handler:
                 last_error = (resp.status_code, await resp.aread())
                 continue
 
-            # 4xx 认证/授权错误（401/403）：key 本身有问题，重试其他 key 也大概率失败，
-            # 但仍尝试一次（可能是单个 key 被吊销）。不 mark_failure（避免误降健康分）。
-            if resp.status_code in (401, 403):
-                _lg.error(f"[{_req_id}] key_id={k.key_id} upstream returned {resp.status_code} "
-                          f"(auth/permission denied), trying next key")
-                last_error = (resp.status_code, await resp.aread())
-                continue
-
-            # 其他 4xx（400/404/422 等）：请求本身有问题，重试无意义，直接返回给客户端
+            # 4xx 错误统一处理：认证/权限/请求格式等错误
+            # 重试其他 key 对这些错误意义不大（除非多 key 池里部分 key 有效），
+            # 但仍尝试完所有候选 key，最后走兜底翻译返回。
             if 400 <= resp.status_code < 500:
-                mark_success(k)  # key 没问题，是请求的问题
-                _lg.info(f"[{_req_id}] key_id={k.key_id} client error {resp.status_code}, not retrying")
-                data = await resp.aread()
-                resp_headers = dict(resp.headers)
-                for h in ("content-length", "transfer-encoding", "connection", "content-encoding"):
-                    resp_headers.pop(h, None)
-                # 错误响应按入站协议翻译错误信封
-                if need_translation:
-                    try:
-                        err_data = json.loads(data)
-                        err_msg = (err_data.get("error", {}).get("message")
-                                   if isinstance(err_data.get("error"), dict)
-                                   else str(err_data.get("error", "")))
-                        if inbound_protocol == "anthropic":
-                            tr_status, tr_body = translate_error_a2o(resp.status_code, err_msg)
-                        else:
-                            tr_status, tr_body = translate_error_o2a(resp.status_code, err_msg)
-                        data = json.dumps(tr_body, ensure_ascii=False).encode()
-                        resp_headers["Content-Type"] = "application/json"
-                        _lg.info(f"[{_req_id}] key_id={k.key_id} error translated {outbound_protocol}->{inbound_protocol}")
-                    except (json.JSONDecodeError, ValueError) as e:
-                        _lg.warning(f"[{_req_id}] key_id={k.key_id} failed to translate error: {e}, returning raw")
-                if self.store:
-                    latency_ms = int((time.time() - _request_start) * 1000)
-                    await log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
-                                      key_id=k.key_id, status=resp.status_code, latency_ms=latency_ms,
-                                      inbound_protocol=inbound_protocol, outbound_protocol=outbound_protocol,
-                                      translated=need_translation, error=f"client error {resp.status_code}")
-                return web.Response(status=resp.status_code, body=data, headers=resp_headers)
+                err_body = await resp.aread()
+                _lg.error(f"[{_req_id}] key_id={k.key_id} upstream {resp.status_code} "
+                          f"body={err_body[:500]!r}")
+                last_error = (resp.status_code, err_body)
+                # 认证/权限错误：key 有问题，不 mark_failure（避免误降健康分）
+                if resp.status_code in (401, 403):
+                    continue
+                # 其他 4xx（400/404/422）：请求本身有问题，重试无意义，直接返回
+                mark_success(k)
+                break
 
             mark_success(k)
             _lg.info(f"[{_req_id}] key_id={k.key_id} success status={resp.status_code}")
@@ -345,29 +320,43 @@ class Handler:
         _lg.error(f"[{_req_id}] all {attempt} key(s) failed after {len(tried)} attempt(s)")
         if last_error:
             status, body = last_error
+            # 提取上游错误消息（兼容 OpenAI/Anthropic/其他多种格式）
+            err_msg = ""
+            try:
+                err_data = json.loads(body)
+                if isinstance(err_data, dict):
+                    err_field = err_data.get("error")
+                    if isinstance(err_field, dict):
+                        err_msg = err_field.get("message", "") or err_field.get("detail", "")
+                    elif isinstance(err_field, str) and err_field:
+                        err_msg = err_field
+                    elif err_data.get("message"):
+                        err_msg = err_data["message"]
+                    elif err_data.get("detail"):
+                        err_msg = str(err_data["detail"])
+            except (json.JSONDecodeError, ValueError):
+                # 非 JSON：用原始 body 文本
+                err_msg = body.decode("utf-8", errors="replace")[:500]
+            if not err_msg:
+                err_msg = f"upstream returned HTTP {status}"
+            _lg.error(f"[{_req_id}] final error: status={status} msg={err_msg!r}")
+
             # 翻译错误信封：上游协议错误格式 → 入站协议错误格式
             if need_translation:
-                try:
-                    err_data = json.loads(body)
-                    err_msg = (err_data.get("error", {}).get("message")
-                               if isinstance(err_data.get("error"), dict)
-                               else str(err_data.get("error", "")))
-                    if inbound_protocol == "anthropic":
-                        # 出站是 openai，错误体是 OpenAI 格式，翻译回 anthropic
-                        tr_status, tr_body = translate_error_a2o(status, err_msg)
-                    else:
-                        # 出站是 anthropic，错误体是 Anthropic 格式，翻译回 openai
-                        tr_status, tr_body = translate_error_o2a(status, err_msg)
-                    status = tr_status
-                    body = json.dumps(tr_body, ensure_ascii=False).encode()
-                    _lg.info(f"[{_req_id}] last_error translated -> {inbound_protocol}")
-                except (json.JSONDecodeError, ValueError) as e:
-                    _lg.warning(f"[{_req_id}] failed to translate last_error: {e}, returning raw")
+                if inbound_protocol == "anthropic":
+                    # 出站是 openai，翻译回 anthropic
+                    tr_status, tr_body = translate_error_o2a(status, err_msg)
+                else:
+                    # 出站是 anthropic，翻译回 openai
+                    tr_status, tr_body = translate_error_a2o(status, err_msg)
+                status = tr_status
+                body = json.dumps(tr_body, ensure_ascii=False).encode()
+                _lg.info(f"[{_req_id}] last_error translated -> {inbound_protocol}")
             # Log failed request
             if self.store:
                 latency_ms = int((time.time() - _request_start) * 1000)
                 await log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
-                                  status=status, latency_ms=latency_ms, error="upstream failed")
+                                  status=status, latency_ms=latency_ms, error=f"upstream {status}: {err_msg[:200]}")
             return web.Response(status=status, body=body,
                                 headers={"Content-Type": "application/json"})
         return web.json_response(
