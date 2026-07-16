@@ -495,27 +495,56 @@ setup_selfsign() {
 }
 
 # ===========================================================================
-# 生成 .env
+# 生成/合并 .env
 # ===========================================================================
+# 环境变量项的"set or update"：已存在则替换该行，不存在则追加
+_env_upsert() {
+  local file="$1" key="$2" value="$3"
+  if grep -q "^${key}=" "$file"; then
+    # 已存在：原地替换该行（用 | 作为 sed 分隔符，避免值里的 / 冲突）
+    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+  else
+    echo "${key}=${value}" >> "$file"
+  fi
+}
+
 write_env_file() {
-  log_step "生成 .env 配置"
+  log_step "生成/合并 .env 配置"
   local env_file="$INSTALL_DIR/.env"
-  cat > "$env_file" <<EOF
+
+  if [[ -f "$env_file" ]]; then
+    # 已有 .env：备份后合并，只更新部署必需的项，保留用户原有配置（TiDB/JWT/SECRET 等）
+    local backup="${env_file}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "$env_file" "$backup"
+    log_info "检测到已有 .env，备份到 $backup"
+    log_info "仅更新部署必需项（TLS/端口/PROXY_AUTH），保留其余用户配置"
+  else
+    # 新部署：从头创建
+    cat > "$env_file" <<'EOF'
 # zhongzhuan 部署配置（由 deploy.sh 自动生成）
-# 监听
-ZHONGZHUAN_PROXY_HOST=0.0.0.0
-ZHONGZHUAN_PROXY_PORT=$PROXY_PORT
-ZHONGZHUAN_ADMIN_HOST=0.0.0.0
-ZHONGZHUAN_ADMIN_PORT=$ADMIN_PORT
-# TLS
-ZHONGZHUAN_TLS_ENABLED=true
-ZHONGZHUAN_TLS_CERT=$CERT_FILE
-ZHONGZHUAN_TLS_KEY=$KEY_FILE
-# 鉴权（VPS 必开）
-ZHONGZHUAN_PROXY_AUTH=true
+# 详见 .env.example
 EOF
+  fi
+
+  # 部署必需项：这些是本次部署脚本必须保证正确的值
+  _env_upsert "$env_file" "ZHONGZHUAN_PROXY_HOST" "0.0.0.0"
+  _env_upsert "$env_file" "ZHONGZHUAN_PROXY_PORT" "$PROXY_PORT"
+  _env_upsert "$env_file" "ZHONGZHUAN_ADMIN_HOST" "0.0.0.0"
+  _env_upsert "$env_file" "ZHONGZHUAN_ADMIN_PORT" "$ADMIN_PORT"
+  _env_upsert "$env_file" "ZHONGZHUAN_TLS_ENABLED" "true"
+  _env_upsert "$env_file" "ZHONGZHUAN_TLS_CERT" "$CERT_FILE"
+  _env_upsert "$env_file" "ZHONGZHUAN_TLS_KEY" "$KEY_FILE"
+  # VPS 必开代理鉴权——但如果用户原 .env 显式设了 true/false，尊重用户
+  if ! grep -q "^ZHONGZHUAN_PROXY_AUTH=" "$env_file"; then
+    _env_upsert "$env_file" "ZHONGZHUAN_PROXY_AUTH" "true"
+  fi
+  # admin 鉴权同理：若用户未设，VPS 场景建议开
+  if ! grep -q "^ZHONGZHUAN_ADMIN_AUTH=" "$env_file"; then
+    _env_upsert "$env_file" "ZHONGZHUAN_ADMIN_AUTH" "true"
+  fi
+
   chmod 600 "$env_file"
-  log_info "已写入 $env_file"
+  log_info ".env 配置完成: $env_file"
 }
 
 # ===========================================================================
