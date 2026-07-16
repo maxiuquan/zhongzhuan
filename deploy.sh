@@ -351,9 +351,34 @@ setup_letsencrypt() {
   # 安装 certbot（优先 snap，避免 apt 版与系统 cryptography 版本冲突）
   install_certbot
 
-  # 临时放行 80（standalone 验证用）
+  # 临时放行 80（standalone 验证用）——本地防火墙
   if command -v ufw >/dev/null 2>&1; then
     ufw allow 80/tcp >/dev/null 2>&1 || true
+  elif command -v firewall-cmd >/dev/null 2>&1; then
+    firewall-cmd --permanent --add-port=80/tcp >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+
+  # 预检 80 端口：本地是否被占用
+  if ss -tlnp 2>/dev/null | grep -q ':80 ' && [[ "$ASSUME_YES" != "1" ]]; then
+    log_warn "检测到 80 端口已被占用，certbot standalone 需要绑 80。建议先停掉占用 80 的服务。"
+    confirm "强行继续?" || die "用户取消"
+  fi
+
+  # 预检 80 端口：公网可达性（云安全组最容易漏）
+  log_info "预检 80 端口公网可达性（云安全组最易漏放行）..."
+  local port80_ok=1
+  local check_url="http://$PUBLIC_IP:80/"
+  # 用第三方探测服务从外部测 80 是否通
+  local ext_check
+  ext_check=$(curl -s --max-time 8 \
+    "https://portchecker.co/check" \
+    -d "target=$PUBLIC_IP&port=80" 2>/dev/null || true)
+  if echo "$ext_check" | grep -qi "open\|reachable\|1"; then
+    log_info "外部探测：80 端口可达"
+  else
+    port80_ok=0
+    log_warn "外部探测 80 端口不可达（或探测服务超时）"
   fi
 
   CERT_FILE="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
@@ -362,19 +387,44 @@ setup_letsencrypt() {
   if [[ -f "$CERT_FILE" && -f "$KEY_FILE" ]]; then
     log_info "证书已存在，跳过签发: $CERT_FILE"
   else
-    log_info "运行 certbot 签发证书（standalone，临时占用 80 端口）..."
-    # 先确保 80 端口没被占用（standalone 需要绑 80）
-    if ss -tlnp 2>/dev/null | grep -q ':80 ' && [[ "$ASSUME_YES" != "1" ]]; then
-      log_warn "检测到 80 端口已被占用，certbot standalone 将失败。建议先停掉占用 80 的服务。"
-      confirm "强行继续?" || die "用户取消"
+    if [[ "$port80_ok" != "1" ]]; then
+      echo
+      echo -e "${RED}${BOLD}=== 80 端口公网不可达，certbot standalone 签发必失败 ===${NC}"
+      echo -e "Let's Encrypt 验证服务器需要从公网访问 http://$DOMAIN:80/.well-known/acme-challenge/"
+      echo -e "请按以下顺序排查："
+      echo -e "  ${CYAN}1.${NC} 云厂商控制台安全组/防火墙规则：放行入站 TCP 80"
+      echo -e "     - GCP: VPC 网络 → 防火墙 → 添加入站规则 TCP:80"
+      echo -e "     - AWS: 安全组 → 入站规则 → TCP 80 0.0.0.0/0"
+      echo -e "     - 阿里云: 安全组 → 入方向 → TCP 80"
+      echo -e "     - 腾讯云: 安全组 → 入站规则 → TCP 80"
+      echo -e "  ${CYAN}2.${NC} 本机 ufw/firewalld 已自动放行 80（脚本已处理）"
+      echo -e "  ${CYAN}3.${NC} 域名 $DOMAIN 的 A 记录必须指向 $PUBLIC_IP"
+      echo -e "  ${CYAN}4.${NC} 若 80 端口实在无法放行，改用自签路径："
+      echo -e "     sudo ./deploy.sh --cert-path selfsign --ip $PUBLIC_IP"
+      echo
+      if [[ "$ASSUME_YES" != "1" ]]; then
+        confirm "已放行云安全组 80 端口，继续签发?" || die "用户取消"
+      else
+        die "80 端口不可达，非交互模式拒绝继续。请放行云安全组 80 后重跑，或改用 --cert-path selfsign"
+      fi
     fi
+
+    log_info "运行 certbot 签发证书（standalone，临时占用 80 端口）..."
     certbot certonly --standalone \
       -d "$DOMAIN" \
       --non-interactive \
       --agree-tos \
       --register-unsafely-without-email \
       --keep-until-expiring \
-      || die "certbot 签发失败。常见原因：1) 域名 A 记录未指向本机；2) 80 端口被占用；3) certbot 版本与 cryptography 不兼容（见上方日志）"
+      || {
+        echo
+        echo -e "${RED}certbot 签发失败。排查清单：${NC}"
+        echo -e "  1. 域名 $DOMAIN 的 A 记录是否指向 $PUBLIC_IP？（dig +short $DOMAIN）"
+        echo -e "  2. 云厂商安全组是否放行入站 TCP 80？（最常见原因）"
+        echo -e "  3. 本机 80 端口是否被其他服务占用？（ss -tlnp | grep :80）"
+        echo -e "  4. 若 80 无法放行，改用自签：sudo ./deploy.sh --cert-path selfsign --ip $PUBLIC_IP"
+        die "certbot 签发失败"
+      }
   fi
 
   FINAL_BASE_URL="https://$DOMAIN:$PROXY_PORT"
