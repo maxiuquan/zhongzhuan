@@ -261,7 +261,9 @@ docker run -d --name notion2api \
    - 优先级：`100`
    - 启用：是
 
-5. 可选：把多个 Notion 模型都配上（每个模型一条 Model 记录，共用同一个 key）：
+5. 可选：把多个 Notion 模型都配上（每个模型一条 Model 记录，共用同一个 key）。
+
+下表是 Notion2API 仓库 `main` 分支 `builtinModelDefinitions` 里**内置**的模型映射（截至 2026-07-16）：
 
 | Notion2API 模型 ID | Notion 内部代号 | 家族 | zhongzhuan 里建议的对外名 |
 |---|---|---|---|
@@ -273,6 +275,48 @@ docker run -d --name notion2api \
 | `sonnet-4.6` | almond-croissant-low | anthropic | `notion-sonnet` |
 | `opus-4.7` | apricot-sorbet-medium | anthropic | `notion-opus` |
 | `haiku-4.5` | (见 models.go) | anthropic | `notion-haiku` |
+
+> ⚠️ **Notion 网页端 AI 选择器已更新到更新的模型**（见下表），但 Notion2API 仓库的内置映射表尚未跟进这些新代号。下面列的是 Notion 网页端当前可选的最新模型，**Notion2API 暂未内置对应代号**，需用 3.3.1 节的方法动态获取：
+
+| Notion 网页端模型 | 发布时间 | Notion2API 内置？ | 备注 |
+|---|---|---|---|
+| Claude Opus 4.8 | 2026-05-28 | ❌ 暂未内置 | Anthropic 旗舰，1M 上下文，$5/$25 |
+| GPT-5.6 (Sol/Terra/Luna) | 2026-07-09 GA | ❌ 暂未内置 | 三档：Sol 旗舰 / Terra 中端 / Luna 低成本 |
+| Claude Sonnet 4.8 | 跳级发布 | ❌ 暂未内置 | 跳过 4.7 直接发布 |
+
+### 3.3.1 获取最新模型代号（opus-4.8 / gpt-5.6 等）
+
+Notion2API 有 probe 机制会从 Notion 动态拉取当前账号可用的模型列表（`probeModelsEnvelope`），即使内置表没有，也可能通过 probe 发现。获取可用模型的正确做法：
+
+```bash
+# 1. 先确保 Notion2API 已启动且账号 probe.json 有效
+curl -s http://127.0.0.1:8787/v1/models \
+  -H "Authorization: Bearer <notion2api-api_key>" | jq '.data[].id'
+```
+
+返回的列表里如果出现了 `opus-4.8` / `gpt-5.6-sol` 等新 ID，说明 probe 已动态发现，**直接用这些 ID 填到 zhongzhuan 后台的"上游模型名"字段即可**，无需改 Notion2API 代码。
+
+如果 `/v1/models` 没返回新模型（probe 没发现或 Notion2API 版本旧），有两种方式用上新模型：
+
+**方式 A：用 `auto` 让 Notion2API 自动选（最省事）**
+- zhongzhuan 后台该模型的"上游模型名"填 `auto`
+- 在 Notion 网页端把默认 AI 模型设成 Opus 4.8 或 GPT-5.6
+- Notion2API 调用时会用 Notion 账号当前的默认模型
+
+**方式 B：手动加 model_aliases（精确指定）**
+在 Notion2API 的 `config.json` 里加别名映射，把新模型名指向 probe 发现的代号：
+```json
+{
+  "model_aliases": {
+    "opus-4.8": "<probe发现的opus4.8代号>",
+    "gpt-5.6": "<probe发现的gpt5.6代号>"
+  }
+}
+```
+然后 zhongzhuan 后台"上游模型名"填 `opus-4.8` 或 `gpt-5.6`。probe 发现的代号可通过 Notion2API 日志（开 `debug_upstream: true`）或抓包 Notion 网页端请求获得。
+
+**方式 C：等 Notion2API 仓库更新**
+关注 [Notion2API 仓库](https://github.com/maxiuquan/Notion2API) 的 `internal/app/models.go`，维护者会逐步补全新模型代号。更新后 `git pull` 重新编译即可。
 
 ### 3.4 防火墙确认
 
