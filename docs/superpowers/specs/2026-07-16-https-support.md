@@ -356,4 +356,40 @@
 
 非目标：
 
-- 不实现 Let's Encrypt 自动签发（ACME HTTP-01
+- 不实现 Let's Encrypt 自动签发（ACME HTTP-01# Zhongzh# Zhongzhuan HTTPS 双栈监听方案
+
+| 字段 | 值 |
+|---|---|
+# Zhongzhuan HTTPS 双栈监听方案
+
+| 字段 | 值 |
+|---|---|
+| 项目代号 | `zhongzhuan` |
+| 文档版本 | v0.1# Zhongzhuan HTTPS 双栈监听方案
+
+| 字段 | 值 |
+|---|---|
+| 项目代号 | `zhongzhuan` |
+| 文档版本 | v0.1 (HTTPS 草案) |
+| 创建日期# Zhongzhuan HTTPS 双栈监听方案
+
+| 字段 | 值 |
+|---|---|
+| 项目代号 | `zhongzhuan` |
+| 文档版本 | v0.1 (HTTPS 草案) |
+| 创建日期 | 2026-07-16 |
+| 修订日期 | 2026-07-16 |
+| 开源协议 | MIT |
+|# Zhongzhuan HTTPS 双栈监听方案
+
+| 字段 | 值 |
+|---|---|
+| 项目代号 | `zhongzhuan` |
+| 文档版本 | v0.1 (HTTPS 草案) |
+| 创建日期 | 2026-07-16 |
+| 修订日期 | 2026-07-16 |
+| 开源协议 | MIT |
+| 依赖文档 | `docs/superpowers/specs/2026-06-14-zhongzhuan-design.md` |
+| 目标客户端 | Claude Code / Cursor / Cline / 任意强制 HTTPS 的下游调用方 |
+
+> 本方案在现有纯 HTTP 监听之上
