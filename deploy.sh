@@ -231,13 +231,8 @@ install_system_deps() {
 
 install_python_deps() {
   log_step "安装 Python 依赖"
-  # 用 --break-system-packages 兜底（PEP 668），ubuntu 24+/debian 12 需要
-  local pip_flags=""
-  if [[ -f /usr/lib/python3*/EXTERNALLY-MANAGED ]] 2>/dev/null \
-     || [[ -f /usr/share/python3*/EXTERNALLY-MANAGED ]] 2>/dev/null; then
-    pip_flags="--break-system-packages"
-  fi
-  "$PYTHON_BIN" -m pip install -q $pip_flags \
+  # 始终加 --break-system-packages 绕过 PEP 668（ubuntu 24+/debian 12+ 默认禁止 pip 全局安装）
+  "$PYTHON_BIN" -m pip install -q --break-system-packages \
     "aiohttp>=3.9" "httpx>=0.27" "pyyaml>=6.0" "loguru>=0.7" \
     "python-dotenv" "aiosqlite" "cryptography" "bcrypt" "PyJWT" 2>&1 \
     | grep -v "already satisfied" || true
