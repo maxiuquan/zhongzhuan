@@ -541,6 +541,16 @@ class Handler:
                             try:
                                 async for chunk in upstream_resp.aiter_raw():
                                     if chunk:
+                                        # Log first few raw chunks for diagnosis.
+                                        # Empty/abnormally short streams (e.g. 2 chunks
+                                        # in <20ms) are almost always upstream error
+                                        # events stuffed into SSE — without seeing the
+                                        # raw bytes we can't tell what upstream returned.
+                                        if chunk_count < 5:
+                                            _lg.warning(
+                                                f"[{_req_id}] streaming: key_id={k.key_id} "
+                                                f"raw chunk#{chunk_count} ({len(chunk)}B): {chunk[:500]!r}"
+                                            )
                                         if stream_translator:
                                             translated_chunks = await stream_translator.feed(chunk)
                                             for tc in translated_chunks:
