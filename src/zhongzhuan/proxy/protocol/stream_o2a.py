@@ -33,8 +33,17 @@ DONE = "DONE"
 
 
 def _sse_event(event: str, data: dict) -> bytes:
-    """Serialize a single Anthropic SSE event to bytes."""
-    payload = json.dumps(data, ensure_ascii=False)
+    """Serialize a single Anthropic SSE event to bytes.
+
+    Anthropic's SSE spec requires every event's ``data:`` payload to carry
+    a top-level ``"type"`` field matching the ``event:`` line (e.g. a
+    ``message_start`` event must have ``{"type":"message_start", ...}``).
+    Clients like Claude Code strictly validate this and silently drop
+    events missing the ``type`` field — without it the client sees an empty
+    stream. Inject it here so callers don't have to repeat it everywhere.
+    """
+    payload_dict = {"type": event, **data}
+    payload = json.dumps(payload_dict, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
 
 
