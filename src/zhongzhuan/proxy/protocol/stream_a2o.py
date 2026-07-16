@@ -92,6 +92,20 @@ class StreamA2O:
         """Whether the stream is finished (after emitting [DONE])."""
         return self._finished
 
+    def finish_safely(self) -> list[bytes]:
+        """Synthesize closing events if the stream hasn't finished yet.
+
+        Called by the handler when the upstream HTTP body ends but the
+        translator never saw message_stop (e.g. the final SSE event was
+        malformed and dropped). Without this, the OpenAI client would hang
+        waiting for [DONE] that never arrives.
+
+        Idempotent: if already finished, returns [].
+        """
+        if self._finished:
+            return []
+        return self._finish()
+
     async def feed(self, chunk: bytes) -> list[bytes]:
         """Feed a raw Anthropic SSE chunk, return list of OpenAI SSE chunk bytes.
 

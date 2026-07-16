@@ -560,6 +560,24 @@ class Handler:
                                         chunk_count += 1
                             except (ConnectionResetError, ConnectionError, OSError):
                                 _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected during stream")
+
+                            # If the translator stream hasn't emitted message_stop yet
+                            # (e.g. upstream ended without [DONE], or the final
+                            # finish_reason chunk was lost to a malformed SSE event),
+                            # synthesize the closing events now so the Anthropic
+                            # client receives a well-formed stream and doesn't hang
+                            # waiting for message_stop.
+                            if stream_translator and not stream_translator.done:
+                                _lg.warning(
+                                    f"[{_req_id}] streaming: key_id={k.key_id} "
+                                    f"upstream stream ended without finish ([DONE] / "
+                                    f"finish_reason missing); synthesizing closing "
+                                    f"events. state={stream_translator.state}"
+                                )
+                                closing = stream_translator.finish_safely()
+                                for ev in closing:
+                                    await resp.write(ev)
+
                             _lg.info(f"[{_req_id}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)")
                             mark_success(k)
 

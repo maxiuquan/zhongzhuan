@@ -76,60 +76,70 @@ class StreamO2A:
         """Whether the stream is finished (after emitting message_stop)."""
         return self._finished
 
+    def finish_safely(self) -> list[bytes]:
+        """Synthesize closing events if the stream hasn't finished yet.
+
+        Called by the handler when the upstream HTTP body ends but the
+        translator never saw [DONE] or finish_reason (e.g. the final SSE
+        event was malformed and dropped, which happens with upstreams that
+        pack multiple events per HTTP chunk and split a JSON payload across
+        TCP segment boundaries). Without this, the Anthropic client would
+        hang waiting for a message_stop that never arrives.
+
+        Idempotent: if already finished, returns [].
+        """
+        if self._finished:
+            return []
+        # Treat as end_turn since we have no real finish_reason from upstream.
+        return self._finish(finish_reason=None)
+
     async def feed(self, chunk: bytes) -> list[bytes]:
         """Feed a raw OpenAI SSE chunk, return list of Anthropic SSE event bytes.
 
-        A single chunk may contain multiple ``data:`` lines. Partial lines are
-        buffered across calls. SSE events are separated by ``\\n\\n``; a single
-        ``data:`` line may itself be split across multiple raw chunks, so we
-        accumulate bytes until a full ``\\n``-terminated line is present before
-        attempting to parse it.
+        Uses SSE event-boundary parsing: events are separated by a blank line
+        (``\\n\\n``). A single event's ``data:`` line may be split across
+        multiple raw TCP chunks, so we accumulate bytes until a full event
+        boundary (blank line) is present before attempting to parse it.
+
+        This is more robust than line-based parsing for upstream providers
+        (e.g. agnes-2.0-flash) that pack multiple SSE events into one HTTP
+        chunk and split a single event's JSON payload across TCP segments.
         """
         if self._finished:
             return []
 
         out: list[bytes] = []
-        # Stitching: if the previous chunk ended mid-line (buffer has content
-        # but no trailing \n), and the new chunk starts a new "data:" line,
-        # the upstream provider split a single SSE event across chunks without
-        # a separating newline. Inject a \n to recover the event boundary.
-        # Without this fix, the buffered partial "data: {..." gets concatenated
-        # with the new chunk's "data: {..." → invalid JSON → silent drop.
-        # This is the root cause of missing "999" content from agnes-2.0-flash.
-        if (
-            self._buffer
-            and not self._buffer.endswith(b"\n")
-            and chunk.startswith(b"data:")
-        ):
-            self._buffer += b"\n"
         self._buffer += chunk
-        while b"\n" in self._buffer:
-            line_bytes, self._buffer = self._buffer.split(b"\n", 1)
-            line = line_bytes.decode("utf-8", errors="replace").rstrip("\r")
-            if not line:
-                # Blank line between SSE events — ignore.
-                continue
-            if line.startswith(":"):
-                # SSE comment / keepalive — ignore.
-                continue
-            if line.startswith("data:"):
-                data_str = line[len("data:"):].lstrip()
-                if data_str.strip() == "[DONE]":
-                    out.extend(self._finish(finish_reason=None))
+        # Split on \n\n (SSE event boundary). Anything after the last \n\n is
+        # a partial event — keep it in the buffer until the next chunk.
+        while b"\n\n" in self._buffer:
+            event_bytes, self._buffer = self._buffer.split(b"\n\n", 1)
+            # An event may contain multiple "data:" lines (for multi-line
+            # values); OpenAI uses single-line data, so just concatenate.
+            data_lines: list[str] = []
+            for raw_line in event_bytes.split(b"\n"):
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r")
+                if not line or line.startswith(":"):
                     continue
-                try:
-                    data = json.loads(data_str)
-                except (json.JSONDecodeError, ValueError):
-                    # Drop the malformed line but preserve the buffer tail
-                    # (next chunk may continue an in-flight partial line).
-                    logger.warning(
-                        "StreamO2A: failed to parse SSE data: {}", data_str[:200]
-                    )
-                    continue
-                out.extend(self._handle_openai_chunk(data))
-            else:
-                # Unknown line type (event:, id:, retry:, etc.) — ignore.
+                if line.startswith("data:"):
+                    data_lines.append(line[len("data:"):].lstrip())
+                # event:, id:, retry: etc. — ignore for OpenAI compat.
+            if not data_lines:
                 continue
+            data_str = "\n".join(data_lines)
+            if data_str.strip() == "[DONE]":
+                out.extend(self._finish(finish_reason=None))
+                continue
+            try:
+                data = json.loads(data_str)
+            except (json.JSONDecodeError, ValueError):
+                # Should not happen after event-boundary split — if it does,
+                # the upstream sent a malformed event. Log and drop.
+                logger.warning(
+                    "StreamO2A: failed to parse SSE event: {}", data_str[:200]
+                )
+                continue
+            out.extend(self._handle_openai_chunk(data))
         return out
 
     def _handle_openai_chunk(self, data: dict) -> list[bytes]:
