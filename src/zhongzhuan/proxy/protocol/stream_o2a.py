@@ -242,6 +242,23 @@ class StreamO2A:
         """Emit closing events: content_block_stop, message_delta, message_stop."""
         if self._finished:
             return []
+
+        # Detect empty completion: upstream returned no text/tool content delta.
+        # This usually means upstream returned an empty stream (e.g. only [DONE],
+        # or chunks with empty delta.content), which silently produces an
+        # Anthropic message with no content blocks — the client sees a
+        # "successful but empty" reply and the user thinks nothing happened.
+        # Log loudly so the root cause (upstream empty stream) is visible.
+        if self._output_chars == 0 and not self._tool_index_map:
+            logger.warning(
+                "StreamO2A: empty completion — finish_reason={}, "
+                "state={}, no content/tool delta received from upstream. "
+                "Likely upstream returned empty stream (check upstream model/"
+                "key/max_tokens or content_filter).",
+                finish_reason,
+                self.state,
+            )
+
         out: list[bytes] = []
         # If we never saw a chunk with choices (e.g. only [DONE] arrived),
         # emit message_start + ping first so the Anthropic stream is well-formed.
