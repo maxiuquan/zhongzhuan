@@ -203,23 +203,22 @@ detect_public_ip() {
 # ===========================================================================
 install_system_deps() {
   log_step "安装系统依赖"
+  # 注意：certbot 不在这里装——apt 版与系统 cryptography 版本冲突，
+  # 由独立的 install_certbot() 用 snap/pip 方式装
   case "$OS_ID" in
     ubuntu|debian|raspbian)
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq
       apt-get install -y -qq python3 python3-pip python3-venv ufw curl openssl \
-        ${CERT_PATH:+$([ "$CERT_PATH" = "letsencrypt" ] && echo certbot)} \
         >/dev/null
       ;;
     centos|rhel|rocky|almalinux|amzn)
       if command -v dnf >/dev/null 2>&1; then PM=dnf; else PM=yum; fi
       $PM install -y -q python3 python3-pip firewalld curl openssl \
-        $([ "$CERT_PATH" = "letsencrypt" ] && echo certbot) \
         >/dev/null
       ;;
     fedora)
       dnf install -y -q python3 python3-pip firewalld curl openssl \
-        $([ "$CERT_PATH" = "letsencrypt" ] && echo certbot) \
         >/dev/null
       ;;
     *)
@@ -237,6 +236,64 @@ install_python_deps() {
     "python-dotenv" "aiosqlite" "cryptography" "bcrypt" "PyJWT" 2>&1 \
     | grep -v "already satisfied" || true
   log_info "Python 依赖安装完成"
+}
+
+# ===========================================================================
+# certbot 安装（避免 apt 版与系统 cryptography 版本冲突）
+# ===========================================================================
+install_certbot() {
+  # 已存在且能跑就直接用
+  if command -v certbot >/dev/null 2>&1; then
+    if certbot --version >/dev/null 2>&1; then
+      log_info "certbot 已安装: $(certbot --version 2>&1)"
+      return 0
+    fi
+    log_warn "检测到 certbot 但无法运行（可能依赖损坏），将重新安装"
+  fi
+
+  # 优先 snap 版：自带隔离的 Python 环境，不受系统 cryptography 版本影响
+  if command -v snap >/dev/null 2>&1; then
+    log_info "通过 snap 安装 certbot（推荐，避免依赖冲突）..."
+    snap install core >/dev/null 2>&1 || true
+    snap refresh core >/dev/null 2>&1 || true
+    if snap install --classic certbot 2>/dev/null; then
+      ln -sf /snap/bin/certbot /usr/local/bin/certbot 2>/dev/null || true
+      if certbot --version >/dev/null 2>&1; then
+        log_info "snap certbot 安装成功: $(certbot --version 2>&1)"
+        return 0
+      fi
+    fi
+    log_warn "snap 安装 certbot 失败，回退到 pip"
+  fi
+
+  # 降级方案：pip 装独立 certbot（与系统 cryptography 绑定，但版本较新通常兼容）
+  log_info "通过 pip 安装 certbot..."
+  "$PYTHON_BIN" -m pip install -q --break-system-packages certbot 2>&1 \
+    | grep -v "already satisfied" || true
+
+  if certbot --version >/dev/null 2>&1; then
+    log_info "pip certbot 安装成功: $(certbot --version 2>&1)"
+    return 0
+  fi
+
+  # 最后兜底：apt 版（可能与系统 cryptography 冲突，仅作最后手段）
+  log_warn "snap/pip 均不可用，回退到 apt 版 certbot（可能依赖冲突）..."
+  case "$OS_ID" in
+    ubuntu|debian|raspbian) apt-get install -y -qq certbot >/dev/null ;;
+    centos|rhel|rocky|almalinux|fedora|amzn) dnf install -y -q certbot >/dev/null ;;
+  esac
+
+  # 修复 apt 版 certbot 与新版 cryptography 的冲突：
+  # josepy 依赖的 pyOpenSSL 用了已删除的 lib.GEN_EMAIL，降级 cryptography 到 <42
+  if ! certbot --version >/dev/null 2>&1; then
+    log_warn "apt certbot 依赖冲突，尝试降级 cryptography 修复..."
+    "$PYTHON_BIN" -m pip install -q --break-system-packages "cryptography<42" 2>&1 \
+      | grep -v "already satisfied" || true
+  fi
+
+  certbot --version >/dev/null 2>&1 \
+    && log_info "certbot 安装成功: $(certbot --version 2>&1)" \
+    || die "certbot 安装失败。请手动安装：snap install --classic certbot 或 pip install certbot"
 }
 
 # ===========================================================================
@@ -291,13 +348,8 @@ setup_letsencrypt() {
     confirm "继续可能签发失败，是否继续?" || die "用户取消"
   fi
 
-  command -v certbot >/dev/null 2>&1 || {
-    log_info "安装 certbot..."
-    case "$OS_ID" in
-      ubuntu|debian|raspbian) apt-get install -y -qq certbot >/dev/null ;;
-      centos|rhel|rocky|almalinux|fedora|amzn) dnf install -y -q certbot >/dev/null ;;
-    esac
-  }
+  # 安装 certbot（优先 snap，避免 apt 版与系统 cryptography 版本冲突）
+  install_certbot
 
   # 临时放行 80（standalone 验证用）
   if command -v ufw >/dev/null 2>&1; then
@@ -310,14 +362,19 @@ setup_letsencrypt() {
   if [[ -f "$CERT_FILE" && -f "$KEY_FILE" ]]; then
     log_info "证书已存在，跳过签发: $CERT_FILE"
   else
-    log_info "运行 certbot签发证书（standalone，临时占用 80 端口）..."
+    log_info "运行 certbot 签发证书（standalone，临时占用 80 端口）..."
+    # 先确保 80 端口没被占用（standalone 需要绑 80）
+    if ss -tlnp 2>/dev/null | grep -q ':80 ' && [[ "$ASSUME_YES" != "1" ]]; then
+      log_warn "检测到 80 端口已被占用，certbot standalone 将失败。建议先停掉占用 80 的服务。"
+      confirm "强行继续?" || die "用户取消"
+    fi
     certbot certonly --standalone \
       -d "$DOMAIN" \
       --non-interactive \
       --agree-tos \
       --register-unsafely-without-email \
       --keep-until-expiring \
-      || die "certbot 签发失败。请检查：1) 域名 A 记录指向本机；2) 80 端口未被占用"
+      || die "certbot 签发失败。常见原因：1) 域名 A 记录未指向本机；2) 80 端口被占用；3) certbot 版本与 cryptography 不兼容（见上方日志）"
   fi
 
   FINAL_BASE_URL="https://$DOMAIN:$PROXY_PORT"
