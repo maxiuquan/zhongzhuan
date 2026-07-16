@@ -220,6 +220,12 @@ class Handler:
                 if final_body is not body:
                     headers["Content-Length"] = str(len(final_body))
 
+            # 上游完整地址覆盖：非空时直接用作请求路径/URL，不自动拼接 /v1/chat/completions 等
+            # 支持路径（/openai/v1/chat/completions，与 upstream_base 合并）或完整 URL（http(s)://...）
+            if k.upstream_path_override:
+                upstream_path = k.upstream_path_override
+                _lg.info(f"[{_req_id}] key_id={k.key_id} using upstream_path_override={upstream_path!r}")
+
             _lg.info(f"[{_req_id}] key_id={k.key_id} using key {k.api_key[:8]}...{k.api_key[-4:]}")
 
             try:
@@ -492,6 +498,10 @@ class Handler:
                         headers["Authorization"] = f"Bearer {k.api_key}"
                         if final_body is not body:
                             headers["Content-Length"] = str(len(final_body))
+
+                    # 上游完整地址覆盖：非空时直接用作请求路径/URL，不自动拼接 /v1/chat/completions 等
+                    if k.upstream_path_override:
+                        upstream_path = k.upstream_path_override
 
                     try:
                         async for upstream_resp in client.stream(

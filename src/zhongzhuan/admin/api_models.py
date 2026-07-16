@@ -27,6 +27,7 @@ def register_routes(app: web.Application, ctx) -> None:
             protocol=data.get("protocol", "openai"),
             anthropic_version=data.get("anthropic_version", "2023-06-01"),
             max_tokens_default=int(data.get("max_tokens_default", 4096)),
+            upstream_path_override=data.get("upstream_path_override", ""),
         )
         m = await create_model(ctx.store, m)
         await notify_proxy_reload()
@@ -45,6 +46,7 @@ def register_routes(app: web.Application, ctx) -> None:
             protocol=data.get("protocol", "openai"),
             anthropic_version=data.get("anthropic_version", "2023-06-01"),
             max_tokens_default=int(data.get("max_tokens_default", 4096)),
+            upstream_path_override=data.get("upstream_path_override", ""),
         )
         await update_model(ctx.store, model_id, m)
         await notify_proxy_reload()
@@ -70,5 +72,6 @@ def _to_dict(m: Model) -> dict:
         "enabled": m.enabled, "weight": m.weight,
         "protocol": m.protocol, "anthropic_version": m.anthropic_version,
         "max_tokens_default": m.max_tokens_default,
+        "upstream_path_override": m.upstream_path_override,
         "created_at": m.created_at, "updated_at": m.updated_at,
     }

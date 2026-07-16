@@ -70,6 +70,10 @@ def register_routes(app: web.Application, ctx) -> None:
                         tpm_limit=md.get("tpm_limit", 0),
                         enabled=md.get("enabled", True),
                         weight=md.get("weight", 1),
+                        protocol=md.get("protocol", "openai"),
+                        anthropic_version=md.get("anthropic_version", "2023-06-01"),
+                        max_tokens_default=md.get("max_tokens_default", 4096),
+                        upstream_path_override=md.get("upstream_path_override", ""),
                     ))
             # Keys
             if "keys.json" in zf.namelist():

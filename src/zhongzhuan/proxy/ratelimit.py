@@ -59,6 +59,8 @@ class KeyHealth:
     upstream_protocol: str = "openai"  # "openai" | "anthropic"
     anthropic_version: str = "2023-06-01"
     max_tokens_default: int = 4096
+    # 上游完整地址覆盖：非空时直接用作请求路径/URL，不自动拼接 /v1/chat/completions 等
+    upstream_path_override: str = ""
 
     def is_available(self) -> bool:
         if time.time() < self.cooldown_until:

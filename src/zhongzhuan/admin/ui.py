@@ -255,6 +255,7 @@ function showModelModal(model) {
     <h3>${isEdit ? '编辑模型' : '添加模型'}</h3>
     <div class="form-group"><label>名称</label><input id="f_name" value="${isEdit ? model.name : ''}"></div>
     <div class="form-group"><label>上游地址</label><input id="f_upstream_base" placeholder="https://api.openai.com/v1" value="${isEdit ? model.upstream_base : ''}"></div>
+    <div class="form-group"><label>上游完整地址（留空则自动拼接，不拼接可填完整路径或URL）</label><input id="f_upstream_path_override" placeholder="/openai/v1/chat/completions 或 https://host/openai/v1/chat/completions" value="${isEdit ? (model.upstream_path_override||'') : ''}"></div>
     <div class="form-group"><label>上游模型名</label><input id="f_upstream_model" placeholder="gpt-4o" value="${isEdit ? model.upstream_model : ''}"></div>
     <div class="form-group"><label>上游协议</label><select id="f_protocol"><option value="openai" ${isEdit && model.protocol === 'openai' ? 'selected' : ''}>OpenAI</option><option value="anthropic" ${isEdit && model.protocol === 'anthropic' ? 'selected' : ''}>Anthropic</option></select></div>
     <div class="form-group"><label>RPM限制</label><input id="f_rpm" type="number" value="${isEdit ? model.rpm_limit : 0}"></div>
@@ -274,6 +275,7 @@ async function saveModel(id) {
     name: document.getElementById("f_name").value,
     upstream_base: document.getElementById("f_upstream_base").value,
     upstream_model: document.getElementById("f_upstream_model").value,
+    upstream_path_override: document.getElementById("f_upstream_path_override").value,
     protocol: document.getElementById("f_protocol").value,
     rpm_limit: parseInt(document.getElementById("f_rpm").value)||0,
     tpm_limit: parseInt(document.getElementById("f_tpm").value)||0,
