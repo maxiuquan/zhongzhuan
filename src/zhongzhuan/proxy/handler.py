@@ -84,36 +84,32 @@ class Handler:
         if request.method == "GET" and request.path == "/v1/models":
             return await self._list_models()
 
-        # Debug: log every incoming request
+        # Debug: log every incoming request. Use INFO (not WARNING) and avoid
+        # dumping the full headers/body — those can be 100KB+ per request and
+        # are a major latency contributor under load. Only log the essentials.
         from loguru import logger as _lg
-        _lg.warning(f"[REQ] {request.method} {request.path} remote={request.remote} content_length={request.content_length} hdrs={dict(request.headers)}")
+        _lg.info(
+            f"[REQ] {request.method} {request.path} "
+            f"remote={request.remote} content_length={request.content_length}"
+        )
         # Read body — wrap in try to log failures instead of silently hanging
         try:
             body = await request.read()
         except Exception as _e:
             _lg.error(f"[REQ] read failed: {type(_e).__name__}: {_e}")
             return web.json_response({"error": {"message": f"read failed: {_e}"}}, status=400)
-        if body:
-            _lg.warning(f"[REQ BODY] {body[:500]!r}")
-        # Also write to a separate file for easy access
-        try:
-            with open(r"f:\xiangmu\zhongzhuan\logs\requests.log", "a", encoding="utf-8") as _f:
-                _f.write(f"[REQ] {request.method} {request.path} remote={request.remote}\n")
-                _f.write(f"[HDRS] {dict(request.headers)}\n")
-                if body:
-                    _f.write(f"[BODY] {body[:1000]!r}\n")
-                _f.write("-" * 80 + "\n")
-        except Exception as _e:
-            pass
 
         base_headers = dict(request.headers)
         for h in ("Host", "Authorization"):
             base_headers.pop(h, None)
         path = request.path
 
-        # Parse body to extract the requested model name and stream flag
+        # Parse body to extract the requested model name and stream flag.
+        # Keep body_obj around so _stream_proxy can reuse it instead of
+        # re-parsing the (potentially 100KB) body on every retry iteration.
         requested_model: str | None = None
         is_stream = False
+        body_obj: dict | None = None
         try:
             if body:
                 body_obj = _json_loads(body)
@@ -155,6 +151,7 @@ class Handler:
             return await self._stream_proxy(
                 request, path, base_headers, body, requested_model,
                 inbound_protocol=inbound_protocol,
+                body_obj=body_obj if isinstance(body_obj, dict) else None,
             )
 
         tried: set[int] = set()
@@ -378,6 +375,7 @@ class Handler:
         body: bytes,
         requested_model: str | None,
         inbound_protocol: str = "openai",
+        body_obj: dict | None = None,
     ) -> web.StreamResponse:
         """SSE streaming pass-through with multi-key retry.
 
@@ -463,10 +461,14 @@ class Handler:
                     headers["Accept-Encoding"] = "identity"
 
                     if need_translation:
-                        try:
-                            body_obj_s = json.loads(body) if body else {}
-                        except (json.JSONDecodeError, ValueError):
-                            body_obj_s = {}
+                        # Reuse the already-parsed body dict from __call__
+                        # to avoid re-parsing a 100KB body on every retry.
+                        body_obj_s = body_obj if body_obj is not None else {}
+                        if not body_obj_s and body:
+                            try:
+                                body_obj_s = json.loads(body)
+                            except (json.JSONDecodeError, ValueError):
+                                body_obj_s = {}
 
                         if inbound_protocol == "anthropic" and outbound_protocol == "openai":
                             translated_req = translate_request_a2o(body_obj_s, k.max_tokens_default)
@@ -531,16 +533,11 @@ class Handler:
                             try:
                                 async for chunk in upstream_resp.aiter_raw():
                                     if chunk:
-                                        # Log first few raw chunks for diagnosis.
-                                        # Empty/abnormally short streams (e.g. 2 chunks
-                                        # in <20ms) are almost always upstream error
-                                        # events stuffed into SSE — without seeing the
-                                        # raw bytes we can't tell what upstream returned.
-                                        if chunk_count < 5:
-                                            _lg.warning(
-                                                f"[{_req_id}] streaming: key_id={k.key_id} "
-                                                f"raw chunk#{chunk_count} ({len(chunk)}B): {chunk[:500]!r}"
-                                            )
+                                        # NOTE: previously logged first 5 raw chunks
+                                        # here for diagnosis; removed for latency
+                                        # (500B chunk * 5 = 2.5KB per request,
+                                        # not free under load). Re-enable per-req
+                                        # only if you need to debug upstream SSE.
                                         if stream_translator:
                                             translated_chunks = await stream_translator.feed(chunk)
                                             for tc in translated_chunks:
