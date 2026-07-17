@@ -68,9 +68,17 @@ Claude Code ────HTTPS:8443─────────►│  zhongzhuan:
 
 ### 2.2 软件依赖
 
-zhongzhuan 侧由 `deploy.sh` 自动安装，无需手动处理。Notion2API 侧需要 Go 1.25+ 或 Docker 二选一。
+zhongzhuan 侧由 `deploy.sh` 自动安装，无需手动处理。Notion2API 侧有三种方式，**推荐方式 A（预编译二进制，零依赖）**：
 
-#### 方式 A：装 Go 1.25+（用于源码编译）
+| 方式 | 依赖 | 适用场景 | 见 |
+|---|---|---|---|
+| A 预编译二进制（推荐） | 无 | 只想快速部署，不想装 Go/Docker | [3.2.1 方式 A](#方式-a下载预编译二进制推荐) |
+| B 源码编译 | Go 1.25+ | 要改代码 / 想用最新未发布提交 / 二进制跑不了 | [2.2 方式 B](#方式-b装-go-125用于源码编译) + [3.2.1 方式 B](#方式-b源码编译备选) |
+| C Docker | Docker | 不想装 Go，想用容器隔离 | [3.2.5 Docker 方式](#325-备选docker-方式) |
+
+> **方式 A 不需要本节装任何东西**，直接跳到 [3.2 部署](#32-部署-notion2api)。只有在选方式 B 时才需要按下面装 Go。
+
+#### 方式 B：装 Go 1.25+（用于源码编译）
 
 ```bash
 # 1. 下载 Go 1.25（以 1.25.0 为例，去 https://go.dev/dl/ 看最新小版本号）
@@ -98,24 +106,7 @@ go version go1.25.0 linux/amd64
 - `wget: command not found` → `sudo apt install -y wget`（Debian/Ubuntu）或 `sudo dnf install -y wget`（CentOS）
 - `go: command not found` → 检查 `source ~/.bashrc` 是否执行，或重新登录 SSH
 - 下载慢 → 换国内镜像：`wget https://golang.google.cn/dl/go1.25.0.linux-amd64.tar.gz`
-- 内存 < 1GB 编译 OOM → 用方式 B（Docker），或在本地编译后上传二进制
-
-#### 方式 B：用 Docker（不想装 Go）
-
-```bash
-# Debian/Ubuntu
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER
-# 重新登录 SSH 让 docker 组生效
-```
-
-**验证**（重新登录后）：
-```bash
-docker --version
-# 应输出: Docker version 2x.x.x
-docker run --rm hello-world
-# 应输出: Hello from Docker!
-```
+- 内存 < 1GB 编译 OOM → 换方式 A（预编译二进制）或方式 C（Docker）
 
 ### 2.3 Notion 账号准备
 
@@ -151,34 +142,83 @@ curl -k https://127.0.0.1:8443/healthz
 
 ### 3.2 部署 Notion2API
 
-#### 3.2.1 拉取代码 + 编译
+#### 3.2.1 获取 Notion2API 二进制
+
+Notion2API 的二进制获取有三种方式，**推荐方式 A（预编译二进制，零依赖）**：
+
+##### 方式 A：下载预编译二进制（推荐）
+
+本项目 `mod/` 目录已提供预编译的 linux/amd64 二进制（静态链接、stripped，约 18MB，基于 Notion2API 仓库 main 分支 `d767484` 构建）。直接下载即可，**无需装 Go**。
 
 ```bash
-# 1. 建目录并克隆
+# 1. 建目录
+sudo mkdir -p /opt/notion2api
+sudo chown -R $USER:$USER /opt/notion2api
+cd /opt/notion2api
+
+# 2. 下载预编译二进制（把 <branch> 换成实际分支名，如 main 或 trae/agent-7ODVJo）
+#    也可用 jsDelivr CDN 加速: https://cdn.jsdelivr.net/gh/maxiuquan/zhongzhuan@<branch>/mod/notion2api-linux-amd64
+wget -O notion2api https://raw.githubusercontent.com/maxiuquan/zhongzhuan/<branch>/mod/notion2api-linux-amd64
+
+# 3. 赋可执行权限
+chmod +x notion2api
+
+# 4. 校验完整性（应输出: cb626a6608b99891b2a4fdaa2775fbfd021eaf8788e6ee39889f49baa722f064  notion2api）
+sha256sum notion2api
+
+# 5. 验证二进制能跑（会打印帮助/参数列表，按 q 退出）
+./notion2api --help 2>&1 | head -20 || true
+```
+
+**预期输出**（校验 + 帮助）：
+```
+cb626a6608b99891b2a4fdaa2775fbfd021eaf8788e6ee39889f49baa722f064  notion2api
+Usage of /opt/notion2api/notion2api:
+  -api-key string
+        ...
+  -config string
+        ...
+```
+
+> ⚠️ **v1.0 文档纠错**：仓库**没有** `--version` 子命令。验证二进制靠 `--help` 看参数列表，或直接启动看日志（下一步）。
+
+**报错兜底**：
+- `wget: command not found` → `sudo apt install -y wget`
+- 下载慢/超时 → 换 jsDelivr CDN（见上面注释）或 `git clone` 本项目后从 `mod/` 目录取
+- `sha256sum` 不匹配 → 下载不完整或被篡改，重新下载；仍不对就换方式 B 自己编译
+- `./notion2api: cannot execute binary file: Exec format error` → 你的 VPS 不是 x86-64（如 ARM），预编译二进制不适用，换方式 B 自己编译
+- `./notion2api: /lib64/ld-linux-x86-64.so.2: not found` → 不会出现，二进制是静态链接（CGO_ENABLED=0）；如真出现说明下载错了，重下
+
+##### 方式 B：源码编译（备选）
+
+适合要改 Notion2API 代码、或预编译二进制跑不了（非 x86-64 架构）、或想用最新未发布提交的场景。需先按 [2.2 方式 B](#方式-b装-go-125用于源码编译) 装 Go 1.25+。
+
+```bash
+# 1. 建目录并克隆 Notion2API 源码
 sudo mkdir -p /opt/notion2api
 sudo chown -R $USER:$USER /opt/notion2api
 cd /opt/notion2api
 git clone https://github.com/maxiuquan/Notion2API.git .
 
-# 2. 编译（需 Go 1.25+，见 2.2）
+# 2. 编译（需 Go 1.25+，见 2.2 方式 B）
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o notion2api ./cmd/notion2api
 
-# 3. 验证二进制就绪
-ls -lh notion2api
+# 3. 赋可执行权限 + 验证
+chmod +x notion2api
+./notion2api --help 2>&1 | head -5
 ```
 
 **预期输出**（编译成功 + 二进制大小约 15-25 MB）：
 ```
--rwxrwxr-x 1 user user 18M Jul 17 10:00 notion2api
+Usage of /opt/notion2api/notion2api:
+  -api-key string
 ```
 
-> ⚠️ **v1.0 文档纠错**：仓库**没有** `--version` 子命令。验证二进制只能靠 `ls` 看文件，或直接启动看日志（下一步）。
-
 **报错兜底**：
-- `go: command not found` → 回 [2.2](#22-软件依赖) 装 Go
+- `go: command not found` → 回 [2.2 方式 B](#方式-b装-go-125用于源码编译) 装 Go
 - `go: errors during go build` / `module requires Go 1.25` → Go 版本太低，重装 1.25+
 - `fatal: destination path '.' already exists and is not an empty directory` → 目录非空，换空目录或 `rm -rf /opt/notion2api/*` 重来
-- 编译卡住/OOM → 内存不足，改用 [3.2.5 Docker 方式](#325-备选docker-方式)，或在本地编译后 `scp` 上传二进制
+- 编译卡住/OOM → 内存不足，改用方式 A 或 [3.2.5 Docker 方式](#325-备选docker-方式)
 
 #### 3.2.2 启动服务并登录 Notion 账号（WebUI 邮箱+OTP 流程）
 
@@ -914,7 +954,7 @@ curl -s http://127.0.0.1:8787/v1/models \
 | 配置 | zhongzhuan admin | zhongzhuan admin + Notion2API config.json + /admin WebUI |
 | 上游 | OpenAI/Anthropic 官方 | + Notion AI（经 Notion2API 桥接） |
 | 维护 | 单项目升级 | 两项目独立升级，互不影响 |
-| 额外依赖 | 无 | Go 1.25+（编译）或 Docker |
+| 额外依赖 | 无 | 无（预编译二进制，推荐）/ Go 1.25+（自编译）/ Docker |
 | 前置准备 | API key | Notion 账号 + 能收 OTP 的邮箱 |
 | 登录方式 | 无 | Notion2API /admin WebUI 邮箱+OTP |
 
