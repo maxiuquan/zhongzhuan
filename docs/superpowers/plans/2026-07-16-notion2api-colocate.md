@@ -166,7 +166,13 @@ chmod +x notion2api
 # 4. 校验完整性（应输出: cb626a6608b99891b2a4fdaa2775fbfd021eaf8788e6ee39889f49baa722f064  notion2api）
 sha256sum notion2api
 
-# 5. 验证二进制能跑（会打印帮助/参数列表，按 q 退出）
+# 5. 下载 WebUI 静态文件包（二进制不含 /admin WebUI 的 HTML/JS/CSS，必须单独下载解压）
+#    否则启动会报: WebUI not found. Expected static files under static/admin.
+wget -O static-admin.tar.gz https://raw.githubusercontent.com/maxiuquan/zhongzhuan/<branch>/mod/notion2api-static-admin.tar.gz
+mkdir -p static && tar -xzf static-admin.tar.gz -C static && rm static-admin.tar.gz
+# 解压后 static/admin/ 下应有 index.html、_next/ 等
+
+# 6. 验证二进制能跑（会打印帮助/参数列表）
 ./notion2api --help 2>&1 | head -20 || true
 ```
 
@@ -182,12 +188,15 @@ Usage of /opt/notion2api/notion2api:
 
 > ⚠️ **v1.0 文档纠错**：仓库**没有** `--version` 子命令。验证二进制靠 `--help` 看参数列表，或直接启动看日志（下一步）。
 
+> ⚠️ **必须下载 static/admin**：预编译二进制不含 WebUI 静态文件，不下载解压会报 `WebUI not found. Expected static files under static/admin.`，导致无法访问 `/admin` 登录 Notion 账号（见 3.2.2）。
+
 **报错兜底**：
 - `wget: command not found` → `sudo apt install -y wget`
 - 下载慢/超时 → 换 jsDelivr CDN（见上面注释）或 `git clone` 本项目后从 `mod/` 目录取
 - `sha256sum` 不匹配 → 下载不完整或被篡改，重新下载；仍不对就换方式 B 自己编译
 - `./notion2api: cannot execute binary file: Exec format error` → 你的 VPS 不是 x86-64（如 ARM），预编译二进制不适用，换方式 B 自己编译
 - `./notion2api: /lib64/ld-linux-x86-64.so.2: not found` → 不会出现，二进制是静态链接（CGO_ENABLED=0）；如真出现说明下载错了，重下
+- 启动报 `WebUI not found. Expected static files under static/admin.` → 第 5 步的 static-admin.tar.gz 没下载或没解压到 `static/admin/`，重做第 5 步
 
 ##### 方式 B：源码编译（备选）
 
@@ -904,21 +913,38 @@ sudo kill <PID>
 # 或改 config.json 的 port 到别的（如 8788），同步改 zhongzhuan 后台的 upstream_base
 ```
 
-### 6.8 WebUI 登录 Notion 账号时验证码收不到
+### 6.8 Notion2API 启动报 `WebUI not found. Expected static files under static/admin.`
+
+预编译二进制不含 WebUI 静态文件。修复：
+
+```bash
+cd /opt/notion2api
+# 下载 static/admin 包并解压（把 <branch> 换成实际分支名）
+wget -O static-admin.tar.gz https://raw.githubusercontent.com/maxiuquan/zhongzhuan/<branch>/mod/notion2api-static-admin.tar.gz
+mkdir -p static && tar -xzf static-admin.tar.gz -C static && rm static-admin.tar.gz
+# 确认结构正确——应看到 index.html、_next/ 等
+ls static/admin/
+# 重启服务
+sudo systemctl restart notion2api
+```
+
+如果是源码编译方式（方式 B）报这个错，说明 `static/admin/` 没构建——仓库已带预构建文件，`git clone` 后就在 `static/admin/` 下；若没有，需在仓库根目录跑 `npm --prefix ./frontend run build:static` 生成。
+
+### 6.9 WebUI 登录 Notion 账号时验证码收不到
 
 - 检查邮箱垃圾箱
 - Notion 对同一邮箱频繁发码会限流，等 5-15 分钟再试
 - 确认邮箱是 Notion 账号绑定的邮箱
 - 换个 Notion 账号试（确认不是 Notion 服务端问题）
 
-### 6.9 zhongzhuan 后台改了模型但不生效
+### 6.10 zhongzhuan 后台改了模型但不生效
 
 zhongzhuan 有 reload 机制但偶有延迟。强制生效：
 ```bash
 sudo systemctl restart zhongzhuan
 ```
 
-### 6.10 升级后模型列表变了
+### 6.11 升级后模型列表变了
 
 Notion2API 升级后内置模型可能增减。重新拉模型列表确认：
 ```bash
