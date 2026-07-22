@@ -125,7 +125,7 @@ class ProxyHandler:
         remote = request.remote or ""
 
         # detect inbound protocol (openai / anthropic)
-        inbound_protocol = detect_inbound_protocol(path, request.headers, url=request.url)
+        inbound_protocol = detect_inbound_protocol(path, request.headers)
         # extract requested model name from body
         requested_model = ""
         body_obj: dict | None = None
