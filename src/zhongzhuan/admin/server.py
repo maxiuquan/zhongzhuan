@@ -14,6 +14,7 @@ from .api_export_import import register_routes as register_export
 from .api_auth import register_routes as register_auth
 from .api_tokens import register_routes as register_tokens
 from .auth import make_auth_middleware, init_jwt_secret, auth_enabled
+from .notify import configure_reload_target
 from .ui import mount_ui
 
 
@@ -25,6 +26,16 @@ class AdminServer:
 
     def app(self) -> web.Application:
         app = web.Application(client_max_size=64 * 1024 * 1024)
+
+        # Configure proxy reload target so admin edits hot-reload the proxy
+        # without a restart. Falls back to defaults if config is unavailable.
+        try:
+            cfg = self.config
+            port = cfg.server.proxy.port if cfg else 8443
+            use_tls = bool(getattr(cfg.server.tls, "enabled", True)) if cfg else True
+            configure_reload_target(port, use_tls)
+        except Exception:
+            configure_reload_target(8443, True)
 
         @web.middleware
         async def error_middleware(request, handler):

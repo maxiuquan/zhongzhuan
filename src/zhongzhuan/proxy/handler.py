@@ -31,6 +31,7 @@ def make_handler(
     proxy_timeout: float = 300.0,
     store: Store | None = None,
     load_keys_fn=None,
+    groups: list[dict] | None = None,
 ) -> ProxyHandler:
     """Factory: create a ProxyHandler for the aiohttp route."""
     return ProxyHandler(
@@ -39,6 +40,7 @@ def make_handler(
         store=store,
         proxy_timeout=proxy_timeout,
         load_keys_fn=load_keys_fn,
+        groups=groups,
     )
 
 
@@ -79,6 +81,7 @@ class ProxyHandler:
         store: Store | None = None,
         proxy_timeout: float = 300.0,
         load_keys_fn=None,
+        groups: list[dict] | None = None,
     ) -> None:
         self._clients = clients
         self._keys = keys
@@ -88,14 +91,72 @@ class ProxyHandler:
         # Lazy client cache (upstream_base → UpstreamClient)
         self._client_cache: dict[str, UpstreamClient] = dict(clients)
         self._lock = asyncio.Lock()
+        # Group routing map: name → {"id": int, "strategy": str, "members": set[model_id]}
+        self._groups: dict[str, dict] = {}
+        self._set_groups(groups or [])
+
+    def _set_groups(self, groups: list[dict]) -> None:
+        """Rebuild the group routing map from a list of group dicts."""
+        gm: dict[str, dict] = {}
+        for g in groups:
+            name = (g.get("name") or "").strip()
+            if not name:
+                continue
+            gm[name] = {
+                "id": g.get("id"),
+                "strategy": g.get("strategy", "round_robin"),
+                "members": set(g.get("members") or []),
+            }
+        self._groups = gm
+
+    def _resolve_candidates(self, requested_model: str) -> list[KeyHealth]:
+        """Pick candidate keys based on the requested model name.
+
+        - requested_model matches a *group* name → all available keys whose
+          model belongs to that group's members (group-level load balancing
+          via key health scoring; member order/strategy is best-effort).
+        - requested_model matches a *model* name → keys bound to that model.
+        - no match (or empty) → all available keys (backwards-compatible).
+        """
+        available = [k for k in self._keys if k.is_available()]
+
+        if requested_model:
+            # 1. Group name match
+            grp = self._groups.get(requested_model)
+            if grp and grp["members"]:
+                member_ids = grp["members"]
+                matched = [k for k in available if k.model_id in member_ids]
+                if matched:
+                    return matched
+            # 2. Model name match
+            matched = [k for k in available if k.model_name == requested_model]
+            if matched:
+                return matched
+
+        return available
 
     async def reload_keys(self) -> int:
-        """Reload keys from the store and update self._keys. Returns new count."""
-        if self._load_keys_fn is None:
-            return len(self._keys)
-        new_keys = await self._load_keys_fn()
-        self._keys = new_keys
-        return len(new_keys)
+        """Reload keys (and groups) from the store. Returns new key count."""
+        if self._load_keys_fn is not None:
+            new_keys = await self._load_keys_fn()
+            self._keys = new_keys
+        # Also reload groups so admin edits to groups take effect without restart
+        if self.store is not None:
+            try:
+                from ..store.groups import list_groups as list_groups_db
+                rows = await list_groups_db(self.store)
+                self._set_groups([
+                    {
+                        "id": r.get("id"),
+                        "name": r.get("name"),
+                        "strategy": r.get("strategy"),
+                        "members": [m["model_id"] for m in (r.get("members") or [])],
+                    }
+                    for r in rows
+                ])
+            except Exception:
+                _lg.exception("reload groups failed")
+        return len(self._keys)
 
     async def _ensure_client(self, upstream_base: str) -> UpstreamClient | None:
         if upstream_base in self._client_cache:
@@ -146,12 +207,12 @@ class ProxyHandler:
             f"inbound={inbound_protocol}"
         )
 
-        # Fast path: /v1/models -> return custom model names
-        if path.rstrip("/") == "models" and method.upper() == "GET":
+        # Fast path: /v1/models -> return custom model names (+ group names)
+        if path.rstrip("/") == "/v1/models" and method.upper() == "GET":
             return await self._list_models()
 
         # Short circuit: no keys configured
-        candidates = [k for k in self._keys if k.is_available()]
+        candidates = self._resolve_candidates(requested_model)
         if not candidates:
             return web.json_response(
                 {"error": "no enabled keys"}, status=503,
@@ -244,7 +305,7 @@ class ProxyHandler:
 
                     headers["Content-Length"] = str(len(final_body))
                 else:
-                    if requested_model and k.upstream_model and k.model_name and requested_model == k.model_name:
+                    if requested_model and k.upstream_model and requested_model != k.upstream_model:
                         final_body = _swap_model_name(body, requested_model, k.upstream_model)
                     headers["Authorization"] = f"Bearer {k.api_key}"
                     if final_body is not body:
@@ -685,7 +746,8 @@ class ProxyHandler:
 
         This endpoint is hit by clients (Trae/Cursor/Cline) when they validate
         the base URL. We return the *custom* model names so the user picks them
-        in the client's model dropdown.
+        in the client's model dropdown. Group names are also exposed as callable
+        model names so downstream clients can invoke a whole group.
         """
         from datetime import datetime, timezone
         now = int(datetime.now(timezone.utc).timestamp())
@@ -699,4 +761,9 @@ class ProxyHandler:
                 continue
             seen.add(name)
             data.append({"id": name, "object": "model", "created": now, "owned_by": "zhongzhuan"})
+        # Expose group names as callable model names too
+        for gname in self._groups:
+            if gname and gname not in seen:
+                seen.add(gname)
+                data.append({"id": gname, "object": "model", "created": now, "owned_by": "zhongzhuan"})
         return web.json_response({"object": "list", "data": data})

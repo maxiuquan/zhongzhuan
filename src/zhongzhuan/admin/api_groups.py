@@ -42,8 +42,10 @@ def register_routes(app: web.Application, ctx) -> None:
             fallback_enabled=bool(data.get("fallback_enabled", True)),
         )
         await update_group(ctx.store, group_id, g)
-        members = data.get("members", [])
-        if members:
+        # Only touch members when the field is explicitly provided (list, possibly empty).
+        # None = leave members untouched; [] = clear all members.
+        members = data.get("members")
+        if members is not None:
             await set_group_members(ctx.store, group_id, [
                 GroupMemberData(
                     group_id=group_id, model_id=m["model_id"],

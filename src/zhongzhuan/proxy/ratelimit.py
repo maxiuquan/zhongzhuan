@@ -49,6 +49,7 @@ class KeyHealth:
     key_id: int
     api_key: str
     window: SlidingWindow
+    model_id: int = 0
     upstream_base: str = ""
     upstream_model: str = ""
     model_name: str = ""

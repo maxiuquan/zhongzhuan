@@ -91,6 +91,7 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
         health_list.append(KeyHealth(
             key_id=kr.id, api_key=plain,
             window=SlidingWindow(cfg.limits.per_key_window_seconds, rpm_limit),
+            model_id=kr.model_id,
             rpm_limit=rpm_limit,
             upstream_base=upstream_base,
             upstream_model=upstream_model,
@@ -200,7 +201,15 @@ async def run_foreground(
     # Load models and groups for /v1/models
     models_data = [{"name": m.name} for m in await list_models(store)]
     from zhongzhuan.store.groups import list_groups as list_groups_db
-    groups_data = [{"name": g["name"]} for g in await list_groups_db(store)]
+    groups_data = [
+        {
+            "id": g["id"],
+            "name": g["name"],
+            "strategy": g["strategy"],
+            "members": [m["model_id"] for m in (g.get("members") or [])],
+        }
+        for g in await list_groups_db(store)
+    ]
 
     proxy = ProxyServer(
         upstream_clients=upstream_clients, keys=keys,

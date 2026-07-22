@@ -458,12 +458,15 @@ async function batchImportKeys() {
 }
 
 async function loadGroups() {
-  const d = await api("/api/groups");
-  groups = d?.data || [];
+  const [dg, dm] = await Promise.all([api("/api/groups"), api("/api/models")]);
+  groups = dg?.data || [];
+  models = dm?.data || [];
+  const modelMap = {};
+  models.forEach(m => modelMap[m.id] = m.name);
   document.getElementById("groupTable").innerHTML = groups.map(g => `
-    <tr><td>${g.name}</td><td>${g.strategy}</td>
-    <td>${(g.members||[]).map(x=>"model#"+x.model_id).join(", ")}</td>
-    <td><button class="btn danger" onclick="delGroup(${g.id})">删除</button></td></tr>`).join("");
+    <tr><td>${esc(g.name)}</td><td>${esc(g.strategy)}</td>
+    <td>${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id))).join(", ") || '<span style="color:#8b949e">无</span>'}</td>
+    <td><button class="btn" onclick="editGroup(${g.id})">编辑</button> <button class="btn danger" onclick="delGroup(${g.id})">删除</button></td></tr>`).join("");
 }
 
 async function delGroup(id) {
@@ -471,26 +474,39 @@ async function delGroup(id) {
   if (r !== null) loadGroups();
 }
 
-function showGroupModal() {
-  loadModels();
-  const opts = models.map(m => `<option value="${m.id}">${m.name}</option>`).join("");
+function editGroup(id) {
+  const g = groups.find(x => x.id === id);
+  if (g) showGroupModal(g);
+}
+
+function showGroupModal(group) {
+  const isEdit = !!group;
+  const selectedIds = isEdit ? new Set((group.members||[]).map(x => x.model_id)) : new Set();
+  const opts = models.map(m => `<option value="${m.id}" ${selectedIds.has(m.id) ? "selected" : ""}>${esc(m.name)}</option>`).join("");
+  const strat = isEdit ? group.strategy : "round_robin";
   document.getElementById("modalContent").innerHTML = `
-    <h3>添加分组</h3>
-    <div class="form-group"><label>名称</label><input id="f_gname"></div>
-    <div class="form-group"><label>策略</label><select id="f_strategy"><option value="round_robin">轮询</option><option value="weighted">加权</option><option value="failover">故障转移</option></select></div>
-    <div class="form-group"><label>成员模型</label><select id="f_members" multiple style="height:100px">${opts}</select></div>
-    <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="addGroup()">保存</button></div>`;
+    <h3>${isEdit ? '编辑分组' : '添加分组'}</h3>
+    <div class="form-group"><label>名称（作为下游可调用的模型名）</label><input id="f_gname" value="${isEdit ? esc(group.name) : ''}"></div>
+    <div class="form-group"><label>策略</label><select id="f_strategy"><option value="round_robin" ${strat==='round_robin'?'selected':''}>轮询</option><option value="weighted" ${strat==='weighted'?'selected':''}>加权</option><option value="failover" ${strat==='failover'?'selected':''}>故障转移</option></select></div>
+    <div class="form-group"><label>成员模型（可多选）</label><select id="f_members" multiple style="height:120px">${opts}</select></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveGroup(${isEdit ? group.id : ''})">保存</button></div>`;
   document.getElementById("modal").classList.add("show");
 }
 
-async function addGroup() {
+async function saveGroup(id) {
   const sel = document.getElementById("f_members").selectedOptions;
   const members = Array.from(sel).map(o => ({model_id: parseInt(o.value)}));
-  const r = await api("/api/groups", {method:"POST", body:JSON.stringify({
+  const body = {
     name: document.getElementById("f_gname").value,
     strategy: document.getElementById("f_strategy").value,
     members,
-  })});
+  };
+  let r;
+  if (id) {
+    r = await api("/api/groups/" + id, {method:"PUT", body:JSON.stringify(body)});
+  } else {
+    r = await api("/api/groups", {method:"POST", body:JSON.stringify(body)});
+  }
   if (r !== null) { closeModal(); loadGroups(); }
 }
 

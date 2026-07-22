@@ -51,7 +51,7 @@ class ProxyServer:
         handler = make_handler(
             upstream_clients=self.upstream_clients, keys=the_keys,
             proxy_timeout=self.proxy_timeout, store=self.store,
-            load_keys_fn=self.load_keys_fn,
+            load_keys_fn=self.load_keys_fn, groups=self.groups,
         )
         app.router.add_route("*", "/v1/{tail:.*}", handler)
         app.router.add_get("/healthz", lambda r: web.Response(text="ok"))
