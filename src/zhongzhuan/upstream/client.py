@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import AsyncIterator
 
 import httpx
+from httpx import Timeout as HttpxTimeout
 
 
 def _sanitize_url(url: str) -> str:
@@ -12,14 +13,19 @@ def _sanitize_url(url: str) -> str:
 
 
 class UpstreamClient:
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, timeout: float = 30.0, connect_timeout: float = 15.0) -> None:
         base_url = _sanitize_url(base_url)
         self.base_url = base_url.rstrip("/")
         # Extract path prefix from base_url (e.g., "/v1" from "https://api.example.com/v1")
         # to avoid duplicating it when the request path also starts with the same prefix.
         from urllib.parse import urlparse
         self._base_path = urlparse(self.base_url).path.rstrip("/")
-        self._timeout = timeout
+        self._timeout = HttpxTimeout(
+            timeout,        # overall read timeout (for slow AI model responses)
+            connect=connect_timeout,   # connect timeout
+            pool=connect_timeout,      # pool timeout
+            write=30.0,                # write timeout
+        )
         self._client: httpx.AsyncClient | None = None
 
     async def start(self) -> None:
@@ -28,7 +34,7 @@ class UpstreamClient:
                 base_url=self.base_url,
                 timeout=self._timeout,
                 trust_env=False,
-                limits=httpx.Limits(max_connections=100, max_keepalive_connections=50),
+                limits=httpx.Limits(max_connections=100, max_keepalive_connections=50, keepalive_expiry=60.0),
             )
 
     async def close(self) -> None:

@@ -7,6 +7,8 @@ import urllib.parse
 
 from aiohttp import web
 
+import asyncio
+
 from ..store import Store
 from ..store.logs import log_request
 from ..upstream import UpstreamClient
@@ -26,7 +28,17 @@ def _json_loads(data: bytes) -> object:
 
 
 def _swap_model_name(body: bytes, old_name: str, new_name: str) -> bytes:
-    """Replace the "model" field value in JSON body."""
+    """Replace the "model" field value in JSON body.
+
+    Uses bytes-level replacement to avoid expensive json.loads+json.dumps
+    on large payloads. Falls back to JSON parse if bytes pattern not found.
+    """
+    # Fast path: bytes replacement for the most common pattern
+    search = f'"model": "{old_name}"'.encode()
+    replace = f'"model": "{new_name}"'.encode()
+    if search in body:
+        return body.replace(search, replace, 1)
+    # Fallback for non-standard spacing
     try:
         obj = json.loads(body)
     except (json.JSONDecodeError, ValueError):
@@ -184,7 +196,10 @@ class Handler:
             upstream_path = path
             final_body = body
             headers = dict(base_headers)
-            headers["Accept-Encoding"] = "identity"
+            # Non-streaming: allow upstream compression for faster response transfer.
+            # httpx handles transparent decompression.
+            # Streaming keeps Accept-Encoding: identity (set in _stream_proxy) to
+            # avoid compressing SSE chunk boundaries.
 
             if need_translation:
                 # Translate request body
@@ -235,8 +250,6 @@ class Handler:
                 upstream_path = k.upstream_path_override
                 _lg.info(f"[{_req_id}] key_id={k.key_id} using upstream_path_override={upstream_path!r}")
 
-            _lg.info(f"[{_req_id}] key_id={k.key_id} using key {k.api_key[:8]}...{k.api_key[-4:]}")
-
             try:
                 # Check if client is still connected before making expensive upstream calls
                 transport = request.transport
@@ -244,10 +257,12 @@ class Handler:
                     _lg.warning(f"[{_req_id}] client transport closing before upstream request, aborting")
                     return web.Response(status=499, text="Client Closed Request")
 
-                _lg.info(f"[{_req_id}] key_id={k.key_id} sending request to {upstream_path}")
+                _upstream_start = time.time()
                 resp = await client.request(
                     request.method, upstream_path, headers=headers, content=final_body,
                 )
+                _upstream_elapsed = time.time() - _upstream_start
+                _lg.info(f"[{_req_id}] key_id={k.key_id} upstream responded in {_upstream_elapsed*1000:.0f}ms status={resp.status_code}")
             except (ConnectionResetError, ConnectionError, OSError) as e:
                 # Client-side disconnect (timeout or cancel).
                 # This is NOT an upstream failure — do NOT mark the key as failed.
@@ -287,6 +302,7 @@ class Handler:
 
             mark_success(k)
             _lg.info(f"[{_req_id}] key_id={k.key_id} success status={resp.status_code}")
+            _process_start = time.time()
             data = await resp.aread()
             resp_headers = dict(resp.headers)
             # If upstream sent gzip, decompress so aiohttp can re-encode/serve properly
@@ -316,13 +332,17 @@ class Handler:
                 except (json.JSONDecodeError, ValueError) as e:
                     _lg.warning(f"[{_req_id}] key_id={k.key_id} failed to translate response: {e}, returning raw")
 
-            # Log successful request
+            _process_elapsed = time.time() - _process_start
+            total_elapsed = time.time() - _request_start
+            _lg.info(f"[{_req_id}] key_id={k.key_id} upstream={_upstream_elapsed*1000:.0f}ms proc={_process_elapsed*1000:.0f}ms total={total_elapsed*1000:.0f}ms body={len(data)}b")
+
+            # Log successful request (fire-and-forget)
             if self.store:
                 latency_ms = int((time.time() - _request_start) * 1000)
-                await log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
-                                  key_id=k.key_id, status=resp.status_code, latency_ms=latency_ms,
-                                  inbound_protocol=inbound_protocol, outbound_protocol=outbound_protocol,
-                                  translated=need_translation)
+                asyncio.create_task(log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
+                                                key_id=k.key_id, status=resp.status_code, latency_ms=latency_ms,
+                                                inbound_protocol=inbound_protocol, outbound_protocol=outbound_protocol,
+                                                translated=need_translation))
 
             return web.Response(status=resp.status_code, body=data, headers=resp_headers)
 
@@ -361,11 +381,11 @@ class Handler:
                 status = tr_status
                 body = json.dumps(tr_body, ensure_ascii=False).encode()
                 _lg.info(f"[{_req_id}] last_error translated -> {inbound_protocol}")
-            # Log failed request
+            # Log failed request (fire-and-forget)
             if self.store:
                 latency_ms = int((time.time() - _request_start) * 1000)
-                await log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
-                                  status=status, latency_ms=latency_ms, error=f"upstream {status}: {err_msg[:200]}")
+                asyncio.create_task(log_request(self.store, client_ip=request.remote, model_name=requested_model or "",
+                                                status=status, latency_ms=latency_ms, error=f"upstream {status}: {err_msg[:200]}"))
             return web.Response(status=status, body=body,
                                 headers={"Content-Type": "application/json"})
         return web.json_response(
@@ -393,7 +413,6 @@ class Handler:
         """
         from loguru import logger as _lg
         import uuid
-        import asyncio
         _req_id = str(uuid.uuid4())[:8]
         _stream_start = time.time()
 
@@ -580,12 +599,12 @@ class Handler:
 
                             if self.store:
                                 latency_ms = int((time.time() - _stream_start) * 1000)
-                                await log_request(self.store, client_ip=request.remote,
-                                                  model_name=requested_model or "",
-                                                  key_id=k.key_id, status=200, latency_ms=latency_ms,
-                                                  inbound_protocol=inbound_protocol,
-                                                  outbound_protocol=outbound_protocol,
-                                                  translated=need_translation)
+                                asyncio.create_task(log_request(self.store, client_ip=request.remote,
+                                                                model_name=requested_model or "",
+                                                                key_id=k.key_id, status=200, latency_ms=latency_ms,
+                                                                inbound_protocol=inbound_protocol,
+                                                                outbound_protocol=outbound_protocol,
+                                                                translated=need_translation))
                             return resp
                     except (ConnectionResetError, ConnectionError, OSError):
                         _lg.warning(f"[{_req_id}] streaming: key_id={k.key_id} client disconnected")

@@ -22,7 +22,7 @@ class TiDBStore(Store):
         password: str,
         database: str,
         ssl: bool = True,
-        pool_size: int = 5,
+        pool_size: int = 20,
     ) -> TiDBStore:
         ssl_ctx = None
         if ssl:
@@ -36,7 +36,7 @@ class TiDBStore(Store):
             password=password,
             db=database,
             autocommit=True,
-            minsize=2,
+            minsize=pool_size,
             maxsize=pool_size,
             connect_timeout=10,
             ssl=ssl_ctx,

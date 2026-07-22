@@ -46,7 +46,7 @@ async def create_store(config) -> Store:
             password=os.getenv("ZHONGZHUAN_TIDB_PASSWORD", ""),
             database=os.getenv("ZHONGZHUAN_TIDB_DATABASE", "zhongzhuan"),
             ssl=os.getenv("ZHONGZHUAN_TIDB_SSL", "true") == "true",
-            pool_size=int(os.getenv("ZHONGZHUAN_TIDB_POOL_SIZE", "5")),
+            pool_size=int(os.getenv("ZHONGZHUAN_TIDB_POOL_SIZE", "20")),
         )
         logger.info("使用 TiDB Cloud 存储")
         return store

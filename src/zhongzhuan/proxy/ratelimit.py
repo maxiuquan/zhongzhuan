@@ -2,16 +2,17 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass
 
 
 class SlidingWindow:
-    """60x 1s buckets circular array; O(1) complexity."""
+    """60x 1s buckets with circular deque; O(window_seconds) at most per rotate."""
 
     def __init__(self, window_seconds: int = 60, limit: int = 0) -> None:
         self.window_seconds = window_seconds
         self.limit = limit  # 0 = unlimited
-        self.buckets: list[int] = [0] * window_seconds
+        self.buckets: deque[int] = deque([0] * window_seconds, maxlen=window_seconds)
         self.total: int = 0
         self.last_rotate: float = time.time()
 
@@ -21,12 +22,12 @@ class SlidingWindow:
         if elapsed <= 0:
             return
         if elapsed >= self.window_seconds:
-            self.buckets = [0] * self.window_seconds
+            self.buckets = deque([0] * self.window_seconds, maxlen=self.window_seconds)
             self.total = 0
             self.last_rotate = now
             return
         for _ in range(elapsed):
-            self.total -= self.buckets.pop(0)
+            self.total -= self.buckets.popleft()  # O(1) with deque
             self.buckets.append(0)
         self.last_rotate = now
 
