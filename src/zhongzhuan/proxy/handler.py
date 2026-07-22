@@ -22,7 +22,7 @@ from .protocol.errors import translate_error_a2o, translate_error_o2a
 from .protocol.stream_o2a import StreamO2A
 from .protocol.stream_a2o import StreamA2O
 
-_lg = __import__("logging").getLogger(__name__)
+from loguru import logger as _lg
 
 
 def make_handler(
@@ -116,7 +116,7 @@ class ProxyHandler:
     async def __call__(self, request: web.Request) -> web.Response:
         _request_start = time.time()
         store = self.store
-        path = request.match_info.get("path", "")
+        path = request.path
         method = request.method
 
         # -- Parse body early for protocol detection and model extraction --
