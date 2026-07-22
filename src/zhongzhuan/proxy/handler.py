@@ -151,7 +151,7 @@ class ProxyHandler:
             return await self._list_models()
 
         # Short circuit: no keys configured
-        candidates = [k for k in self._keys if k.enabled]
+        candidates = [k for k in self._keys if k.is_available()]
         if not candidates:
             return web.json_response(
                 {"error": "no enabled keys"}, status=503,
@@ -692,7 +692,7 @@ class ProxyHandler:
         seen: set[str] = set()
         data: list[dict] = []
         for k in self._keys:
-            if not k.enabled:
+            if not k.is_available():
                 continue
             name = k.model_name
             if not name or name in seen:
