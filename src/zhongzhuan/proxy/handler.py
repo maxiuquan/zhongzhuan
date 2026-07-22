@@ -588,7 +588,7 @@ class ProxyHandler:
 
                         headers["Content-Length"] = str(len(final_body))
                     else:
-                        if requested_model and k.upstream_model and k.model_name and requested_model == k.model_name:
+                        if requested_model and k.upstream_model and requested_model != k.upstream_model:
                             final_body = _swap_model_name(body, requested_model, k.upstream_model)
                         headers["Authorization"] = f"Bearer {k.api_key}"
                         if final_body is not body:
@@ -602,8 +602,24 @@ class ProxyHandler:
                         async for upstream_resp in client.stream(
                             request.method, upstream_path, headers=headers, content=final_body,
                         ):
-                            if upstream_resp.status_code >= 500 or upstream_resp.status_code == 429:
+                            # Any 4xx/5xx is a failure: do NOT forward as SSE
+                            # (the body is a JSON error envelope, not a stream,
+                            # and forwarding it yields an unparseable response).
+                            if upstream_resp.status_code >= 400:
                                 mark_failure(k)
+                                # Drain error body for logging / circuit breaker
+                                try:
+                                    err_body = await upstream_resp.aread()
+                                    err_txt = err_body.decode("utf-8", errors="replace")[:300]
+                                except Exception:
+                                    err_txt = ""
+                                _lg.info(
+                                    f"[{id(request):x}] streaming: key_id={k.key_id} "
+                                    f"upstream status={upstream_resp.status_code} "
+                                    f"err={err_txt!r}"
+                                )
+                                # Auth/quota issues → retry next key; 4xx request
+                                # errors → still retry (different upstream may accept)
                                 break
 
                             # Success! Cancel keepalive and forward stream
