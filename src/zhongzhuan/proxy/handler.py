@@ -25,6 +25,23 @@ from .protocol.stream_a2o import StreamA2O
 _lg = __import__("logging").getLogger(__name__)
 
 
+def make_handler(
+    upstream_clients: dict[str, UpstreamClient],
+    keys: list[KeyHealth],
+    proxy_timeout: float = 300.0,
+    store: Store | None = None,
+    load_keys_fn=None,
+) -> ProxyHandler:
+    """Factory: create a ProxyHandler for the aiohttp route."""
+    return ProxyHandler(
+        clients=upstream_clients,
+        keys=keys,
+        store=store,
+        proxy_timeout=proxy_timeout,
+        load_keys_fn=load_keys_fn,
+    )
+
+
 def _swap_model_name(raw_body: bytes, old_name: str, new_name: str) -> bytes:
     """Replace model name at byte level to avoid expensive json.loads/dumps.
 
@@ -61,14 +78,24 @@ class ProxyHandler:
         keys: list[KeyHealth],
         store: Store | None = None,
         proxy_timeout: float = 300.0,
+        load_keys_fn=None,
     ) -> None:
         self._clients = clients
         self._keys = keys
         self.store = store
         self._timeout = proxy_timeout
+        self._load_keys_fn = load_keys_fn
         # Lazy client cache (upstream_base → UpstreamClient)
         self._client_cache: dict[str, UpstreamClient] = dict(clients)
         self._lock = asyncio.Lock()
+
+    async def reload_keys(self) -> int:
+        """Reload keys from the store and update self._keys. Returns new count."""
+        if self._load_keys_fn is None:
+            return len(self._keys)
+        new_keys = await self._load_keys_fn()
+        self._keys = new_keys
+        return len(new_keys)
 
     async def _ensure_client(self, upstream_base: str) -> UpstreamClient | None:
         if upstream_base in self._client_cache:
