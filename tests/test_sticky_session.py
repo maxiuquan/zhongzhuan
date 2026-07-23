@@ -170,9 +170,30 @@ class TestSchedulerFallbackPenalty:
             key_id=-1, api_key="public",
             window=SlidingWindow(60, 0),
             is_fallback=True,
+            fallback_penalty=0.1,  # 可配置降权系数，默认 0.1
         )
         normal_score = score(normal)
         fallback_score = score(fallback)
         assert normal_score > 0
         assert fallback_score > 0
         assert fallback_score < normal_score * 0.2  # 降权到 ~10%
+
+    def test_fallback_penalty_configurable_no_penalty(self):
+        """fallback_penalty=1.0 时不降权，兜底 key 与普通 key 同等评分。"""
+        from zhongzhuan.proxy.scheduler import score
+        normal = KeyHealth(
+            key_id=1, api_key="sk-1",
+            window=SlidingWindow(60, 1000),
+            rpm_limit=1000,
+        )
+        fallback = KeyHealth(
+            key_id=-1, api_key="public",
+            window=SlidingWindow(60, 0),
+            is_fallback=True,
+            fallback_penalty=1.0,  # 不降权
+        )
+        normal_score = score(normal)
+        fallback_score = score(fallback)
+        # 不降权时两者分数接近（都在 0.9-1.0 区间，仅随机扰动不同）
+        assert fallback_score > 0.8
+        assert abs(fallback_score - normal_score) < 0.1

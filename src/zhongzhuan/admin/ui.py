@@ -97,8 +97,8 @@ label{font-size:13px;color:#8b949e;display:block;margin-bottom:4px}
     <div class="card"><h2>请求日志</h2><div id="overviewLogs"></div></div>
   </div>
   <div class="tab" id="tab-models">
-    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>模型列表</h2><button class="btn primary" onclick="showModelModal()">+ 添加模型</button></div>
-    <table><thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>启用</th><th>操作</th></tr></thead><tbody id="modelTable"></tbody></table></div>
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>模型列表</h2><div style="display:flex;gap:8px"><button class="btn" onclick="refreshFallback()">刷新兜底模型</button><button class="btn primary" onclick="showModelModal()">+ 添加模型</button></div></div>
+    <table><thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>类型</th><th>启用</th><th>操作</th></tr></thead><tbody id="modelTable"></tbody></table></div>
   </div>
   <div class="tab" id="tab-keys">
     <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>Key 列表</h2><div style="display:flex;gap:8px"><button class="btn primary" onclick="showKeyModal()">+ 添加 Key</button><button class="btn primary" onclick="showBatchImportModal()">批量导入</button></div></div>
@@ -240,8 +240,17 @@ async function loadModels() {
   document.getElementById("modelTable").innerHTML = models.map(m => `
     <tr><td>${m.name}</td><td>${m.upstream_base}</td><td>${m.upstream_model}</td><td>${m.protocol||'openai'}</td>
     <td>${m.rpm_limit||"不限"}</td><td>${m.tpm_limit||"不限"}</td>
+    <td>${m.is_fallback?'<span style="color:#f0883e">兜底</span>':'自定义'}</td>
     <td>${m.enabled?"是":"否"}</td>
     <td><button class="btn" onclick="editModel(${m.id})">编辑</button> <button class="btn danger" onclick="delModel(${m.id})">删除</button></td></tr>`).join("");
+}
+
+async function refreshFallback() {
+  const r = await api("/api/fallback/refresh", {method:"POST"});
+  if (r !== null) {
+    alert("已同步 " + r.synced + " 个 OpenCode Free 兜底模型:\n" + (r.models||[]).join(", "));
+    loadModels();
+  }
 }
 
 async function delModel(id) { 
@@ -465,7 +474,7 @@ async function loadGroups() {
   models.forEach(m => modelMap[m.id] = m.name);
   document.getElementById("groupTable").innerHTML = groups.map(g => `
     <tr><td>${esc(g.name)}</td><td>${esc(g.strategy)}</td>
-    <td>${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id))).join(", ") || '<span style="color:#8b949e">无</span>'}</td>
+    <td>${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id)) + '<span style="color:#8b949e;font-size:11px">(w'+(x.weight||1)+',o'+(x.ord||0)+')</span>').join(", ") || '<span style="color:#8b949e">无</span>'}</td>
     <td><button class="btn" onclick="editGroup(${g.id})">编辑</button> <button class="btn danger" onclick="delGroup(${g.id})">删除</button></td></tr>`).join("");
 }
 
@@ -481,21 +490,60 @@ function editGroup(id) {
 
 function showGroupModal(group) {
   const isEdit = !!group;
-  const selectedIds = isEdit ? new Set((group.members||[]).map(x => x.model_id)) : new Set();
-  const opts = models.map(m => `<option value="${m.id}" ${selectedIds.has(m.id) ? "selected" : ""}>${esc(m.name)}</option>`).join("");
+  // 成员状态：{model_id, weight, ord}；用对象数组方便编辑权重和顺序
+  const initMembers = isEdit ? (group.members||[]).map(x => ({model_id:x.model_id, weight:x.weight||1, ord:x.ord||0})) : [];
+  const memberMap = {};
+  initMembers.forEach(m => memberMap[m.model_id] = m);
   const strat = isEdit ? group.strategy : "round_robin";
+  // 成员编辑表格：每行一个模型（复选框选中=加入分组），权重输入框，顺序输入框
+  const memberRows = models.map(m => {
+    const sel = memberMap[m.id];
+    const checked = !!sel;
+    const w = sel ? sel.weight : 1;
+    const o = sel ? sel.ord : 0;
+    const tag = m.is_fallback ? ' <span style="color:#f0883e;font-size:11px">兜底</span>' : '';
+    return `<tr>
+      <td><input type="checkbox" data-mid="${m.id}" class="gmem-chk" ${checked?'checked':''}></td>
+      <td>${esc(m.name)}${tag}</td>
+      <td><input type="number" data-mid="${m.id}" class="gmem-w" value="${w}" min="1" style="width:60px" ${checked?'':'disabled'}></td>
+      <td><input type="number" data-mid="${m.id}" class="gmem-o" value="${o}" min="0" style="width:60px" ${checked?'':'disabled'}></td>
+    </tr>`;
+  }).join("");
   document.getElementById("modalContent").innerHTML = `
     <h3>${isEdit ? '编辑分组' : '添加分组'}</h3>
     <div class="form-group"><label>名称（作为下游可调用的模型名）</label><input id="f_gname" value="${isEdit ? esc(group.name) : ''}"></div>
-    <div class="form-group"><label>策略</label><select id="f_strategy"><option value="round_robin" ${strat==='round_robin'?'selected':''}>轮询</option><option value="weighted" ${strat==='weighted'?'selected':''}>加权</option><option value="failover" ${strat==='failover'?'selected':''}>故障转移</option></select></div>
-    <div class="form-group"><label>成员模型（可多选）</label><select id="f_members" multiple style="height:120px">${opts}</select></div>
+    <div class="form-group"><label>策略</label><select id="f_strategy"><option value="round_robin" ${strat==='round_robin'?'selected':''}>轮询</option><option value="weighted" ${strat==='weighted'?'selected':''}>加权</option><option value="failover" ${strat==='failover'?'selected':''}>故障转移</option></select>
+      <span style="color:#8b949e;font-size:12px;margin-left:8px">加权用权重，故障转移用顺序(小优先)</span></div>
+    <div class="form-group"><label>成员模型（勾选加入分组，可设置权重和顺序）</label>
+      <table style="width:100%"><thead><tr><th>加入</th><th>模型</th><th>权重</th><th>顺序</th></tr></thead><tbody>${memberRows}</tbody></table>
+    </div>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveGroup(${isEdit ? group.id : ''})">保存</button></div>`;
   document.getElementById("modal").classList.add("show");
+  // 勾选/取消时启用/禁用对应的权重和顺序输入框
+  document.querySelectorAll(".gmem-chk").forEach(c => {
+    c.addEventListener("change", () => {
+      const mid = c.dataset.mid;
+      const wEl = document.querySelector(`.gmem-w[data-mid="${mid}"]`);
+      const oEl = document.querySelector(`.gmem-o[data-mid="${mid}"]`);
+      if (wEl) wEl.disabled = !c.checked;
+      if (oEl) oEl.disabled = !c.checked;
+    });
+  });
 }
 
 async function saveGroup(id) {
-  const sel = document.getElementById("f_members").selectedOptions;
-  const members = Array.from(sel).map(o => ({model_id: parseInt(o.value)}));
+  const checks = document.querySelectorAll(".gmem-chk");
+  const members = [];
+  checks.forEach(c => {
+    if (c.checked) {
+      const mid = parseInt(c.dataset.mid);
+      const wEl = document.querySelector(`.gmem-w[data-mid="${mid}"]`);
+      const oEl = document.querySelector(`.gmem-o[data-mid="${mid}"]`);
+      members.push({model_id: mid, weight: parseInt(wEl?.value)||1, ord: parseInt(oEl?.value)||0});
+    }
+  });
+  // 按顺序排序，保证 failover 策略下 ord 生效
+  members.sort((a,b) => a.ord - b.ord);
   const body = {
     name: document.getElementById("f_gname").value,
     strategy: document.getElementById("f_strategy").value,

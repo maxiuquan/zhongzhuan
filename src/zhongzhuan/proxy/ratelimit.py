@@ -87,8 +87,10 @@ class KeyHealth:
     max_tokens_default: int = 4096
     # 上游完整地址覆盖：非空时直接用作请求路径/URL，不自动拼接 /v1/chat/completions 等
     upstream_path_override: str = ""
-    # 兜底上游标志：True 表示这是无 key 时的免费兜底 key，调度器应大幅降权
+    # 兜底上游标志：True 表示这是无 key 时的免费兜底 key，调度器按 fallback_penalty 降权
     is_fallback: bool = False
+    # 兜底降权系数：is_fallback=True 时生效，1.0 表示不降权（由 config.fallback.fallback_penalty 注入）
+    fallback_penalty: float = 1.0
 
     def _maybe_reset_rpd(self) -> None:
         now = time.time()

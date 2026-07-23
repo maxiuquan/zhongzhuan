@@ -110,6 +110,9 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             anthropic_version=model.anthropic_version if model else "2023-06-01",
             max_tokens_default=model.max_tokens_default if model else 4096,
             upstream_path_override=model.upstream_path_override if model else "",
+            # 兜底标记 + 降权系数从 Model + Config 注入
+            is_fallback=bool(model.is_fallback) if model else False,
+            fallback_penalty=cfg.fallback.fallback_penalty,
         )
         # 恢复持久化的健康状态（优化点4）
         if kr.id in saved_health:
@@ -168,27 +171,61 @@ async def _fetch_opencode_models(cfg) -> list[str]:
         return _DEFAULT_FREE_MODELS
 
 
-def _build_fallback_keys(cfg, model_ids: list[str]) -> list[KeyHealth]:
-    """为每个免费模型构建一个兜底 KeyHealth。"""
+async def _sync_fallback_models(store, cfg, model_ids: list[str]) -> list[int]:
+    """把 OpenCode Free 模型 upsert 到 models + api_keys 表，返回 model_id 列表。
+
+    兜底模型作为"一等公民"写入 DB：
+    - 每个免费模型创建/更新一条 models 记录（is_fallback=1），name=prefix+mid
+    - 为每个兜底模型创建一条 api_keys 记录（key="public"），若不存在
+    - 上游消失的兜底模型：禁用（enabled=0）而非删除，避免破坏用户分组配置
+    """
+    from zhongzhuan.store.models import Model, get_model, create_model, update_model, list_models
+    from zhongzhuan.store.keys import ApiKey, list_keys, create_key
     prefix = cfg.fallback.model_prefix
-    keys: list[KeyHealth] = []
+    upserted_ids: list[int] = []
     for mid in model_ids:
-        keys.append(KeyHealth(
-            key_id=-1,  # 哨兵值：标识兜底 key
-            api_key=cfg.fallback.api_key,
-            window=SlidingWindow(60, 0),  # 无 RPM 限制（免费上游自己管）
-            rpm_limit=0,
-            tpm_limit=0,
-            tpm_window=None,
-            rpd_limit=0,
-            upstream_base=cfg.fallback.upstream_base,
-            upstream_model=mid,  # 上游真实模型名
-            model_name=f"{prefix}{mid}",  # 暴露给下游的带前缀名
-            upstream_protocol="openai",
-            upstream_path_override=cfg.fallback.chat_path,
-            is_fallback=True,
-        ))
-    return keys
+        name = f"{prefix}{mid}"
+        existing = await get_model(store, name)
+        if existing:
+            # 已存在：更新上游信息，保留用户的 rpm/tpm/weight/enabled 设置
+            existing.upstream_base = cfg.fallback.upstream_base
+            existing.upstream_model = mid
+            existing.upstream_path_override = cfg.fallback.chat_path
+            existing.protocol = "openai"
+            existing.is_fallback = True
+            # 若之前被禁用（因上游消失），重新拉取到则恢复启用
+            existing.enabled = True
+            await update_model(store, existing.id, existing)
+            upserted_ids.append(existing.id)
+        else:
+            m = Model(
+                name=name,
+                upstream_base=cfg.fallback.upstream_base,
+                upstream_model=mid,
+                upstream_path_override=cfg.fallback.chat_path,
+                protocol="openai",
+                is_fallback=True,
+                enabled=True,
+            )
+            m = await create_model(store, m)
+            upserted_ids.append(m.id)
+        # 为兜底模型创建 api_key（若该模型下还没有 key）
+        existing_keys = await list_keys(store, upserted_ids[-1])
+        if not existing_keys:
+            await create_key(store, ApiKey(
+                id=None, model_id=upserted_ids[-1],
+                label="OpenCode Free", key_value=cfg.fallback.api_key,
+                enabled=True, priority=0,
+            ))
+    # 禁用上游已消失的兜底模型（不删除，保留分组配置）
+    all_models = await list_models(store)
+    valid_names = {f"{prefix}{mid}" for mid in model_ids}
+    for m in all_models:
+        if m.is_fallback and m.name not in valid_names:
+            if m.enabled:
+                m.enabled = False
+                await update_model(store, m.id, m)
+    return upserted_ids
 
 
 async def run_foreground(
@@ -240,10 +277,20 @@ async def run_foreground(
             token = await create_access_token(store, "default")
             logger.info(f"自动生成访问令牌: {token.token}")
 
-    # Build keys from DB (with per-model upstream info)
+    # OpenCode Free 兜底上游：启用时把免费模型 upsert 到 models + api_keys 表
+    # 兜底模型作为"一等公民"写入 DB，可启用/禁用/删除，可加入分组参与路由
+    if cfg.fallback.enabled:
+        try:
+            fallback_model_ids = await _fetch_opencode_models(cfg)
+            upserted = await _sync_fallback_models(store, cfg, fallback_model_ids)
+            logger.info(f"OpenCode Free 兜底模型已同步: {len(upserted)} 个")
+        except Exception:
+            logger.exception("同步 OpenCode Free 兜底模型失败")
+
+    # Build keys from DB (with per-model upstream info) — 兜底模型走标准加载路径
     keys = await _load_keys_from_store(store, cfg)
 
-    # Fallback: env/CLI key
+    # Fallback: env/CLI key (仅当 DB 无 key 且无兜底时)
     if not keys:
         api_key = key or os.environ.get("ZHONGZHUAN_KEY", "")
         if api_key:
@@ -256,16 +303,7 @@ async def run_foreground(
                 upstream_model="",
             ))
 
-    # OpenCode Free 兜底注入：无 key 时自动启用免费上游
-    fallback_models: list[str] = []
-    if cfg.fallback.enabled and not keys:
-        logger.info("无配置 key，启用 OpenCode Free 兜底上游")
-        fallback_models = await _fetch_opencode_models(cfg)
-        fallback_keys = _build_fallback_keys(cfg, fallback_models)
-        keys.extend(fallback_keys)
-        logger.info(f"注入 {len(fallback_keys)} 个 OpenCode Free 兜底 key，模型: {fallback_models}")
-
-    # If no keys at all and fallback disabled, use a dummy to avoid crash
+    # If no keys at all (fallback disabled), use a dummy to avoid crash
     if not keys:
         api_key = key or os.environ.get("ZHONGZHUAN_KEY", "dummy-key-no-auth")
         upstream_base = upstream_url or os.environ.get("ZHONGZHUAN_UPSTREAM", "https://api.openai.com")
@@ -294,13 +332,8 @@ async def run_foreground(
         await client.start()
         upstream_clients[base_url] = client
 
-    # Load models and groups for /v1/models
+    # Load models and groups for /v1/models（兜底模型已在 DB，自动包含）
     models_data = [{"name": m.name} for m in await list_models(store)]
-    # 把兜底模型也加入 /v1/models 列表
-    if fallback_models:
-        prefix = cfg.fallback.model_prefix
-        for fm in fallback_models:
-            models_data.append({"name": f"{prefix}{fm}"})
     from zhongzhuan.store.groups import list_groups as list_groups_db
     groups_data = [
         {

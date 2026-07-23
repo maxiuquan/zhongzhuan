@@ -206,7 +206,7 @@ class ProxyHandler:
             # 保留旧 keys 中学到的限额（learn_rate_limits 的成果）
             old_limits: dict[int, tuple[int, int]] = {}
             for ok in self._keys:
-                if ok.key_id > 0:  # 跳过兜底 key (key_id=-1)
+                if ok.key_id > 0:  # 跳过 env/dummy key (key_id=0)
                     old_limits[ok.key_id] = (ok.rpm_limit, ok.tpm_limit)
             # 对新加载的 keys：重置状态但恢复学到的限额
             for nk in new_keys:
@@ -310,7 +310,7 @@ class ProxyHandler:
                     break
                 for k in self._keys:
                     if k.key_id <= 0:
-                        continue  # 跳过兜底 key
+                        continue  # 跳过 env/dummy key (key_id=0)
                     try:
                         await save_health(self.store, KeyHealthRow(
                             key_id=k.key_id,

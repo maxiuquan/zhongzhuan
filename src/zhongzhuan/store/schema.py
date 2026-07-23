@@ -8,6 +8,7 @@ SQLITE_MIGRATIONS = [
     "ALTER TABLE models ADD COLUMN anthropic_version TEXT NOT NULL DEFAULT '2023-06-01'",
     "ALTER TABLE models ADD COLUMN max_tokens_default INTEGER NOT NULL DEFAULT 4096",
     "ALTER TABLE models ADD COLUMN upstream_path_override TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE models ADD COLUMN is_fallback INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE request_logs ADD COLUMN inbound_protocol TEXT DEFAULT ''",
     "ALTER TABLE request_logs ADD COLUMN outbound_protocol TEXT DEFAULT ''",
     "ALTER TABLE request_logs ADD COLUMN translated INTEGER DEFAULT 0",
@@ -18,6 +19,7 @@ MYSQL_MIGRATIONS = [
     "ALTER TABLE models ADD COLUMN IF NOT EXISTS anthropic_version VARCHAR(32) NOT NULL DEFAULT '2023-06-01'",
     "ALTER TABLE models ADD COLUMN IF NOT EXISTS max_tokens_default INT NOT NULL DEFAULT 4096",
     "ALTER TABLE models ADD COLUMN IF NOT EXISTS upstream_path_override VARCHAR(512) NOT NULL DEFAULT ''",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS is_fallback TINYINT NOT NULL DEFAULT 0",
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS inbound_protocol VARCHAR(16) DEFAULT ''",
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS outbound_protocol VARCHAR(16) DEFAULT ''",
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS translated TINYINT DEFAULT 0",
@@ -37,6 +39,7 @@ CREATE TABLE IF NOT EXISTS models (
     anthropic_version TEXT NOT NULL DEFAULT '2023-06-01',
     max_tokens_default INTEGER NOT NULL DEFAULT 4096,
     upstream_path_override TEXT NOT NULL DEFAULT '',
+    is_fallback   INTEGER NOT NULL DEFAULT 0,
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL
 );
@@ -135,6 +138,7 @@ CREATE TABLE IF NOT EXISTS models (
     anthropic_version VARCHAR(32) NOT NULL DEFAULT '2023-06-01',
     max_tokens_default INT NOT NULL DEFAULT 4096,
     upstream_path_override VARCHAR(512) NOT NULL DEFAULT '',
+    is_fallback   TINYINT NOT NULL DEFAULT 0,
     created_at    BIGINT NOT NULL,
     updated_at    BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

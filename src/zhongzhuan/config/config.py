@@ -70,6 +70,8 @@ class FallbackConfig:
     models_url: str = "https://opencode.ai/zen/v1/models"
     chat_path: str = "/zen/v1/chat/completions"  # OpenAI 兼容端点
     model_prefix: str = "oc-"  # 暴露给下游的模型名前缀
+    # 兜底 key 调度降权系数：0.1 表示评分 ×0.1（低优先级），1.0 表示不降权（与普通模型同等）
+    fallback_penalty: float = 0.1
 
 
 @dataclass

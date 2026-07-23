@@ -13,6 +13,7 @@ from .api_service import register_routes as register_service
 from .api_export_import import register_routes as register_export
 from .api_auth import register_routes as register_auth
 from .api_tokens import register_routes as register_tokens
+from .api_fallback import register_routes as register_fallback
 from .auth import make_auth_middleware, init_jwt_secret, auth_enabled
 from .notify import configure_reload_target
 from .ui import mount_ui
@@ -64,6 +65,7 @@ class AdminServer:
         register_service(app, self)
         register_export(app, self)
         register_tokens(app, self)
+        register_fallback(app, self)
 
         # UI
         mount_ui(app, self)
