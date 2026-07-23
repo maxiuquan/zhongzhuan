@@ -247,6 +247,18 @@ async def run_foreground(
     # Create async store (TiDB or SQLite based on config)
     store = await create_store(cfg)
 
+    # 从 DB 读取持久化的兜底配置（后台修改的 fallback_enabled / fallback_penalty 优先于 config.yaml）
+    try:
+        rows = await store.fetchall("SELECT `key`, value FROM system_config WHERE `key` IN ('fallback_enabled','fallback_penalty')")
+        for k, v in rows:
+            if k == "fallback_enabled":
+                cfg.fallback.enabled = (v == "1")
+            elif k == "fallback_penalty":
+                cfg.fallback.fallback_penalty = max(0.01, min(1.0, float(v)))
+        logger.info(f"fallback config: enabled={cfg.fallback.enabled}, penalty={cfg.fallback.fallback_penalty}")
+    except Exception:
+        pass  # system_config 表可能不存在或为空，忽略
+
     # Initialize crypto with store (for AES key in TiDB system_config)
     from zhongzhuan.crypto import init as crypto_init
     async def _get_config(key_name: str) -> str | None:

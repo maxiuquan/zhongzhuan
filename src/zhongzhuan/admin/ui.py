@@ -97,7 +97,23 @@ label{font-size:13px;color:#8b949e;display:block;margin-bottom:4px}
     <div class="card"><h2>请求日志</h2><div id="overviewLogs"></div></div>
   </div>
   <div class="tab" id="tab-models">
-    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>模型列表</h2><div style="display:flex;gap:8px"><button class="btn" onclick="refreshFallback()">刷新兜底模型</button><button class="btn primary" onclick="showModelModal()">+ 添加模型</button></div></div>
+    <div class="card" id="fallbackCard">
+      <h2>兜底上游（OpenCode Free）</h2>
+      <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap">
+        <div class="form-group" style="margin:0">
+          <label>启用兜底上游</label>
+          <select id="fbEnabled" style="width:80px"><option value="1">是</option><option value="0">否</option></select>
+        </div>
+        <div class="form-group" style="margin:0;flex:1;min-width:200px">
+          <label>降权系数 <span id="fbPenaltyVal" style="color:#58a6ff">0.1</span>（0.01=极低优先级，1.0=与普通模型同等）</label>
+          <input id="fbPenalty" type="range" min="0.01" max="1.0" step="0.01" value="0.1" oninput="document.getElementById('fbPenaltyVal').textContent=this.value" style="padding:0">
+        </div>
+        <button class="btn primary" onclick="saveFallbackConfig()">保存配置</button>
+        <button class="btn" onclick="refreshFallback()">刷新兜底模型</button>
+      </div>
+      <div id="fbInfo" style="margin-top:8px;color:#8b949e;font-size:12px"></div>
+    </div>
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><h2>模型列表</h2><div style="display:flex;gap:8px"><button class="btn primary" onclick="showModelModal()">+ 添加模型</button></div></div>
     <table><thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>类型</th><th>启用</th><th>操作</th></tr></thead><tbody id="modelTable"></tbody></table></div>
   </div>
   <div class="tab" id="tab-keys">
@@ -217,7 +233,7 @@ function showTab(name, evt) {
   document.getElementById("tab-" + name).classList.add("active");
   if (evt && evt.target) evt.target.classList.add("active");
   if (name === "overview") loadOverview();
-  if (name === "models") loadModels();
+  if (name === "models") { loadModels(); loadFallbackStatus(); }
   if (name === "keys") { loadModels(); loadKeys(); }
   if (name === "groups") loadGroups();
   if (name === "tokens") loadTokens();
@@ -249,7 +265,29 @@ async function refreshFallback() {
   const r = await api("/api/fallback/refresh", {method:"POST"});
   if (r !== null) {
     alert("已同步 " + r.synced + " 个 OpenCode Free 兜底模型:\n" + (r.models||[]).join(", "));
-    loadModels();
+    loadModels(); loadFallbackStatus();
+  }
+}
+
+async function loadFallbackStatus() {
+  const s = await api("/api/fallback/status");
+  if (!s) return;
+  document.getElementById("fbEnabled").value = s.enabled ? "1" : "0";
+  document.getElementById("fbPenalty").value = s.fallback_penalty;
+  document.getElementById("fbPenaltyVal").textContent = s.fallback_penalty;
+  document.getElementById("fbInfo").innerHTML =
+    "上游: " + esc(s.upstream_base) + " | 前缀: " + esc(s.model_prefix) +
+    " | 已有兜底模型: " + s.fallback_model_count + " 个";
+}
+
+async function saveFallbackConfig() {
+  const body = {
+    enabled: document.getElementById("fbEnabled").value === "1",
+    fallback_penalty: parseFloat(document.getElementById("fbPenalty").value),
+  };
+  const r = await api("/api/fallback/config", {method:"PUT", body:JSON.stringify(body)});
+  if (r !== null) {
+    alert("兜底配置已保存：\n启用=" + (r.enabled?"是":"否") + "\n降权系数=" + r.fallback_penalty);
   }
 }
 
