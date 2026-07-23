@@ -20,6 +20,7 @@ class ProxyServer:
         groups: list[dict] | None = None,
         store: Store | None = None,
         load_keys_fn=None,
+        sticky_ttl: float = 1800.0,
     ) -> None:
         self.upstream_clients = upstream_clients
         self.api_key = api_key
@@ -29,6 +30,7 @@ class ProxyServer:
         self.groups = groups or []
         self.store = store
         self.load_keys_fn = load_keys_fn
+        self.sticky_ttl = sticky_ttl
 
     def app(self) -> web.Application:
         app = web.Application(client_max_size=64 * 1024 * 1024)
@@ -52,6 +54,7 @@ class ProxyServer:
             upstream_clients=self.upstream_clients, keys=the_keys,
             proxy_timeout=self.proxy_timeout, store=self.store,
             load_keys_fn=self.load_keys_fn, groups=self.groups,
+            sticky_ttl=self.sticky_ttl,
         )
         app.router.add_route("*", "/v1/{tail:.*}", handler)
         app.router.add_get("/healthz", lambda r: web.Response(text="ok"))

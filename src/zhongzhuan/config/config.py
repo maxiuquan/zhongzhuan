@@ -34,6 +34,8 @@ class LimitsConfig:
     per_key_window_seconds: int = 60
     default_rpm_per_key: int = 60
     default_tpm_per_key: int = 100000
+    default_rpd_per_key: int = 0  # 0 = unlimited
+    sticky_session_ttl: int = 1800  # seconds (30 min)
     proxy_request_timeout: int = 30
 
 

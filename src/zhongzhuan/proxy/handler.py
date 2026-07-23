@@ -13,7 +13,10 @@ from ..store import Store
 from ..store.logs import log_request
 from ..upstream import UpstreamClient
 from .ratelimit import KeyHealth
-from .retry import mark_failure, mark_success
+from .retry import (
+    mark_auth_failure, mark_rate_limited, mark_server_error,
+    mark_network_failure, mark_failure, mark_success, learn_rate_limits,
+)
 from .scheduler import pick_key
 from .protocol.detect import detect_inbound_protocol
 from .protocol.translate_a2o import translate_request_a2o, translate_response_o2a
@@ -32,6 +35,7 @@ def make_handler(
     store: Store | None = None,
     load_keys_fn=None,
     groups: list[dict] | None = None,
+    sticky_ttl: float = 1800.0,
 ) -> ProxyHandler:
     """Factory: create a ProxyHandler for the aiohttp route."""
     return ProxyHandler(
@@ -41,6 +45,7 @@ def make_handler(
         proxy_timeout=proxy_timeout,
         load_keys_fn=load_keys_fn,
         groups=groups,
+        sticky_ttl=sticky_ttl,
     )
 
 
@@ -82,6 +87,7 @@ class ProxyHandler:
         proxy_timeout: float = 300.0,
         load_keys_fn=None,
         groups: list[dict] | None = None,
+        sticky_ttl: float = 1800.0,
     ) -> None:
         self._clients = clients
         self._keys = keys
@@ -94,6 +100,11 @@ class ProxyHandler:
         # Group routing map: name → {"id": int, "strategy": str, "members": set[model_id]}
         self._groups: dict[str, dict] = {}
         self._set_groups(groups or [])
+        # Sticky session: session_key → (key_id, expire_at). Keeps multi-turn
+        # conversations on the same upstream key to avoid mid-conversation
+        # model switches that cause hallucination spikes.
+        self._sticky: dict[str, tuple[int, float]] = {}
+        self._sticky_ttl: float = sticky_ttl
 
     def _set_groups(self, groups: list[dict]) -> None:
         """Rebuild the group routing map from a list of group dicts."""
@@ -134,6 +145,51 @@ class ProxyHandler:
                 return matched
 
         return available
+
+    # ---- Sticky session helpers ----
+
+    @staticmethod
+    def _session_key(request: web.Request, body_obj: dict | None) -> str:
+        """Extract a conversation fingerprint for sticky routing.
+
+        Priority:
+        1. Explicit header: x-session-id / x-zhongzhuan-session / x-request-id
+        2. Hash of the last few messages (stable across multi-turn conversations)
+        Returns "" if no stable identifier can be derived.
+        """
+        for h in ("x-session-id", "x-zhongzhuan-session", "x-request-id"):
+            v = request.headers.get(h)
+            if v:
+                return f"hdr:{v}"
+        msgs = body_obj.get("messages") if body_obj else None
+        if isinstance(msgs, list) and len(msgs) >= 2:
+            import hashlib
+            snippet = json.dumps(msgs[-3:], ensure_ascii=False, sort_keys=True)
+            return "conv:" + hashlib.sha256(snippet.encode()).hexdigest()[:16]
+        return ""
+
+    def _get_sticky_key(self, session_key: str, candidates: list[KeyHealth]) -> KeyHealth | None:
+        """Return the sticky key for this session if still valid and available."""
+        entry = self._sticky.get(session_key)
+        if entry is None:
+            return None
+        key_id, expire_at = entry
+        if time.time() > expire_at:
+            self._sticky.pop(session_key, None)
+            return None
+        for k in candidates:
+            if k.key_id == key_id and k.is_available():
+                return k
+        return None
+
+    def _set_sticky(self, session_key: str, key_id: int) -> None:
+        """Record a successful key for this session."""
+        if session_key:
+            self._sticky[session_key] = (key_id, time.time() + self._sticky_ttl)
+            # Opportunistic cleanup: drop expired entries occasionally
+            if len(self._sticky) > 256:
+                now = time.time()
+                self._sticky = {k: v for k, v in self._sticky.items() if v[1] > now}
 
     async def reload_keys(self) -> int:
         """Reload keys (and groups) from the store. Returns new key count."""
@@ -240,9 +296,17 @@ class ProxyHandler:
 
         # --- Non-streaming path ---
         if not is_stream:
+            session_key = self._session_key(request, body_obj)
             tried: set[int] = set()
             while True:
-                k = pick_key([x for x in candidates if x.key_id not in tried])
+                # First attempt: prefer the sticky session key (multi-turn continuity)
+                if session_key and not tried:
+                    sticky_k = self._get_sticky_key(session_key, candidates)
+                    k = sticky_k if sticky_k is not None else pick_key(
+                        [x for x in candidates if x.key_id not in tried]
+                    )
+                else:
+                    k = pick_key([x for x in candidates if x.key_id not in tried])
                 if k is None:
                     return web.json_response(
                         {"error": "all keys exhausted"}, status=429,
@@ -251,6 +315,7 @@ class ProxyHandler:
 
                 if k.window is not None and not k.window.allow(1):
                     continue
+                k.record_request()  # RPD counting
 
                 client = await self._ensure_client(k.upstream_base)
                 if client is None:
@@ -350,13 +415,13 @@ class ProxyHandler:
                     _lg.error(
                         f"[{id(request):x}] key_id={k.key_id} connection error: {type(e).__name__}: {e}"
                     )
-                    mark_failure(k)
+                    mark_network_failure(k)
                     continue
                 except Exception as e:
                     _lg.error(
                         f"[{id(request):x}] key_id={k.key_id} exception: {type(e).__name__}: {e}"
                     )
-                    mark_failure(k)
+                    mark_network_failure(k)
                     continue
 
                 data = await resp.aread()
@@ -389,9 +454,30 @@ class ProxyHandler:
                         status = resp.status_code
                         body = data
 
-                    mark_failure(k)
+                    # Health state machine: classify failure by status code
+                    if resp.status_code in (401, 403):
+                        mark_auth_failure(k)
+                    elif resp.status_code == 429:
+                        # Learn real rate limits from response headers, then cooldown
+                        learn_rate_limits(k, resp_headers, resp.status_code)
+                        _ra_sec = 0.0
+                        for _hk, _hv in resp_headers.items():
+                            if _hk.lower() == "retry-after":
+                                try:
+                                    _ra_sec = float(_hv)
+                                except (ValueError, TypeError):
+                                    pass
+                                break
+                        mark_rate_limited(k, _ra_sec)
+                    elif resp.status_code >= 500:
+                        mark_server_error(k)
+                    else:
+                        # Other 4xx (400/404/413…): request-side issue
+                        mark_failure(k)
+
                     _lg.info(
-                        f"[{id(request):x}] key_id={k.key_id} failure status={status}"
+                        f"[{id(request):x}] key_id={k.key_id} failure status={status} "
+                        f"key_state={k.status}"
                     )
                     if self.store:
                         latency_ms = int((time.time() - _request_start) * 1000)
@@ -408,8 +494,9 @@ class ProxyHandler:
                                 translated=need_translation,
                             )
                         )
-                    # Retry 429/5xx
-                    if resp.status_code in (429,) or resp.status_code >= 500:
+                    # Retry auth failures (next key may be valid), 429, and 5xx.
+                    # Other 4xx are request-side errors → return to client.
+                    if resp.status_code in (401, 403, 429) or resp.status_code >= 500:
                         continue
                     return web.Response(status=status, body=body)
 
@@ -442,6 +529,26 @@ class ProxyHandler:
                 )
                 mark_success(k)
 
+                # Learn rate limits from success responses too (OpenAI sends
+                # x-ratelimit-* headers on 200, not just 429)
+                learn_rate_limits(k, resp_headers, resp.status_code)
+
+                # Record token usage for TPM tracking
+                try:
+                    _resp_obj = json.loads(data)
+                    _usage = _resp_obj.get("usage") if isinstance(_resp_obj, dict) else None
+                    if isinstance(_usage, dict):
+                        k.record_tokens(
+                            int(_usage.get("prompt_tokens", 0)),
+                            int(_usage.get("completion_tokens", 0)),
+                        )
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+                # Sticky session: remember which key served this conversation
+                if session_key:
+                    self._set_sticky(session_key, k.key_id)
+
                 # Log successful request asynchronously
                 if self.store:
                     latency_ms = int((time.time() - _request_start) * 1000)
@@ -471,6 +578,7 @@ class ProxyHandler:
             candidates=candidates,
             inbound_protocol=inbound_protocol,
             requested_model=requested_model,
+            session_key=self._session_key(request, body_obj),
         )
 
     async def _stream_proxy(
@@ -483,6 +591,7 @@ class ProxyHandler:
         candidates: list[KeyHealth],
         inbound_protocol: str,
         requested_model: str,
+        session_key: str = "",
     ) -> web.Response:
         _stream_start = time.time()
         resp = web.StreamResponse(status=200)
@@ -530,7 +639,14 @@ class ProxyHandler:
                 all_same_type = True
 
                 for _ in range(len(candidates)):
-                    k = pick_key([x for x in candidates if x.key_id not in tried])
+                    # First attempt in each round: prefer sticky session key
+                    if session_key and not tried:
+                        sticky_k = self._get_sticky_key(session_key, candidates)
+                        k = sticky_k if sticky_k is not None else pick_key(
+                            [x for x in candidates if x.key_id not in tried]
+                        )
+                    else:
+                        k = pick_key([x for x in candidates if x.key_id not in tried])
                     if k is None:
                         break
                     tried.add(k.key_id)
@@ -538,6 +654,7 @@ class ProxyHandler:
 
                     if k.window is not None and not k.window.allow(1):
                         continue
+                    k.record_request()  # RPD counting
 
                     client = await self._ensure_client(k.upstream_base)
                     if client is None:
@@ -606,7 +723,26 @@ class ProxyHandler:
                             # (the body is a JSON error envelope, not a stream,
                             # and forwarding it yields an unparseable response).
                             if upstream_resp.status_code >= 400:
-                                mark_failure(k)
+                                # Health state machine: classify by status code
+                                _st = upstream_resp.status_code
+                                _up_headers = dict(upstream_resp.headers)
+                                if _st in (401, 403):
+                                    mark_auth_failure(k)
+                                elif _st == 429:
+                                    learn_rate_limits(k, _up_headers, _st)
+                                    _ra_sec = 0.0
+                                    for _hk, _hv in _up_headers.items():
+                                        if _hk.lower() == "retry-after":
+                                            try:
+                                                _ra_sec = float(_hv)
+                                            except (ValueError, TypeError):
+                                                pass
+                                            break
+                                    mark_rate_limited(k, _ra_sec)
+                                elif _st >= 500:
+                                    mark_server_error(k)
+                                else:
+                                    mark_failure(k)
                                 # Drain error body for logging / circuit breaker
                                 try:
                                     err_body = await upstream_resp.aread()
@@ -615,11 +751,11 @@ class ProxyHandler:
                                     err_txt = ""
                                 _lg.info(
                                     f"[{id(request):x}] streaming: key_id={k.key_id} "
-                                    f"upstream status={upstream_resp.status_code} "
+                                    f"upstream status={_st} key_state={k.status} "
                                     f"err={err_txt!r}"
                                 )
-                                # Auth/quota issues → retry next key; 4xx request
-                                # errors → still retry (different upstream may accept)
+                                # All error classes retry next key (different
+                                # key may be valid / under quota)
                                 break
 
                             # Success! Cancel keepalive and forward stream
@@ -681,6 +817,10 @@ class ProxyHandler:
                             )
                             mark_success(k)
 
+                            # Sticky session: remember which key served this conversation
+                            if session_key:
+                                self._set_sticky(session_key, k.key_id)
+
                             if self.store:
                                 latency_ms = int((time.time() - _stream_start) * 1000)
                                 asyncio.create_task(
@@ -704,7 +844,7 @@ class ProxyHandler:
                         )
                         return resp
                     except Exception as e:
-                        mark_failure(k)
+                        mark_network_failure(k)
                         exc_type_str = type(e).__name__
                         _lg.error(
                             f"[{id(request):x}] streaming: key_id={k.key_id} "

@@ -85,6 +85,7 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             continue
         model = await get_model_by_id(store, kr.model_id)
         rpm_limit = model.rpm_limit if model and model.rpm_limit > 0 else cfg.limits.default_rpm_per_key
+        tpm_limit = model.tpm_limit if model and model.tpm_limit > 0 else cfg.limits.default_tpm_per_key
         upstream_base = (model.upstream_base if model else "").replace("`", "").replace('"', '').strip()
         upstream_model = (model.upstream_model if model else "").replace("`", "").replace('"', '').strip()
         model_name = (model.name if model else "").replace("`", "").replace('"', '').strip()
@@ -93,6 +94,9 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             window=SlidingWindow(cfg.limits.per_key_window_seconds, rpm_limit),
             model_id=kr.model_id,
             rpm_limit=rpm_limit,
+            tpm_limit=tpm_limit,
+            tpm_window=SlidingWindow(60, tpm_limit) if tpm_limit > 0 else None,
+            rpd_limit=cfg.limits.default_rpd_per_key,
             upstream_base=upstream_base,
             upstream_model=upstream_model,
             model_name=model_name,
@@ -216,6 +220,7 @@ async def run_foreground(
         proxy_timeout=cfg.limits.proxy_request_timeout,
         models=models_data, groups=groups_data, store=store,
         load_keys_fn=lambda: _load_keys_from_store(store, cfg),
+        sticky_ttl=float(cfg.limits.sticky_session_ttl),
     )
     proxy_runner = web.AppRunner(proxy.app())
     await proxy_runner.setup()
