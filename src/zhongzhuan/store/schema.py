@@ -105,6 +105,18 @@ CREATE TABLE IF NOT EXISTS access_tokens (
     created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS key_health (
+    key_id          INTEGER PRIMARY KEY,
+    status          TEXT NOT NULL DEFAULT 'healthy',
+    cooldown_until  REAL NOT NULL DEFAULT 0,
+    rpm_limit       INTEGER NOT NULL DEFAULT 0,
+    tpm_limit       INTEGER NOT NULL DEFAULT 0,
+    success_count   INTEGER NOT NULL DEFAULT 0,
+    failure_count   INTEGER NOT NULL DEFAULT 0,
+    recent_429_count INTEGER NOT NULL DEFAULT 0,
+    updated_at      INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON request_logs(ts);
 CREATE INDEX IF NOT EXISTS idx_logs_model ON request_logs(model_name, ts);
 """
@@ -192,6 +204,18 @@ CREATE TABLE IF NOT EXISTS access_tokens (
     label      VARCHAR(64) NOT NULL DEFAULT '',
     enabled    TINYINT NOT NULL DEFAULT 1,
     created_at BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS key_health (
+    key_id          INT PRIMARY KEY,
+    status          VARCHAR(16) NOT NULL DEFAULT 'healthy',
+    cooldown_until  DOUBLE NOT NULL DEFAULT 0,
+    rpm_limit       INT NOT NULL DEFAULT 0,
+    tpm_limit       INT NOT NULL DEFAULT 0,
+    success_count   INT NOT NULL DEFAULT 0,
+    failure_count   INT NOT NULL DEFAULT 0,
+    recent_429_count INT NOT NULL DEFAULT 0,
+    updated_at      BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON request_logs(ts);

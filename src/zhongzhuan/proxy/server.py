@@ -56,6 +56,14 @@ class ProxyServer:
             load_keys_fn=self.load_keys_fn, groups=self.groups,
             sticky_ttl=self.sticky_ttl,
         )
+        # 注册后台任务钩子（优化点4+5：sticky 清理 + 健康状态快照）
+        async def _on_startup(app: web.Application) -> None:
+            await handler.start_background_tasks()
+        async def _on_cleanup(app: web.Application) -> None:
+            await handler.stop_background_tasks()
+        app.on_startup.append(_on_startup)
+        app.on_cleanup.append(_on_cleanup)
+
         app.router.add_route("*", "/v1/{tail:.*}", handler)
         app.router.add_get("/healthz", lambda r: web.Response(text="ok"))
         app.router.add_get("/version", self._version)

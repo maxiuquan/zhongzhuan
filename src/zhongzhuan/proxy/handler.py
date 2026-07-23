@@ -12,10 +12,11 @@ import asyncio
 from ..store import Store
 from ..store.logs import log_request
 from ..upstream import UpstreamClient
-from .ratelimit import KeyHealth
+from .ratelimit import KeyHealth, STATE_HEALTHY
 from .retry import (
     mark_auth_failure, mark_rate_limited, mark_server_error,
     mark_network_failure, mark_failure, mark_success, learn_rate_limits,
+    classify_failure, reason_for_exhaustion,
 )
 from .scheduler import pick_key
 from .protocol.detect import detect_inbound_protocol
@@ -105,6 +106,9 @@ class ProxyHandler:
         # model switches that cause hallucination spikes.
         self._sticky: dict[str, tuple[int, float]] = {}
         self._sticky_ttl: float = sticky_ttl
+        # 后台任务引用（优化点4+5：sticky 清理 + 健康状态快照）
+        self._bg_tasks: list[asyncio.Task] = []
+        self._bg_running = False
 
     def _set_groups(self, groups: list[dict]) -> None:
         """Rebuild the group routing map from a list of group dicts."""
@@ -192,9 +196,32 @@ class ProxyHandler:
                 self._sticky = {k: v for k, v in self._sticky.items() if v[1] > now}
 
     async def reload_keys(self) -> int:
-        """Reload keys (and groups) from the store. Returns new key count."""
+        """Reload keys (and groups) from the store. Returns new key count.
+
+        优化点3：reload 时重置 invalid 状态。从 DB 重新加载意味着 key 可能已修复，
+        所以把 status 强制重置为 healthy（但保留学到的 rpm_limit/tpm_limit 限额）。
+        """
         if self._load_keys_fn is not None:
             new_keys = await self._load_keys_fn()
+            # 保留旧 keys 中学到的限额（learn_rate_limits 的成果）
+            old_limits: dict[int, tuple[int, int]] = {}
+            for ok in self._keys:
+                if ok.key_id > 0:  # 跳过兜底 key (key_id=-1)
+                    old_limits[ok.key_id] = (ok.rpm_limit, ok.tpm_limit)
+            # 对新加载的 keys：重置状态但恢复学到的限额
+            for nk in new_keys:
+                nk.status = STATE_HEALTHY
+                nk.cooldown_until = 0.0
+                nk.recent_429_count = 0
+                if nk.key_id in old_limits:
+                    old_rpm, old_tpm = old_limits[nk.key_id]
+                    # 只保留更严格的限额（学到的比配置的更小才保留）
+                    if old_rpm > 0 and (nk.rpm_limit == 0 or old_rpm < nk.rpm_limit):
+                        nk.rpm_limit = old_rpm
+                    if old_tpm > 0 and (nk.tpm_limit == 0 or old_tpm < nk.tpm_limit):
+                        nk.tpm_limit = old_tpm
+                        if nk.tpm_window is not None:
+                            nk.tpm_window.limit = old_tpm
             self._keys = new_keys
         # Also reload groups so admin edits to groups take effect without restart
         if self.store is not None:
@@ -229,6 +256,79 @@ class ProxyHandler:
                 return None
             self._client_cache[upstream_base] = client
             return client
+
+    # ---- 后台任务：sticky 清理 + 健康状态持久化（优化点4+5）----
+
+    async def start_background_tasks(self) -> None:
+        """启动后台周期任务。应在 aiohttp app.on_startup 时调用。"""
+        if self._bg_running:
+            return
+        self._bg_running = True
+        self._bg_tasks.append(asyncio.create_task(self._sticky_cleanup_loop()))
+        if self.store is not None:
+            self._bg_tasks.append(asyncio.create_task(self._health_snapshot_loop()))
+        _lg.info(f"started {len(self._bg_tasks)} background tasks")
+
+    async def stop_background_tasks(self) -> None:
+        """停止后台任务。应在 aiohttp app.on_cleanup 时调用。"""
+        self._bg_running = False
+        for t in self._bg_tasks:
+            t.cancel()
+        for t in self._bg_tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._bg_tasks.clear()
+
+    async def _sticky_cleanup_loop(self) -> None:
+        """优化点5：每 5 分钟清理过期的 sticky session 条目。"""
+        while self._bg_running:
+            try:
+                await asyncio.sleep(300)
+                if not self._bg_running:
+                    break
+                now = time.time()
+                before = len(self._sticky)
+                self._sticky = {k: v for k, v in self._sticky.items() if v[1] > now}
+                cleaned = before - len(self._sticky)
+                if cleaned > 0:
+                    _lg.debug(f"sticky cleanup: removed {cleaned} expired entries")
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                _lg.exception("sticky cleanup loop error")
+                await asyncio.sleep(60)
+
+    async def _health_snapshot_loop(self) -> None:
+        """优化点4：每 30 秒把 key 健康状态快照到 DB（重启后可恢复）。"""
+        from ..store.key_health import save_health, KeyHealthRow
+        while self._bg_running:
+            try:
+                await asyncio.sleep(30)
+                if not self._bg_running or self.store is None:
+                    break
+                for k in self._keys:
+                    if k.key_id <= 0:
+                        continue  # 跳过兜底 key
+                    try:
+                        await save_health(self.store, KeyHealthRow(
+                            key_id=k.key_id,
+                            status=k.status,
+                            cooldown_until=k.cooldown_until,
+                            rpm_limit=k.rpm_limit,
+                            tpm_limit=k.tpm_limit,
+                            success_count=k.success_count,
+                            failure_count=k.failure_count,
+                            recent_429_count=k.recent_429_count,
+                        ))
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                _lg.exception("health snapshot loop error")
+                await asyncio.sleep(60)
 
     async def __call__(self, request: web.Request) -> web.Response:
         _request_start = time.time()
@@ -308,8 +408,11 @@ class ProxyHandler:
                 else:
                     k = pick_key([x for x in candidates if x.key_id not in tried])
                 if k is None:
+                    # 优化点8：429 响应带 X-Zhongzhuan-Reason 头
+                    reason = reason_for_exhaustion(candidates)
                     return web.json_response(
                         {"error": "all keys exhausted"}, status=429,
+                        headers={"X-Zhongzhuan-Reason": reason},
                     )
                 tried.add(k.key_id)
 
@@ -454,30 +557,12 @@ class ProxyHandler:
                         status = resp.status_code
                         body = data
 
-                    # Health state machine: classify failure by status code
-                    if resp.status_code in (401, 403):
-                        mark_auth_failure(k)
-                    elif resp.status_code == 429:
-                        # Learn real rate limits from response headers, then cooldown
-                        learn_rate_limits(k, resp_headers, resp.status_code)
-                        _ra_sec = 0.0
-                        for _hk, _hv in resp_headers.items():
-                            if _hk.lower() == "retry-after":
-                                try:
-                                    _ra_sec = float(_hv)
-                                except (ValueError, TypeError):
-                                    pass
-                                break
-                        mark_rate_limited(k, _ra_sec)
-                    elif resp.status_code >= 500:
-                        mark_server_error(k)
-                    else:
-                        # Other 4xx (400/404/413…): request-side issue
-                        mark_failure(k)
+                    # 优化点2：用 classify_failure 统一处理状态码分流（消除重复）
+                    should_retry = classify_failure(k, resp.status_code, resp_headers)
 
                     _lg.info(
                         f"[{id(request):x}] key_id={k.key_id} failure status={status} "
-                        f"key_state={k.status}"
+                        f"key_state={k.status} retry={should_retry}"
                     )
                     if self.store:
                         latency_ms = int((time.time() - _request_start) * 1000)
@@ -496,7 +581,7 @@ class ProxyHandler:
                         )
                     # Retry auth failures (next key may be valid), 429, and 5xx.
                     # Other 4xx are request-side errors → return to client.
-                    if resp.status_code in (401, 403, 429) or resp.status_code >= 500:
+                    if should_retry:
                         continue
                     return web.Response(status=status, body=body)
 
@@ -723,26 +808,10 @@ class ProxyHandler:
                             # (the body is a JSON error envelope, not a stream,
                             # and forwarding it yields an unparseable response).
                             if upstream_resp.status_code >= 400:
-                                # Health state machine: classify by status code
+                                # 优化点2：用 classify_failure 统一处理状态码分流
                                 _st = upstream_resp.status_code
                                 _up_headers = dict(upstream_resp.headers)
-                                if _st in (401, 403):
-                                    mark_auth_failure(k)
-                                elif _st == 429:
-                                    learn_rate_limits(k, _up_headers, _st)
-                                    _ra_sec = 0.0
-                                    for _hk, _hv in _up_headers.items():
-                                        if _hk.lower() == "retry-after":
-                                            try:
-                                                _ra_sec = float(_hv)
-                                            except (ValueError, TypeError):
-                                                pass
-                                            break
-                                    mark_rate_limited(k, _ra_sec)
-                                elif _st >= 500:
-                                    mark_server_error(k)
-                                else:
-                                    mark_failure(k)
+                                classify_failure(k, _st, _up_headers)
                                 # Drain error body for logging / circuit breaker
                                 try:
                                     err_body = await upstream_resp.aread()

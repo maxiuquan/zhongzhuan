@@ -62,11 +62,23 @@ class WinSvcConfig:
 
 
 @dataclass
+class FallbackConfig:
+    """OpenCode Free 兜底上游配置：无 key 时自动启用免费上游。"""
+    enabled: bool = True
+    upstream_base: str = "https://opencode.ai"
+    api_key: str = "public"  # OpenCode Free 使用硬编码 "public" 占位 token
+    models_url: str = "https://opencode.ai/zen/v1/models"
+    chat_path: str = "/zen/v1/chat/completions"  # OpenAI 兼容端点
+    model_prefix: str = "oc-"  # 暴露给下游的模型名前缀
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     windows_service: WinSvcConfig = field(default_factory=WinSvcConfig)
+    fallback: FallbackConfig = field(default_factory=FallbackConfig)
 
 
 def default_config() -> Config:

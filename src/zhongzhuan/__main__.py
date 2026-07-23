@@ -74,7 +74,13 @@ def make_default_config(path: Path) -> None:
 
 
 async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
-    """Load keys from DB into KeyHealth objects."""
+    """Load keys from DB into KeyHealth objects.
+
+    优化点4：启动时从 key_health 表恢复之前学到的 status/cooldown/限额。
+    """
+    from zhongzhuan.store.key_health import load_all_health
+    saved_health = await load_all_health(store)
+
     key_rows = await list_keys(store)
     health_list: list[KeyHealth] = []
     for kr in key_rows:
@@ -89,7 +95,7 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
         upstream_base = (model.upstream_base if model else "").replace("`", "").replace('"', '').strip()
         upstream_model = (model.upstream_model if model else "").replace("`", "").replace('"', '').strip()
         model_name = (model.name if model else "").replace("`", "").replace('"', '').strip()
-        health_list.append(KeyHealth(
+        kh = KeyHealth(
             key_id=kr.id, api_key=plain,
             window=SlidingWindow(cfg.limits.per_key_window_seconds, rpm_limit),
             model_id=kr.model_id,
@@ -104,8 +110,85 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             anthropic_version=model.anthropic_version if model else "2023-06-01",
             max_tokens_default=model.max_tokens_default if model else 4096,
             upstream_path_override=model.upstream_path_override if model else "",
-        ))
+        )
+        # 恢复持久化的健康状态（优化点4）
+        if kr.id in saved_health:
+            sh = saved_health[kr.id]
+            kh.status = sh.status
+            kh.cooldown_until = sh.cooldown_until
+            kh.success_count = sh.success_count
+            kh.failure_count = sh.failure_count
+            kh.recent_429_count = sh.recent_429_count
+            # 恢复学到的更严格限额
+            if sh.rpm_limit > 0 and (kh.rpm_limit == 0 or sh.rpm_limit < kh.rpm_limit):
+                kh.rpm_limit = sh.rpm_limit
+            if sh.tpm_limit > 0:
+                if kh.tpm_limit == 0 or sh.tpm_limit < kh.tpm_limit:
+                    kh.tpm_limit = sh.tpm_limit
+                if kh.tpm_window is None:
+                    kh.tpm_window = SlidingWindow(60, sh.tpm_limit)
+                else:
+                    kh.tpm_window.limit = sh.tpm_limit
+        health_list.append(kh)
     return health_list
+
+
+# ---- OpenCode Free 兜底上游 ----
+
+# 拉取失败时的默认免费模型列表（兜底中的兜底）
+_DEFAULT_FREE_MODELS = [
+    "glm-5.2-free", "glm-5.1-free", "kimi-k2.7-code-free",
+    "deepseek-v4-flash-free", "mimo-v2.5-free",
+]
+
+
+async def _fetch_opencode_models(cfg) -> list[str]:
+    """从 OpenCode Free 拉取免费模型列表，失败时返回默认列表。"""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                cfg.fallback.models_url,
+                headers={"Authorization": f"Bearer {cfg.fallback.api_key}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            models = data.get("data", []) if isinstance(data, dict) else data
+            # 过滤 -free 后缀的模型（OpenCode Free 的免费模型约定）
+            free_ids = [
+                m.get("id", "") for m in models
+                if isinstance(m, dict) and m.get("id", "").endswith("-free")
+            ]
+            if free_ids:
+                return free_ids
+            return _DEFAULT_FREE_MODELS
+    except Exception as e:
+        from loguru import logger
+        logger.warning(f"fetch opencode models failed: {e}, using defaults")
+        return _DEFAULT_FREE_MODELS
+
+
+def _build_fallback_keys(cfg, model_ids: list[str]) -> list[KeyHealth]:
+    """为每个免费模型构建一个兜底 KeyHealth。"""
+    prefix = cfg.fallback.model_prefix
+    keys: list[KeyHealth] = []
+    for mid in model_ids:
+        keys.append(KeyHealth(
+            key_id=-1,  # 哨兵值：标识兜底 key
+            api_key=cfg.fallback.api_key,
+            window=SlidingWindow(60, 0),  # 无 RPM 限制（免费上游自己管）
+            rpm_limit=0,
+            tpm_limit=0,
+            tpm_window=None,
+            rpd_limit=0,
+            upstream_base=cfg.fallback.upstream_base,
+            upstream_model=mid,  # 上游真实模型名
+            model_name=f"{prefix}{mid}",  # 暴露给下游的带前缀名
+            upstream_protocol="openai",
+            upstream_path_override=cfg.fallback.chat_path,
+            is_fallback=True,
+        ))
+    return keys
 
 
 async def run_foreground(
@@ -173,7 +256,16 @@ async def run_foreground(
                 upstream_model="",
             ))
 
-    # If no keys at all, use a dummy to avoid crash
+    # OpenCode Free 兜底注入：无 key 时自动启用免费上游
+    fallback_models: list[str] = []
+    if cfg.fallback.enabled and not keys:
+        logger.info("无配置 key，启用 OpenCode Free 兜底上游")
+        fallback_models = await _fetch_opencode_models(cfg)
+        fallback_keys = _build_fallback_keys(cfg, fallback_models)
+        keys.extend(fallback_keys)
+        logger.info(f"注入 {len(fallback_keys)} 个 OpenCode Free 兜底 key，模型: {fallback_models}")
+
+    # If no keys at all and fallback disabled, use a dummy to avoid crash
     if not keys:
         api_key = key or os.environ.get("ZHONGZHUAN_KEY", "dummy-key-no-auth")
         upstream_base = upstream_url or os.environ.get("ZHONGZHUAN_UPSTREAM", "https://api.openai.com")
@@ -204,6 +296,11 @@ async def run_foreground(
 
     # Load models and groups for /v1/models
     models_data = [{"name": m.name} for m in await list_models(store)]
+    # 把兜底模型也加入 /v1/models 列表
+    if fallback_models:
+        prefix = cfg.fallback.model_prefix
+        for fm in fallback_models:
+            models_data.append({"name": f"{prefix}{fm}"})
     from zhongzhuan.store.groups import list_groups as list_groups_db
     groups_data = [
         {

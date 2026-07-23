@@ -70,13 +70,9 @@ def mark_success(k: KeyHealth) -> None:
     k.cooldown_until = 0.0
 
 
-def _header_get(headers: dict, name: str) -> str | None:
-    """Case-insensitive header lookup."""
-    target = name.lower()
-    for hk, hv in headers.items():
-        if hk.lower() == target:
-            return hv
-    return None
+def _lower_headers(headers: dict) -> dict[str, str]:
+    """Build a lowercase-keyed dict once for O(1) case-insensitive lookup."""
+    return {k.lower(): v for k, v in headers.items()}
 
 
 def learn_rate_limits(k: KeyHealth, headers: dict, status: int) -> None:
@@ -86,8 +82,11 @@ def learn_rate_limits(k: KeyHealth, headers: dict, status: int) -> None:
     on 200/429 responses. We tighten our local caps so the scheduler stops
     picking keys that are about to be rate-limited, and honor Retry-After.
     """
+    # 一次构建 lowercase dict，避免多次 O(n) 遍历（优化点6）
+    h = _lower_headers(headers)
+
     # Retry-After (seconds or HTTP-date; we only handle the seconds form)
-    retry_after = _header_get(headers, "retry-after")
+    retry_after = h.get("retry-after")
     if retry_after:
         try:
             k.cooldown_until = time.time() + min(float(retry_after), 600.0)
@@ -95,7 +94,7 @@ def learn_rate_limits(k: KeyHealth, headers: dict, status: int) -> None:
             pass
 
     # OpenAI / generic style: x-ratelimit-limit-requests
-    limit_req = _header_get(headers, "x-ratelimit-limit-requests")
+    limit_req = h.get("x-ratelimit-limit-requests")
     if limit_req:
         try:
             val = int(limit_req)
@@ -105,7 +104,7 @@ def learn_rate_limits(k: KeyHealth, headers: dict, status: int) -> None:
             pass
 
     # x-ratelimit-limit-tokens (per-minute token cap)
-    limit_tokens = _header_get(headers, "x-ratelimit-limit-tokens")
+    limit_tokens = h.get("x-ratelimit-limit-tokens")
     if limit_tokens:
         try:
             val = int(limit_tokens)
@@ -120,7 +119,7 @@ def learn_rate_limits(k: KeyHealth, headers: dict, status: int) -> None:
             pass
 
     # Sync real usage from remaining counters (more accurate than our own count)
-    remaining_tokens = _header_get(headers, "x-ratelimit-remaining-tokens")
+    remaining_tokens = h.get("x-ratelimit-remaining-tokens")
     if remaining_tokens and k.tpm_window is not None and k.tpm_limit > 0:
         try:
             rem = int(remaining_tokens)
@@ -132,7 +131,7 @@ def learn_rate_limits(k: KeyHealth, headers: dict, status: int) -> None:
         except (ValueError, TypeError):
             pass
 
-    remaining_req = _header_get(headers, "x-ratelimit-remaining-requests")
+    remaining_req = h.get("x-ratelimit-remaining-requests")
     if remaining_req and k.rpm_limit > 0:
         try:
             rem = int(remaining_req)
@@ -143,3 +142,46 @@ def learn_rate_limits(k: KeyHealth, headers: dict, status: int) -> None:
                     k.window.add(used - current)
         except (ValueError, TypeError):
             pass
+
+
+def classify_failure(k: KeyHealth, status_code: int, headers: dict) -> bool:
+    """根据上游状态码分类失败并更新 key 健康状态（优化点2：消除 handler 重复逻辑）。
+
+    返回 True 表示可重试（应换下一个 key），False 表示请求侧错误（应直接返回客户端）。
+    """
+    if status_code in (401, 403):
+        mark_auth_failure(k)
+        return True
+    if status_code == 429:
+        learn_rate_limits(k, headers, status_code)
+        h = _lower_headers(headers)
+        retry_after = h.get("retry-after")
+        try:
+            ra_sec = float(retry_after) if retry_after else 0.0
+        except (ValueError, TypeError):
+            ra_sec = 0.0
+        mark_rate_limited(k, ra_sec)
+        return True
+    if status_code >= 500:
+        mark_server_error(k)
+        return True
+    # 其他 4xx（400/404/413…）：请求侧错误，不重试
+    mark_failure(k)
+    return False
+
+
+def reason_for_exhaustion(keys: list[KeyHealth]) -> str:
+    """当所有 key 耗尽时，返回原因标签（优化点8：429 响应带 X-Zhongzhuan-Reason 头）。"""
+    if not keys:
+        return "no_keys"
+    from .ratelimit import STATE_INVALID, STATE_RATE_LIMITED, STATE_ERROR
+    has_invalid = any(k.status == STATE_INVALID for k in keys)
+    has_rate_limited = any(k.status == STATE_RATE_LIMITED for k in keys)
+    has_error = any(k.status == STATE_ERROR for k in keys)
+    if has_invalid and not has_rate_limited and not has_error:
+        return "all_invalid"
+    if has_rate_limited and not has_invalid and not has_error:
+        return "all_rate_limited"
+    if has_error and not has_invalid and not has_rate_limited:
+        return "all_error"
+    return "all_exhausted"
