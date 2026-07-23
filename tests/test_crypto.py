@@ -2,7 +2,16 @@
 import os
 os.environ["ZHONGZHUAN_DEV_NO_DPAPI"] = "1"
 
-from zhongzhuan.crypto import encrypt, decrypt, mask
+import pytest
+
+from zhongzhuan.crypto import encrypt, decrypt, mask, init
+
+
+@pytest.fixture(autouse=True)
+def _init_crypto(tmp_path):
+    """每个测试前初始化 crypto（生成临时 secret.key）。"""
+    import asyncio
+    asyncio.run(init(tmp_path))
 
 
 def test_encrypt_decrypt_roundtrip():

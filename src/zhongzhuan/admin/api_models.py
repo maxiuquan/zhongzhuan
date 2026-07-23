@@ -76,5 +76,6 @@ def _to_dict(m: Model) -> dict:
         "max_tokens_default": m.max_tokens_default,
         "upstream_path_override": m.upstream_path_override,
         "is_fallback": m.is_fallback,
+        "aliases": m.aliases,
         "created_at": m.created_at, "updated_at": m.updated_at,
     }

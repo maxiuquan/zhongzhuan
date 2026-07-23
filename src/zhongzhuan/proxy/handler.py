@@ -130,7 +130,7 @@ class ProxyHandler:
         - requested_model matches a *group* name → all available keys whose
           model belongs to that group's members (group-level load balancing
           via key health scoring; member order/strategy is best-effort).
-        - requested_model matches a *model* name → keys bound to that model.
+        - requested_model matches a *model* name OR its aliases → keys bound to that model.
         - no match (or empty) → all available keys (backwards-compatible).
         """
         available = [k for k in self._keys if k.is_available()]
@@ -143,8 +143,13 @@ class ProxyHandler:
                 matched = [k for k in available if k.model_id in member_ids]
                 if matched:
                     return matched
-            # 2. Model name match
+            # 2. Model name match (直接匹配 model_name)
             matched = [k for k in available if k.model_name == requested_model]
+            if matched:
+                return matched
+            # 3. 别名匹配：检查 KeyHealth 是否有 aliases 属性（从 DB 加载时设置）
+            matched = [k for k in available if getattr(k, "aliases", "") and requested_model in
+                       [a.strip() for a in str(getattr(k, "aliases", "")).split(",") if a.strip()]]
             if matched:
                 return matched
 
@@ -618,15 +623,16 @@ class ProxyHandler:
                 # x-ratelimit-* headers on 200, not just 429)
                 learn_rate_limits(k, resp_headers, resp.status_code)
 
-                # Record token usage for TPM tracking
+                # Record token usage for TPM tracking + 配额扣减 + 成本估算
+                _tokens_in = 0
+                _tokens_out = 0
                 try:
                     _resp_obj = json.loads(data)
                     _usage = _resp_obj.get("usage") if isinstance(_resp_obj, dict) else None
                     if isinstance(_usage, dict):
-                        k.record_tokens(
-                            int(_usage.get("prompt_tokens", 0)),
-                            int(_usage.get("completion_tokens", 0)),
-                        )
+                        _tokens_in = int(_usage.get("prompt_tokens", 0))
+                        _tokens_out = int(_usage.get("completion_tokens", 0))
+                        k.record_tokens(_tokens_in, _tokens_out)
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
 
@@ -634,20 +640,21 @@ class ProxyHandler:
                 if session_key:
                     self._set_sticky(session_key, k.key_id)
 
-                # Log successful request asynchronously
+                # Log successful request asynchronously（含 token 用量 + 配额扣减 + 成本）
                 if self.store:
                     latency_ms = int((time.time() - _request_start) * 1000)
+                    _token_id = request.get("token_id", 0)
                     asyncio.create_task(
-                        log_request(
-                            self.store,
-                            client_ip=request.remote,
+                        self._log_and_deduct(
+                            self.store, client_ip=request.remote,
                             model_name=requested_model or "",
-                            key_id=k.key_id,
-                            status=resp.status_code,
+                            key_id=k.key_id, status=resp.status_code,
                             latency_ms=latency_ms,
+                            tokens_in=_tokens_in, tokens_out=_tokens_out,
                             inbound_protocol=inbound_protocol,
                             outbound_protocol=outbound_protocol,
                             translated=need_translation,
+                            token_id=_token_id,
                         )
                     )
 
@@ -886,23 +893,35 @@ class ProxyHandler:
                             )
                             mark_success(k)
 
+                            # 流式响应的 token 用量：尝试从 stream_translator 提取
+                            _stream_tokens_in = 0
+                            _stream_tokens_out = 0
+                            if stream_translator and hasattr(stream_translator, "usage"):
+                                _u = stream_translator.usage
+                                if isinstance(_u, dict):
+                                    _stream_tokens_in = int(_u.get("prompt_tokens", 0))
+                                    _stream_tokens_out = int(_u.get("completion_tokens", 0))
+                            if _stream_tokens_in or _stream_tokens_out:
+                                k.record_tokens(_stream_tokens_in, _stream_tokens_out)
+
                             # Sticky session: remember which key served this conversation
                             if session_key:
                                 self._set_sticky(session_key, k.key_id)
 
                             if self.store:
                                 latency_ms = int((time.time() - _stream_start) * 1000)
+                                _token_id = request.get("token_id", 0)
                                 asyncio.create_task(
-                                    log_request(
-                                        self.store,
-                                        client_ip=request.remote,
+                                    self._log_and_deduct(
+                                        self.store, client_ip=request.remote,
                                         model_name=requested_model or "",
-                                        key_id=k.key_id,
-                                        status=200,
+                                        key_id=k.key_id, status=200,
                                         latency_ms=latency_ms,
+                                        tokens_in=_stream_tokens_in, tokens_out=_stream_tokens_out,
                                         inbound_protocol=inbound_protocol,
                                         outbound_protocol=outbound_protocol,
                                         translated=need_translation,
+                                        token_id=_token_id,
                                     )
                                 )
                             return resp
@@ -965,6 +984,46 @@ class ProxyHandler:
                 pass
 
         return resp
+
+    async def _log_and_deduct(
+        self, store, *,
+        client_ip: str = "", model_name: str = "",
+        key_id: int | None = None, status: int = 0, latency_ms: int = 0,
+        tokens_in: int = 0, tokens_out: int = 0,
+        inbound_protocol: str = "", outbound_protocol: str = "",
+        translated: bool = False, token_id: int = 0,
+    ) -> None:
+        """记录请求日志 + 扣减令牌配额 + 计算成本（异步调用）。"""
+        # 计算成本
+        cost = 0.0
+        try:
+            from ..store.pricing import calculate_cost
+            cost = await calculate_cost(store, model_name, tokens_in, tokens_out)
+        except Exception:
+            pass
+
+        # 写日志
+        try:
+            await log_request(
+                store,
+                client_ip=client_ip, model_name=model_name,
+                key_id=key_id, status=status, latency_ms=latency_ms,
+                tokens_in=tokens_in, tokens_out=tokens_out,
+                inbound_protocol=inbound_protocol,
+                outbound_protocol=outbound_protocol,
+                translated=translated, token_id=token_id, cost=cost,
+            )
+        except Exception:
+            _lg.exception("log_request failed")
+
+        # 扣减令牌配额
+        if token_id > 0 and (tokens_in > 0 or tokens_out > 0):
+            try:
+                from ..store.access_tokens import deduct_token_quota
+                total_tokens = tokens_in + tokens_out
+                await deduct_token_quota(store, token_id, total_tokens)
+            except Exception:
+                _lg.exception("deduct_token_quota failed")
 
     async def _list_models(self) -> web.Response:
         """Return the list of custom model names configured in the admin UI.

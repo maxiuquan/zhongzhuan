@@ -26,7 +26,11 @@ class AdminServer:
         self.config = config
 
     def app(self) -> web.Application:
-        app = web.Application(client_max_size=64 * 1024 * 1024)
+        from ..proxy.cors import make_cors_middleware
+        app = web.Application(
+            client_max_size=64 * 1024 * 1024,
+            middlewares=[make_cors_middleware()],  # admin 也启用 CORS
+        )
 
         # Configure proxy reload target so admin edits hot-reload the proxy
         # without a restart. Falls back to defaults if config is unavailable.

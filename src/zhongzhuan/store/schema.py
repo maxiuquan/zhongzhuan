@@ -9,9 +9,16 @@ SQLITE_MIGRATIONS = [
     "ALTER TABLE models ADD COLUMN max_tokens_default INTEGER NOT NULL DEFAULT 4096",
     "ALTER TABLE models ADD COLUMN upstream_path_override TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE models ADD COLUMN is_fallback INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE models ADD COLUMN aliases TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE request_logs ADD COLUMN inbound_protocol TEXT DEFAULT ''",
     "ALTER TABLE request_logs ADD COLUMN outbound_protocol TEXT DEFAULT ''",
     "ALTER TABLE request_logs ADD COLUMN translated INTEGER DEFAULT 0",
+    "ALTER TABLE access_tokens ADD COLUMN quota_tokens BIGINT NOT NULL DEFAULT -1",
+    "ALTER TABLE access_tokens ADD COLUMN used_tokens BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE access_tokens ADD COLUMN model_whitelist TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE access_tokens ADD COLUMN expires_at BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE request_logs ADD COLUMN token_id INTEGER DEFAULT 0",
+    "ALTER TABLE request_logs ADD COLUMN cost REAL DEFAULT 0",
 ]
 
 MYSQL_MIGRATIONS = [
@@ -20,9 +27,16 @@ MYSQL_MIGRATIONS = [
     "ALTER TABLE models ADD COLUMN IF NOT EXISTS max_tokens_default INT NOT NULL DEFAULT 4096",
     "ALTER TABLE models ADD COLUMN IF NOT EXISTS upstream_path_override VARCHAR(512) NOT NULL DEFAULT ''",
     "ALTER TABLE models ADD COLUMN IF NOT EXISTS is_fallback TINYINT NOT NULL DEFAULT 0",
+    "ALTER TABLE models ADD COLUMN IF NOT EXISTS aliases VARCHAR(512) NOT NULL DEFAULT ''",
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS inbound_protocol VARCHAR(16) DEFAULT ''",
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS outbound_protocol VARCHAR(16) DEFAULT ''",
     "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS translated TINYINT DEFAULT 0",
+    "ALTER TABLE access_tokens ADD COLUMN IF NOT EXISTS quota_tokens BIGINT NOT NULL DEFAULT -1",
+    "ALTER TABLE access_tokens ADD COLUMN IF NOT EXISTS used_tokens BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE access_tokens ADD COLUMN IF NOT EXISTS model_whitelist VARCHAR(512) NOT NULL DEFAULT ''",
+    "ALTER TABLE access_tokens ADD COLUMN IF NOT EXISTS expires_at BIGINT NOT NULL DEFAULT 0",
+    "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS token_id INT DEFAULT 0",
+    "ALTER TABLE request_logs ADD COLUMN IF NOT EXISTS cost DOUBLE DEFAULT 0",
 ]
 
 SQLITE_SCHEMA = """
@@ -40,6 +54,7 @@ CREATE TABLE IF NOT EXISTS models (
     max_tokens_default INTEGER NOT NULL DEFAULT 4096,
     upstream_path_override TEXT NOT NULL DEFAULT '',
     is_fallback   INTEGER NOT NULL DEFAULT 0,
+    aliases       TEXT NOT NULL DEFAULT '',
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL
 );
@@ -85,7 +100,9 @@ CREATE TABLE IF NOT EXISTS request_logs (
     request_id  TEXT NOT NULL,
     inbound_protocol TEXT DEFAULT '',
     outbound_protocol TEXT DEFAULT '',
-    translated  INTEGER DEFAULT 0
+    translated  INTEGER DEFAULT 0,
+    token_id    INTEGER DEFAULT 0,
+    cost        REAL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS system_config (
@@ -101,11 +118,23 @@ CREATE TABLE IF NOT EXISTS admin_users (
 );
 
 CREATE TABLE IF NOT EXISTS access_tokens (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    token      TEXT NOT NULL UNIQUE,
-    label      TEXT NOT NULL DEFAULT '',
-    enabled    INTEGER NOT NULL DEFAULT 1,
-    created_at INTEGER NOT NULL
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    token           TEXT NOT NULL UNIQUE,
+    label           TEXT NOT NULL DEFAULT '',
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    quota_tokens    INTEGER NOT NULL DEFAULT -1,
+    used_tokens     INTEGER NOT NULL DEFAULT 0,
+    model_whitelist TEXT NOT NULL DEFAULT '',
+    expires_at      INTEGER NOT NULL DEFAULT 0,
+    created_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS model_pricing (
+    model_name          TEXT PRIMARY KEY,
+    input_price_per_1k  REAL NOT NULL DEFAULT 0,
+    output_price_per_1k REAL NOT NULL DEFAULT 0,
+    currency            TEXT NOT NULL DEFAULT 'CNY',
+    updated_at          INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS key_health (
@@ -139,6 +168,7 @@ CREATE TABLE IF NOT EXISTS models (
     max_tokens_default INT NOT NULL DEFAULT 4096,
     upstream_path_override VARCHAR(512) NOT NULL DEFAULT '',
     is_fallback   TINYINT NOT NULL DEFAULT 0,
+    aliases       VARCHAR(512) NOT NULL DEFAULT '',
     created_at    BIGINT NOT NULL,
     updated_at    BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -187,7 +217,9 @@ CREATE TABLE IF NOT EXISTS request_logs (
     request_id  VARCHAR(64) NOT NULL,
     inbound_protocol VARCHAR(16) DEFAULT '',
     outbound_protocol VARCHAR(16) DEFAULT '',
-    translated  TINYINT DEFAULT 0
+    translated  TINYINT DEFAULT 0,
+    token_id    INT DEFAULT 0,
+    cost        DOUBLE DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS system_config (
@@ -203,11 +235,23 @@ CREATE TABLE IF NOT EXISTS admin_users (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS access_tokens (
-    id         INT PRIMARY KEY AUTO_INCREMENT,
-    token      VARCHAR(128) NOT NULL UNIQUE,
-    label      VARCHAR(64) NOT NULL DEFAULT '',
-    enabled    TINYINT NOT NULL DEFAULT 1,
-    created_at BIGINT NOT NULL
+    id              INT PRIMARY KEY AUTO_INCREMENT,
+    token           VARCHAR(128) NOT NULL UNIQUE,
+    label           VARCHAR(64) NOT NULL DEFAULT '',
+    enabled         TINYINT NOT NULL DEFAULT 1,
+    quota_tokens    BIGINT NOT NULL DEFAULT -1,
+    used_tokens     BIGINT NOT NULL DEFAULT 0,
+    model_whitelist VARCHAR(512) NOT NULL DEFAULT '',
+    expires_at      BIGINT NOT NULL DEFAULT 0,
+    created_at      BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS model_pricing (
+    model_name          VARCHAR(128) PRIMARY KEY,
+    input_price_per_1k  DOUBLE NOT NULL DEFAULT 0,
+    output_price_per_1k DOUBLE NOT NULL DEFAULT 0,
+    currency            VARCHAR(8) NOT NULL DEFAULT 'CNY',
+    updated_at          BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS key_health (

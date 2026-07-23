@@ -113,6 +113,7 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             # 兜底标记 + 降权系数从 Model + Config 注入
             is_fallback=bool(model.is_fallback) if model else False,
             fallback_penalty=cfg.fallback.fallback_penalty,
+            aliases=model.aliases if model else "",
         )
         # 恢复持久化的健康状态（优化点4）
         if kr.id in saved_health:
@@ -408,7 +409,16 @@ async def run_foreground(
     try:
         await stop_event.wait()
     finally:
-        logger.info("shutting down...")
+        # 优雅关闭：先停止接收新请求，等待现有请求完成（最多 30s），再释放资源
+        logger.info("shutting down (graceful, timeout=30s)...")
+        try:
+            await asyncio.wait_for(proxy_runner.shutdown(timeout=30.0), timeout=35.0)
+        except asyncio.TimeoutError:
+            logger.warning("proxy shutdown timed out, forcing close")
+        try:
+            await asyncio.wait_for(admin_runner.shutdown(timeout=5.0), timeout=8.0)
+        except asyncio.TimeoutError:
+            logger.warning("admin shutdown timed out, forcing close")
         await proxy_runner.cleanup()
         await admin_runner.cleanup()
         for client in upstream_clients.values():

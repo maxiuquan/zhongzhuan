@@ -1,22 +1,23 @@
 """SQLite store tests."""
-from zhongzhuan.store import Store
+import asyncio
+
+import pytest
+
+from zhongzhuan.store.store import create_store
+from zhongzhuan.config import default_config
 
 
-def test_open_applies_migrations(tmp_path):
-    s = Store(str(tmp_path / "test.db"))
+@pytest.mark.asyncio
+async def test_open_applies_migrations(tmp_path):
+    cfg = default_config()
+    cfg.storage.db_path = str(tmp_path / "test.db")
+    cfg.tidb = None  # 强制使用 SQLite
+    s = await create_store(cfg)
     try:
-        conn = s.connect()
-        cur = conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='models'"
+        # 验证迁移已应用：关键表存在
+        row = await s.fetchone(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('models','api_keys','request_logs','access_tokens','model_pricing','key_health')"
         )
-        assert cur.fetchone()[0] == 1
-        cur = conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='api_keys'"
-        )
-        assert cur.fetchone()[0] == 1
-        cur = conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='request_logs'"
-        )
-        assert cur.fetchone()[0] == 1
+        assert row[0] == 6
     finally:
-        s.close()
+        await s.close()

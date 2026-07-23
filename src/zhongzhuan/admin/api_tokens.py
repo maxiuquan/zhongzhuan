@@ -16,10 +16,23 @@ def register_routes(app: web.Application, ctx) -> None:
     async def create(request):
         data = await request.json()
         label = data.get("label", "")
-        t = await create_token(ctx.store, label)
+        quota_tokens = int(data.get("quota_tokens", -1))
+        model_whitelist = data.get("model_whitelist", "")
+        # expires_at: 接受天数（>0）或时间戳（<=0 表示永不过期）
+        expires_days = int(data.get("expires_days", 0))
+        import time
+        expires_at = int(time.time()) + expires_days * 86400 if expires_days > 0 else 0
+        t = await create_token(
+            ctx.store, label,
+            quota_tokens=quota_tokens,
+            model_whitelist=model_whitelist,
+            expires_at=expires_at,
+        )
         return web.json_response({
             "id": t.id, "token": t.token, "label": t.label,
-            "enabled": t.enabled, "created_at": t.created_at,
+            "enabled": t.enabled, "quota_tokens": t.quota_tokens,
+            "used_tokens": t.used_tokens, "model_whitelist": t.model_whitelist,
+            "expires_at": t.expires_at, "created_at": t.created_at,
         }, status=201)
 
     async def delete(request):
@@ -30,11 +43,20 @@ def register_routes(app: web.Application, ctx) -> None:
     async def update(request):
         token_id = int(request.match_info["id"])
         data = await request.json()
-        await update_token(
-            ctx.store, token_id,
-            label=data.get("label"),
-            enabled=data.get("enabled"),
-        )
+        kwargs = {}
+        if "label" in data:
+            kwargs["label"] = data["label"]
+        if "enabled" in data:
+            kwargs["enabled"] = data["enabled"]
+        if "quota_tokens" in data:
+            kwargs["quota_tokens"] = int(data["quota_tokens"])
+        if "model_whitelist" in data:
+            kwargs["model_whitelist"] = data["model_whitelist"]
+        if "expires_days" in data:
+            import time
+            days = int(data["expires_days"])
+            kwargs["expires_at"] = int(time.time()) + days * 86400 if days > 0 else 0
+        await update_token(ctx.store, token_id, **kwargs)
         return web.json_response({"ok": True})
 
     app.router.add_get("/api/tokens", list_)

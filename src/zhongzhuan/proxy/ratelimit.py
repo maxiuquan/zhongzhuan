@@ -91,6 +91,8 @@ class KeyHealth:
     is_fallback: bool = False
     # 兜底降权系数：is_fallback=True 时生效，1.0 表示不降权（由 config.fallback.fallback_penalty 注入）
     fallback_penalty: float = 1.0
+    # 模型别名：逗号分隔，客户端用别名请求时也能匹配到此 key
+    aliases: str = ""
 
     def _maybe_reset_rpd(self) -> None:
         now = time.time()

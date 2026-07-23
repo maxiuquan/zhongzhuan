@@ -9,17 +9,20 @@ from zhongzhuan.proxy.auth import make_proxy_auth_middleware, proxy_auth_enabled
 class _FakeStore:
     """Minimal store stub for the auth middleware.
 
-    The real verify_token() calls ``s.fetchone("SELECT enabled ...")``, so we
-    stub fetchone to return (1,) for valid tokens and None otherwise.
+    get_token_by_value() 查询 9 列: id, token, label, enabled, quota_tokens,
+    used_tokens, model_whitelist, expires_at, created_at。返回完整元组以兼容。
     """
 
     def __init__(self, valid_tokens: set[str] | None = None):
         self._valid = valid_tokens or set()
+        self._next_id = 1
 
     async def fetchone(self, query: str, params: tuple = ()):
         token = params[0] if params else ""
         if token in self._valid:
-            return (1,)  # enabled=1
+            # (id, token, label, enabled, quota_tokens, used_tokens,
+            #  model_whitelist, expires_at, created_at)
+            return (self._next_id, token, "test", 1, -1, 0, "", 0, 0)
         return None
 
 

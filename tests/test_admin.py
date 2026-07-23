@@ -8,7 +8,6 @@ import pytest
 from aiohttp import ClientSession, web
 
 from zhongzhuan.admin import AdminServer
-from zhongzhuan.store import Store
 
 
 def _free_port() -> int:
@@ -18,9 +17,8 @@ def _free_port() -> int:
 
 
 @pytest.mark.asyncio
-async def test_list_models_empty(tmp_path):
-    s = Store(str(tmp_path / "t.db"))
-    admin = AdminServer(store=s)
+async def test_list_models_empty(store):
+    admin = AdminServer(store=store)
     port = _free_port()
     runner = web.AppRunner(admin.app())
     await runner.setup()
@@ -34,13 +32,11 @@ async def test_list_models_empty(tmp_path):
                 assert body == {"data": []}
     finally:
         await runner.cleanup()
-        s.close()
 
 
 @pytest.mark.asyncio
-async def test_create_and_list_models(tmp_path):
-    s = Store(str(tmp_path / "t.db"))
-    admin = AdminServer(store=s)
+async def test_create_and_list_models(store):
+    admin = AdminServer(store=store)
     port = _free_port()
     runner = web.AppRunner(admin.app())
     await runner.setup()
@@ -60,13 +56,11 @@ async def test_create_and_list_models(tmp_path):
                 assert len(body["data"]) == 1
     finally:
         await runner.cleanup()
-        s.close()
 
 
 @pytest.mark.asyncio
-async def test_create_key_api(tmp_path):
-    s = Store(str(tmp_path / "t.db"))
-    admin = AdminServer(store=s)
+async def test_create_key_api(store):
+    admin = AdminServer(store=store)
     port = _free_port()
     runner = web.AppRunner(admin.app())
     await runner.setup()
@@ -74,13 +68,11 @@ async def test_create_key_api(tmp_path):
     await site.start()
     try:
         async with ClientSession() as sess:
-            # Create model first
             async with sess.post(
                 f"http://127.0.0.1:{port}/api/models",
                 json={"name": "m1", "upstream_base": "http://x", "upstream_model": "m1"},
             ) as resp:
                 m = await resp.json()
-            # Create key
             async with sess.post(
                 f"http://127.0.0.1:{port}/api/keys",
                 json={"model_id": m["id"], "label": "test", "key_value": "sk-test123"},
@@ -90,13 +82,11 @@ async def test_create_key_api(tmp_path):
                 assert "***" in body["key_masked"]
     finally:
         await runner.cleanup()
-        s.close()
 
 
 @pytest.mark.asyncio
-async def test_stats_empty(tmp_path):
-    s = Store(str(tmp_path / "t.db"))
-    admin = AdminServer(store=s)
+async def test_stats_empty(store):
+    admin = AdminServer(store=store)
     port = _free_port()
     runner = web.AppRunner(admin.app())
     await runner.setup()
@@ -110,13 +100,11 @@ async def test_stats_empty(tmp_path):
                 assert body["success_rate"] == 1.0
     finally:
         await runner.cleanup()
-        s.close()
 
 
 @pytest.mark.asyncio
-async def test_ui_serves(tmp_path):
-    s = Store(str(tmp_path / "t.db"))
-    admin = AdminServer(store=s)
+async def test_ui_serves(store):
+    admin = AdminServer(store=store)
     port = _free_port()
     runner = web.AppRunner(admin.app())
     await runner.setup()
@@ -130,4 +118,3 @@ async def test_ui_serves(tmp_path):
                 assert "Zhongzhuan" in text
     finally:
         await runner.cleanup()
-        s.close()

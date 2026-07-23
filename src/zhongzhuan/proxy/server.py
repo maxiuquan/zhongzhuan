@@ -4,6 +4,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from .auth import make_proxy_auth_middleware
+from .cors import make_cors_middleware
 from .handler import make_handler
 from ..store import Store
 from ..upstream import UpstreamClient
@@ -33,7 +34,14 @@ class ProxyServer:
         self.sticky_ttl = sticky_ttl
 
     def app(self) -> web.Application:
-        app = web.Application(client_max_size=64 * 1024 * 1024)
+        # CORS 中间件在最外层，Gzip 在内层（对非流式 JSON 响应压缩）
+        app = web.Application(
+            client_max_size=64 * 1024 * 1024,
+            middlewares=[
+                make_cors_middleware(),  # CORS 必须在最外层
+                _make_gzip_middleware(min_size=1024),  # >1KB 才压缩
+            ],
+        )
 
         # Proxy access token auth middleware (VPS mode)
         if self.store is not None:
@@ -88,3 +96,59 @@ class ProxyServer:
         for g in self.groups:
             items.append({"id": g.get("name", ""), "object": "model"})
         return web.json_response({"object": "list", "data": items})
+
+
+def _make_gzip_middleware(min_size: int = 1024):
+    """Gzip 响应压缩中间件。
+
+    仅对满足以下条件的响应压缩：
+    - 响应体 >= min_size 字节
+    - Content-Type 为 application/json 或 text/*
+    - 客户端发送了 Accept-Encoding: gzip
+    - 响应未设置 Content-Encoding（避免重复压缩）
+    - 非 StreamResponse（流式响应不压缩）
+    """
+    import gzip
+
+    @web.middleware
+    async def middleware(request: web.Request, handler) -> web.StreamResponse:
+        resp = await handler(request)
+
+        # 流式响应不压缩
+        if isinstance(resp, web.StreamResponse) and not isinstance(resp, web.Response):
+            return resp
+
+        # 只压缩 web.Response
+        if not isinstance(resp, web.Response):
+            return resp
+
+        # 检查客户端是否接受 gzip
+        accept_encoding = request.headers.get("Accept-Encoding", "").lower()
+        if "gzip" not in accept_encoding:
+            return resp
+
+        # 已有 Content-Encoding 则跳过
+        if resp.headers.get("Content-Encoding"):
+            return resp
+
+        body = resp.body
+        if body is None or len(body) < min_size:
+            return resp
+
+        # 只压缩 JSON / text 类响应
+        content_type = resp.headers.get("Content-Type", "").lower()
+        if not (content_type.startswith("application/json") or content_type.startswith("text/")):
+            return resp
+
+        # 压缩
+        compressed = gzip.compress(body)
+        if len(compressed) >= len(body):
+            return resp  # 压缩后更大则不压缩
+
+        resp.body = compressed
+        resp.headers["Content-Encoding"] = "gzip"
+        resp.headers["Content-Length"] = str(len(compressed))
+        resp.headers["Vary"] = "Accept-Encoding"
+        return resp
+
+    return middleware
