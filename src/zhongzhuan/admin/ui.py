@@ -264,7 +264,7 @@ async function loadModels() {
 async function refreshFallback() {
   const r = await api("/api/fallback/refresh", {method:"POST"});
   if (r !== null) {
-    alert("已同步 " + r.synced + " 个 OpenCode Free 兜底模型:\n" + (r.models||[]).join(", "));
+    alert("已同步 " + r.synced + " 个 OpenCode Free 兜底模型:\\n" + (r.models||[]).join(", "));
     loadModels(); loadFallbackStatus();
   }
 }
@@ -287,7 +287,7 @@ async function saveFallbackConfig() {
   };
   const r = await api("/api/fallback/config", {method:"PUT", body:JSON.stringify(body)});
   if (r !== null) {
-    alert("兜底配置已保存：\n启用=" + (r.enabled?"是":"否") + "\n降权系数=" + r.fallback_penalty);
+    alert("兜底配置已保存：\\n启用=" + (r.enabled?"是":"否") + "\\n降权系数=" + r.fallback_penalty);
   }
 }
 
