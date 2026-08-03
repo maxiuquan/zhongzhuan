@@ -1,4 +1,17 @@
-from .config import Config, default_config, load_config, log_timeout_policy, save_config
+from .config import (
+    AuthConfig,
+    Config,
+    ConfigError,
+    CorsConfig,
+    SecurityConfig,
+    default_config,
+    effective_config_snapshot,
+    load_config,
+    log_effective_config,
+    log_timeout_policy,
+    save_config,
+    validate_production_ready,
+)
 from .paths import exe_dir, resolve_data_dir, is_admin
 from .timeouts import (
     DEFAULT_TIMEOUT_POLICY,
@@ -8,9 +21,13 @@ from .timeouts import (
     log_effective_timeouts,
     resolve_timeouts,
 )
+from .effective import FALLBACK_PRIVACY_NOTICE
 
 __all__ = [
-    "Config", "default_config", "load_config", "save_config", "log_timeout_policy",
+    "Config", "ConfigError", "AuthConfig", "CorsConfig", "SecurityConfig",
+    "default_config", "load_config", "save_config", "log_timeout_policy",
+    "log_effective_config", "effective_config_snapshot", "validate_production_ready",
+    "FALLBACK_PRIVACY_NOTICE",
     "exe_dir", "resolve_data_dir", "is_admin",
     "TimeoutPolicy", "TimeoutConfigError", "DEFAULT_TIMEOUT_POLICY",
     "resolve_timeouts", "format_effective_timeouts", "log_effective_timeouts",
