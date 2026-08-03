@@ -24,6 +24,13 @@ running under its own :data:`BACKGROUND_BUDGET`, and the catch-up replay that
 reissues the persisted event log byte-for-byte (R-P1-36).  The worker's
 execution source is still injected -- the real upstream tool loop is T28.
 
+T25 adds :mod:`.capability` and :mod:`.passthrough`: the three-tier execution
+mode router (native > emulate > translate, R-P1-45) with its startup gap report
+and ``strict_capability_startup`` fail-closed check, plus the native
+``/v1/responses`` passthrough that refuses to be downgraded to Chat Completions
+(R-P1-44).  The passthrough's upstream transport is injected -- the live HTTP
+client is T28.
+
 It is the successor to the legacy ``/v1/responses`` handler and is selected by
 the v3 feature switch (T12).  This module is a **skeleton** on the critical
 path: persistence + object mapping + routing are real and tested; the live
@@ -44,9 +51,24 @@ from .budget import (
     ExecutionBudget,
     tool_signature,
 )
+from .capability import (
+    CapabilityError,
+    CapabilityGap,
+    CapabilityRouter,
+    RouteDecision,
+    RouteRegistry,
+    StartupCapabilityError,
+    StaticRouteRegistry,
+)
 from .catchup import CatchupStream
 from .chain import ChainResolution, ChainResolver, build_upstream_input
 from .handler import ResponsesV3Handler
+from .passthrough import (
+    NativePassthrough,
+    PassthroughPathError,
+    PassthroughRequest,
+    RecordingTransport,
+)
 from .schema import to_error_object, to_input_items_list, to_response_object
 
 __all__ = [
@@ -69,6 +91,18 @@ __all__ = [
     "BackgroundWorker",
     "CatchupStream",
     "BackgroundJobStore",
+    # T25: capability routing / native passthrough
+    "CapabilityRouter",
+    "CapabilityGap",
+    "CapabilityError",
+    "RouteDecision",
+    "RouteRegistry",
+    "StaticRouteRegistry",
+    "StartupCapabilityError",
+    "NativePassthrough",
+    "PassthroughRequest",
+    "PassthroughPathError",
+    "RecordingTransport",
     # re-exported for call sites that only import from this package
     "TerminalReason",
 ]

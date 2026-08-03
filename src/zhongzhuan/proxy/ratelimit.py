@@ -5,6 +5,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+from .protocol.responses_models import Capability, ExecutionMode
+
 
 class SlidingWindow:
     """60x 1s buckets with circular deque; O(window_seconds) at most per rotate."""
@@ -85,7 +87,14 @@ class KeyHealth:
     # 连续失败次数（成功即清零，退避判断依据，T07）
     consecutive_failures: int = 0
     recent_429_count: int = 0
-    # v3 预留字段（T07 只加字段与默认值，不接逻辑）：上游能力集合 + 路由模式。
+    # v3 能力路由字段（T07 建字段，T25 接 CapabilityRouter）。
+    #
+    # DEVIATION（§3.9 / T25）：文档把它们写成 ``frozenset[Capability]`` 与
+    # ``ExecutionMode``，但 T07 已经落地为宽松的字符串形态，且配置 / DB / 管理端
+    # 都按字符串读写。改动类型会连带改掉既有构造点与 T07 的字段契约，收益为零。
+    # 因此**保留字符串存储**，由 :meth:`declared_capabilities` /
+    # :meth:`execution_mode` 提供强类型视图 —— 路由器只消费后者，永远看不到裸
+    # 字符串，文档要求的类型安全在使用侧完整成立。
     capabilities: set[str] = field(default_factory=set)
     upstream_mode: str = "bonded"  # "bonded" | "native" | "emulate" | "translate"
     upstream_protocol: str = "openai"  # "openai" | "anthropic"
@@ -99,6 +108,33 @@ class KeyHealth:
     fallback_penalty: float = 1.0
     # 模型别名：逗号分隔，客户端用别名请求时也能匹配到此 key
     aliases: str = ""
+
+    def declared_capabilities(self) -> frozenset[Capability]:
+        """本 key 声明的上游能力（强类型视图，T25）。
+
+        无法识别的名字被忽略：一个拼错的能力名不该让 key 整体不可用，它只会
+        表现为「该能力没人声明」，随后被启动期缺口报告如实抓出来。
+        """
+        out: set[Capability] = set()
+        for raw in self.capabilities or ():
+            if isinstance(raw, Capability):
+                out.add(raw)
+                continue
+            try:
+                out.add(Capability(str(raw).strip().lower()))
+            except ValueError:
+                continue
+        return frozenset(out)
+
+    def execution_mode(self) -> ExecutionMode:
+        """``upstream_mode`` 的强类型视图；未声明（``bonded``）按最保守的
+        :attr:`ExecutionMode.TRANSLATE` 处理 —— 没声明原生能力就不假设有。"""
+        text = (self.upstream_mode or "").strip().lower()
+        if text in ("native", "responses_native"):
+            return ExecutionMode.NATIVE
+        if text == "emulate":
+            return ExecutionMode.EMULATE
+        return ExecutionMode.TRANSLATE
 
     def _maybe_reset_rpd(self) -> None:
         now = time.time()

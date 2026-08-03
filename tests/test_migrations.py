@@ -53,8 +53,8 @@ def test_migrations_apply_in_order(tmp_db):
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         rows = _run(db.execute_fetchall("SELECT version FROM schema_migrations ORDER BY version"))
         names = _run(db.execute_fetchall("SELECT name FROM schema_migrations ORDER BY version"))
-        assert [v for v, in rows] == [1, 3, 4]
-        assert [n for n, in names] == ["baseline", "token_hash", "response_store"]
+        assert [v for v, in rows] == [1, 3, 4, 5]
+        assert [n for n, in names] == ["baseline", "token_hash", "response_store", "model_capabilities"]
     finally:
         _run(db.close())
 
@@ -66,7 +66,7 @@ def test_migrations_idempotent(tmp_db):
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         rows = _run(db.execute_fetchall("SELECT version FROM schema_migrations"))
-        assert len(rows) == 3
+        assert len(rows) == 4
     finally:
         _run(db.close())
 
