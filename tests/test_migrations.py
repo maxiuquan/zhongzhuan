@@ -47,14 +47,14 @@ def _executor(path: str):
 
 
 def test_migrations_apply_in_order(tmp_db):
-    """v001 then v003 both apply; schema_migrations has versions 1 and 3."""
+    """v001, v003, v004 apply in order; schema_migrations records all."""
     db, ex = _executor(tmp_db)
     try:
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         rows = _run(db.execute_fetchall("SELECT version FROM schema_migrations ORDER BY version"))
         names = _run(db.execute_fetchall("SELECT name FROM schema_migrations ORDER BY version"))
-        assert [v for v, in rows] == [1, 3]
-        assert [n for n, in names] == ["baseline", "token_hash"]
+        assert [v for v, in rows] == [1, 3, 4]
+        assert [n for n, in names] == ["baseline", "token_hash", "response_store"]
     finally:
         _run(db.close())
 
@@ -66,7 +66,7 @@ def test_migrations_idempotent(tmp_db):
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         rows = _run(db.execute_fetchall("SELECT version FROM schema_migrations"))
-        assert len(rows) == 2
+        assert len(rows) == 3
     finally:
         _run(db.close())
 
@@ -83,6 +83,11 @@ def test_v001_creates_tables(tmp_db):
         for t in ("models", "api_keys", "request_logs", "access_tokens", "admin_users",
                   "system_config", "key_health", "schema_migrations"):
             assert t in names, f"missing table {t}"
+        # v004 response-store tables.
+        for t in ("responses", "response_input_items", "response_output_items",
+                  "response_events", "response_state_chain", "background_tasks",
+                  "tool_executions"):
+            assert t in names, f"missing v004 table {t}"
     finally:
         _run(db.close())
 
