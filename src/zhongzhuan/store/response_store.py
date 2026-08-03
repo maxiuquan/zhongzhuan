@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from .background_jobs import JOB_COLUMNS, BackgroundJobStore
 from .event_log import EventLog
 from .store import Store
 
@@ -74,6 +75,8 @@ class ResponseStore:
     def __init__(self, store: Store) -> None:
         self._store = store
         self.event_log = EventLog(store)
+        #: Background job lifecycle (lease / heartbeat / cancel / recovery, T24).
+        self.jobs = BackgroundJobStore(store)
 
     # -- responses -----------------------------------------------------------
 
@@ -247,6 +250,10 @@ class ResponseStore:
 
     # -- background tasks ----------------------------------------------------
 
+    # These five methods are the T16 public surface; T24 moved the logic (and
+    # the lease / recovery machinery it grew) into :class:`BackgroundJobStore`
+    # and left them here as thin delegates so existing call sites keep working.
+
     async def create_task(
         self,
         *,
@@ -256,52 +263,28 @@ class ResponseStore:
         max_wall_seconds: int = 900,
         max_tool_rounds: int = 32,
     ) -> None:
-        now = int(time.time())
-        await self._store.execute(
-            "INSERT INTO background_jobs "
-            "(task_id, response_id, workspace_id, status, created_at, updated_at, "
-            " max_wall_seconds, max_tool_rounds) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)",
-            (task_id, response_id, workspace_id, now, now, max_wall_seconds, max_tool_rounds),
+        await self.jobs.create_job(
+            task_id=task_id,
+            response_id=response_id,
+            workspace_id=workspace_id,
+            max_wall_seconds=max_wall_seconds,
+            max_tool_rounds=max_tool_rounds,
         )
 
     async def update_task_status(self, task_id: str, status: str) -> None:
-        await self._store.execute(
-            "UPDATE background_jobs SET status = ?, updated_at = ? WHERE task_id = ?",
-            (status, int(time.time()), task_id),
-        )
+        await self.jobs.mark_terminal(task_id, status)
 
     async def lease_task(self, task_id: str, lease_seconds: int) -> bool:
-        now = int(time.time())
-        cur = await self._store.execute(
-            "UPDATE background_jobs SET lease_until = ?, updated_at = ? "
-            "WHERE task_id = ? AND (status = 'queued' OR status = 'in_progress') "
-            "AND lease_until < ?",
-            (now + lease_seconds, now, task_id, now),
-        )
-        return cur > 0
+        return await self.jobs.renew_lease(task_id, lease_seconds)
 
     async def request_cancel(self, task_id: str) -> None:
-        await self._store.execute(
-            "UPDATE background_jobs SET cancel_requested = 1, updated_at = ? WHERE task_id = ?",
-            (int(time.time()), task_id),
-        )
+        await self.jobs.request_cancel(task_id)
 
     async def get_task(self, task_id: str, *, workspace_id: str = "") -> dict[str, Any] | None:
-        row = await self._store.fetchone(
-            "SELECT * FROM background_jobs WHERE task_id = ? AND workspace_id = ?",
-            (task_id, workspace_id),
-        )
-        if row is None:
-            return None
-        cols = await self._task_columns()
-        return dict(zip(cols, row))
+        return await self.jobs.get_job(task_id, workspace_id=workspace_id)
 
     async def _task_columns(self) -> list[str]:
-        return [
-            "task_id", "response_id", "workspace_id", "status", "created_at",
-            "updated_at", "lease_until", "cancel_requested", "max_wall_seconds",
-            "max_tool_rounds", "attempt",
-        ]
+        return list(JOB_COLUMNS)
 
     # -- tool executions -----------------------------------------------------
 
@@ -390,6 +373,7 @@ class ResponseStore:
 
 
 __all__ = [
+    "BackgroundJobStore",
     "ResponseRecord",
     "ResponseStore",
 ]

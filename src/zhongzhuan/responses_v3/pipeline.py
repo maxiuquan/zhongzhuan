@@ -21,10 +21,20 @@ from ..proxy.protocol.responses_models import SSE_DONE_FRAME
 from ..store.response_store import ResponseStore
 
 
-def _sse(event_type: str, data: dict[str, Any]) -> bytes:
+def sse_frame(event_type: str, data: dict[str, Any]) -> bytes:
+    """Render one SSE frame.
+
+    Public because the catch-up stream (T24) must produce **byte-identical**
+    frames to the live stream -- sharing this function is what makes that a
+    property of the code rather than a comment (R-P1-36).
+    """
     return (
         f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
     ).encode("utf-8")
+
+
+#: Historical private alias kept for existing call sites inside this module.
+_sse = sse_frame
 
 
 class ResponsePipeline:
@@ -77,4 +87,4 @@ class ResponsePipeline:
         yield SSE_DONE_FRAME
 
 
-__all__ = ["ResponsePipeline"]
+__all__ = ["ResponsePipeline", "sse_frame"]
