@@ -336,7 +336,6 @@ class BackgroundJobStore:
 __all__ = [
     "MAX_RECOVERY_ATTEMPTS",
     "TERMINAL_STATUSES",
-    "TERMINAL_STATUSES",
     "ACTIVE_STATUSES",
     "JOB_COLUMNS",
     "BackgroundJobStore",
