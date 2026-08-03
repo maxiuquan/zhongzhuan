@@ -237,8 +237,10 @@ def test_replay_roundtrips_via_json():
     rebuilt = DebugCapture.load(store.to_json(), clock=clock)
     assert rebuilt.replay() == first
 
-    # A brand-new buffer (no clock) fed from disk replays the same sequence.
-    from_disk = DebugCapture.load(store.to_json())
+    # A brand-new buffer fed from disk replays the same sequence.  The load
+    # must use the same fake clock: entries carry FakeClock timestamps (t=0),
+    # and a real monotonic clock would TTL-filter all of them (now - 0 > ttl).
+    from_disk = DebugCapture.load(store.to_json(), clock=clock)
     assert [e["type"] for e in from_disk.replay()] == [e["type"] for e in first]
     assert [e["seq"] for e in from_disk.replay()] == [e["seq"] for e in first]
 
