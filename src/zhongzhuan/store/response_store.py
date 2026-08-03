@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from .event_log import EventLog
 from .store import Store
 
 #: JSON encoding used for all stored payloads (stable, compact).
@@ -72,6 +73,7 @@ class ResponseStore:
 
     def __init__(self, store: Store) -> None:
         self._store = store
+        self.event_log = EventLog(store)
 
     # -- responses -----------------------------------------------------------
 
@@ -202,16 +204,10 @@ class ResponseStore:
 
     # -- event log -----------------------------------------------------------
 
-    async def append_event(self, response_id: str, event_type: str, data: Mapping[str, Any]) -> None:
-        row = await self._store.fetchone(
-            "SELECT COALESCE(MAX(seq), 0) FROM response_events WHERE response_id = ?",
-            (response_id,),
-        )
-        seq = (row[0] if row else 0) + 1
-        await self._store.execute(
-            "INSERT INTO response_events (response_id, seq, event_type, data, ts) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (response_id, seq, event_type, _dumps(data), int(time.time())),
+    async def append_event(self, response_id: str, event_type: str, data: Mapping[str, Any]) -> int:
+        """Append one event to ``response_events`` (delegates to :class:`EventLog`)."""
+        return await self.event_log.append_event(
+            response_id=response_id, event_type=event_type, data=data, workspace_id="",
         )
 
     async def list_events(self, response_id: str, *, after_seq: int = 0) -> list[dict]:
@@ -334,6 +330,38 @@ class ResponseStore:
             (idempotency_key,),
         )
         return row is not None
+
+    # -- idempotency records -------------------------------------------------
+
+    async def save_idempotency_record(
+        self,
+        *,
+        workspace_id: str,
+        idempotency_key: str,
+        request_digest: str = "",
+        response_id: str = "",
+        status_code: int = 0,
+        state: str = "in_flight",
+        expires_at: int = 0,
+    ) -> None:
+        await self._store.execute(
+            "INSERT OR REPLACE INTO idempotency_records "
+            "(workspace_id, idempotency_key, request_digest, response_id, "
+            " status_code, state, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (workspace_id, idempotency_key, request_digest, response_id,
+             status_code, state, int(time.time()), expires_at),
+        )
+
+    async def get_idempotency_record(
+        self, workspace_id: str, idempotency_key: str,
+    ) -> tuple[str, int, str] | None:
+        row = await self._store.fetchone(
+            "SELECT response_id, status_code, state FROM idempotency_records "
+            "WHERE workspace_id = ? AND idempotency_key = ?",
+            (workspace_id, idempotency_key),
+        )
+        return tuple(row) if row is not None else None  # type: ignore[return-value]
 
     # -- helpers -------------------------------------------------------------
 
