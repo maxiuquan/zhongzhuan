@@ -122,6 +122,14 @@ def _make_gzip_middleware(min_size: int = 1024):
         if not isinstance(resp, web.Response):
             return resp
 
+        content_type = resp.headers.get("Content-Type", "").lower()
+
+        # SSE 响应禁止压缩（R-P1-27）：gzip 会缓冲输出，event 边界被延迟，
+        # heartbeat 永远到不了客户端。按 content-type 显式跳过，不能依赖
+        # Content-Encoding（SSE 响应不会自己设置该头）。
+        if content_type.startswith("text/event-stream"):
+            return resp
+
         # 检查客户端是否接受 gzip
         accept_encoding = request.headers.get("Accept-Encoding", "").lower()
         if "gzip" not in accept_encoding:
@@ -136,7 +144,6 @@ def _make_gzip_middleware(min_size: int = 1024):
             return resp
 
         # 只压缩 JSON / text 类响应
-        content_type = resp.headers.get("Content-Type", "").lower()
         if not (content_type.startswith("application/json") or content_type.startswith("text/")):
             return resp
 

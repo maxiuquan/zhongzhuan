@@ -81,6 +81,8 @@ from .hosted_tools import (
     HostedToolValidator,
     build_runtime_unavailable_event,
     build_unsupported_tool_error,
+    hosted_tool_emulated_capabilities,
+    resolve_mcp_executor,
     validate_tool_choice,
 )
 from .mcp_client import (
@@ -149,6 +151,9 @@ __all__ = [
     "build_unsupported_tool_error",
     "validate_tool_choice",
     "build_runtime_unavailable_event",
+    # T28: hosted tool opt-in executor switch (T27 leftover)
+    "hosted_tool_emulated_capabilities",
+    "resolve_mcp_executor",
     # T27: Remote MCP client（真实执行器，非 stub）
     "McpClient",
     "McpServerConfig",

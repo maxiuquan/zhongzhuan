@@ -89,12 +89,27 @@ class FallbackConfig:
 
 
 @dataclass
+class HostedToolsConfig:
+    """hosted tool 执行开关（T27 遗留的 opt-in，T28 补上显式启用路径）。
+
+    PRD §3.3 #4 裁定 ``mcp`` 是 🟢 完整实现，但它的执行器真的会对外发网络
+    请求——默认打开等于给每个租户默认开出网通道。因此默认关闭：请求携带
+    ``mcp`` tool 时返回 400 ``unsupported_tool``；管理员显式打开后，同样的
+    请求才会真正走到 T27 的 :class:`~zhongzhuan.responses_v3.mcp_client.McpClient`。
+    """
+
+    #: 是否启用 Remote MCP 执行器（默认关闭，见模块头裁决记录）。
+    mcp_enabled: bool = False
+
+
+@dataclass
 class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     windows_service: WinSvcConfig = field(default_factory=WinSvcConfig)
     fallback: FallbackConfig = field(default_factory=FallbackConfig)
+    hosted_tools: HostedToolsConfig = field(default_factory=HostedToolsConfig)
     # Six-layer upstream timeout policy (T01).  Built by ``load_config`` from
     # the top level ``timeouts:`` YAML section + ZHONGZHUAN_TIMEOUT_* env vars.
     timeouts: TimeoutPolicy = field(default_factory=TimeoutPolicy)

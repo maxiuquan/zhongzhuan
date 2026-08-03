@@ -710,6 +710,15 @@ heartbeat_interval = 15s
 - 客户端主动取消不得标记上游 key 失败。
 - 连接错误、首 token 超时、读空闲超时、总超时分别分类。
 - Nginx/反代 `proxy_read_timeout` 必须大于应用 read timeout。
+  - 为什么（T28 判据⑧ / R-P0-21）：应用层的读空闲超时（
+    `read_idle_timeout`）会精确归类为 `read_idle_timeout` 之类的
+    `terminal_reason` 并通过 SSE 优雅收尾（兼容模式 `completed` + `[DONE]` +
+    `incomplete_details`，严格模式 `failed`/`incomplete` + `[DONE]`）。如果反代
+    的超时**先于**应用触发，反代会直接把 TCP 连接掐断——客户端看到的是连接重置
+    （`ConnectionResetError` / 499），而不是应用精心设计的 `terminal_reason` 与
+    `incomplete_details`。整套超时归类、可观测性打点（§10.5）与客户端可编程重试
+    全部白做。因此必须保证反代这一层比应用更宽松，把「谁先超时」的决定权留给
+    知道流语义的应用层。
 - SSE 禁止响应压缩，避免事件边界和缓冲延迟。
 - 每次 heartbeat 都刷新链路活性，但不改变 Responses 状态。
 

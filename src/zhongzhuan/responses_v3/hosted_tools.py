@@ -114,6 +114,40 @@ UNSUPPORTED_TOOL_MESSAGE: str = (
 
 
 # ---------------------------------------------------------------------------
+# 1.5 配置驱动的能力面（T28 / T27 遗留 opt-in）
+# ---------------------------------------------------------------------------
+
+
+def hosted_tool_emulated_capabilities(cfg: Any | None = None) -> frozenset[Capability]:
+    """从配置计算桥接自己能完整承载的 hosted 能力集合。
+
+    默认取 :data:`DEFAULT_EMULATED_CAPABILITIES`（只含真正实现了的两项，不谎称
+    能模拟 hosted 执行器）。当 ``cfg.hosted_tools.mcp_enabled = true`` 时把
+    :attr:`Capability.REMOTE_MCP` 加进去——``mcp`` 是 PRD §3.3 #4 唯一 🟢 完整
+    实现的 hosted tool，执行器在 T27 的 :class:`~.mcp_client.McpClient`。默认
+    关闭是安全默认：不经过显式配置，谁也不该给每租户默认开出出网通道。
+    """
+    caps: set[Capability] = set(DEFAULT_EMULATED_CAPABILITIES)
+    hosted = getattr(cfg, "hosted_tools", None)
+    if hosted is not None and getattr(hosted, "mcp_enabled", False):
+        caps.add(Capability.REMOTE_MCP)
+    return frozenset(caps)
+
+
+def resolve_mcp_executor(cfg: Any | None = None) -> Any | None:
+    """按配置解析 Remote MCP 执行器（T28 / R-P1-46 闸门②的执行侧）。
+
+    开关关闭 -> ``None``（请求携带 ``mcp`` tool 时由 validator 判 400
+    ``unsupported_tool``）；开关打开 -> 返回一个 T27 的 :class:`~.mcp_client.McpClient`
+    （惰性导入，避免把 store 依赖拖进本模块的静态导入图）。
+    """
+    if Capability.REMOTE_MCP not in hosted_tool_emulated_capabilities(cfg):
+        return None
+    from .mcp_client import McpClient  # noqa: PLC0415 - 惰性导入防循环
+    return McpClient()
+
+
+# ---------------------------------------------------------------------------
 # 2. 识别与持久化（闸门①）
 # ---------------------------------------------------------------------------
 
