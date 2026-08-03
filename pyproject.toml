@@ -73,10 +73,12 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = ["-m", "not soak"]
 markers = [
     "asyncio: marks tests as async",
     "golden: 旧协议字节级 golden 基线对比",
     "live: 需要真实网络/真实上游，默认不在 CI 运行",
+    "soak: 长稳 nightly（T31 判据④），默认跳过，pytest -m soak 显式运行",
 ]
 
 [tool.ruff]
