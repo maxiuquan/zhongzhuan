@@ -16,6 +16,7 @@ from typing import Any
 
 from .responses_bridge import ResponsesTurnBridge
 from .responses_models import ReasoningEventMode
+from .translator_base import finish_translator
 
 # ---- OpenAI / Responses API constants (stable string values) ----
 ROLE_SYSTEM = "system"
@@ -286,11 +287,17 @@ class CompositeStreamTranslator:
         return getattr(self.second, "usage", {"prompt_tokens": 0, "completion_tokens": 0})
 
     async def finish_safely(self) -> list[bytes]:
-        """Finish the pipeline, flushing both translators (async per §13)."""
+        """Finish the pipeline, flushing both translators (async per §13).
+
+        通过统一收尾入口 :func:`finish_translator` 收尾上游，再把上游产出的
+        字节逐条喂给下游，最后同样走统一入口收尾下游。这里遍历的是
+        ``finish_translator`` 返回的新列表，R-P1-65 禁止边遍历边 append 同一
+        列表，此处安全。
+        """
         out: list[bytes] = []
-        for c in self.first.finish_safely():
+        for c in await finish_translator(self.first):
             out.extend(await self.second.feed(c))
-        out.extend(self.second.finish_safely())
+        out.extend(await finish_translator(self.second))
         return out
 
     async def feed(self, chunk: bytes) -> list[bytes]:

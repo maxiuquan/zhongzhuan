@@ -32,6 +32,7 @@ from .protocol.responses import (
     ResponsesStreamTranslator,
     CompositeStreamTranslator,
 )
+from .protocol.translator_base import finish_translator
 
 from loguru import logger as _lg
 
@@ -960,11 +961,10 @@ class ProxyHandler:
                                     f"upstream stream ended without finish "
                                     f"([DONE] / finish_reason missing); "
                                     f"synthesizing closing events. "
-                                    f"state={stream_translator.state}"
+                                    f"terminal_reason=upstream_truncated "
+                                    f"state={getattr(stream_translator, 'state', 'n/a')}"
                                 )
-                                closing = stream_translator.finish_safely()
-                                if hasattr(closing, "__await__"):
-                                    closing = await closing
+                                closing = await finish_translator(stream_translator)
                                 for ev in closing:
                                     await resp.write(ev)
 
