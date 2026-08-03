@@ -44,3 +44,31 @@ jobs:
           pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
       - name: Run golden baseline tests
         run: python -m pytest tests/test_legacy_golden.py -q -m "golden"
+
+  # clean-install：在干净 venv 下验证打包与安装（R-P0-08/09，T05）
+  clean-install:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        extra: ["", "tidb,admin"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install in clean venv
+        run: |
+          python -m venv /tmp/clean && . /tmp/clean/bin/activate
+          python -m pip install --upgrade pip
+          pip install ".[${{ matrix.extra }}]"
+      - name: Verify import + CLI
+        run: |
+          . /tmp/clean/bin/activate
+          python -c "import zhongzhuan; print('import OK')"
+          zhongzhuan --help >/dev/null && echo "CLI OK"
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Requirements sync check
+        run: python scripts/check_requirements_sync.py

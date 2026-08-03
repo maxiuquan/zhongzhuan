@@ -13,7 +13,6 @@ from pathlib import Path
 import yaml
 
 from zhongzhuan import __version__
-from zhongzhuan.admin import AdminServer
 from zhongzhuan.config import default_config, load_config, resolve_data_dir, is_admin
 from zhongzhuan.observability import setup_logging
 from zhongzhuan.proxy import ProxyServer
@@ -389,6 +388,7 @@ async def run_foreground(
     scheme = "https" if ssl_ctx else "http"
     logger.info(f"proxy listening on {scheme}://{cfg.server.proxy.host}:{cfg.server.proxy.port}")
 
+    from zhongzhuan.admin import AdminServer  # 惰性导入：核心安装（无 [admin] extra）下 --help 等不触发
     admin = AdminServer(store=store, version=__version__, config=cfg)
     admin_runner = web.AppRunner(admin.app())
     await admin_runner.setup()
