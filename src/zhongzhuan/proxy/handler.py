@@ -25,6 +25,12 @@ from .protocol.translate_o2a import translate_request_o2a, translate_response_a2
 from .protocol.errors import translate_error_a2o, translate_error_o2a
 from .protocol.stream_o2a import StreamO2A
 from .protocol.stream_a2o import StreamA2O
+from .protocol.responses import (
+    convert_responses_request_to_chatcompletions,
+    chatcompletions_to_responses,
+    ResponsesStreamTranslator,
+    CompositeStreamTranslator,
+)
 
 from loguru import logger as _lg
 
@@ -171,6 +177,9 @@ class ProxyHandler:
             if v:
                 return f"hdr:{v}"
         msgs = body_obj.get("messages") if body_obj else None
+        if msgs is None and body_obj:
+            # Responses API (Codex) carries the conversation in `input`.
+            msgs = body_obj.get("input")
         if isinstance(msgs, list) and len(msgs) >= 2:
             import hashlib
             snippet = json.dumps(msgs[-3:], ensure_ascii=False, sort_keys=True)
@@ -372,6 +381,15 @@ class ProxyHandler:
         if path.rstrip("/") == "/v1/models" and method.upper() == "GET":
             return await self._list_models()
 
+        # Responses API (Codex): only POST is supported. GET /v1/responses/{id}
+        # (retrieve) / DELETE are not implemented — return 405 so Codex doesn't
+        # hang or retry with bogus bodies.
+        if path.startswith("/v1/responses") and method.upper() != "POST":
+            return web.json_response(
+                {"error": {"message": "method not allowed for /v1/responses", "type": "invalid_request_error"}},
+                status=405,
+            )
+
         # Short circuit: no keys configured
         candidates = self._resolve_candidates(requested_model)
         if not candidates:
@@ -459,6 +477,20 @@ class ProxyHandler:
                     elif inbound_protocol == "openai" and outbound_protocol == "anthropic":
                         translated_req = translate_request_o2a(body_obj_t, k.anthropic_version)
                         upstream_path = "/v1/messages"
+                    elif inbound_protocol == "responses":
+                        # Responses API (Codex) -> Chat Completions upstream
+                        cc = convert_responses_request_to_chatcompletions(body_obj_t)
+                        if outbound_protocol == "anthropic":
+                            translated_req = translate_request_o2a(cc, k.anthropic_version)
+                            upstream_path = "/v1/messages"
+                        else:
+                            translated_req = cc
+                            upstream_path = "/v1/chat/completions"
+                        # Ensure token usage is returned (needed for accounting).
+                        if isinstance(translated_req, dict) and body_obj_t.get("stream") is True:
+                            so = translated_req.setdefault("stream_options", {})
+                            if not so.get("include_usage"):
+                                so["include_usage"] = True
                     else:
                         translated_req = body_obj_t
 
@@ -551,7 +583,11 @@ class ProxyHandler:
                 if resp.status_code >= 400:
                     # Translate error envelope if needed
                     err_msg = data.decode("utf-8", errors="replace")
-                    if need_translation:
+                    # Responses inbound over an OpenAI upstream already gets an
+                    # OpenAI-shaped error envelope — translating it as Anthropic
+                    # would mangle it, so pass it straight through.
+                    _skip_err_tr = inbound_protocol == "responses" and outbound_protocol != "anthropic"
+                    if need_translation and not _skip_err_tr:
                         if inbound_protocol == "anthropic":
                             tr_status, tr_body = translate_error_o2a(resp.status_code, err_msg)
                         else:
@@ -597,6 +633,13 @@ class ProxyHandler:
                         resp_data = json.loads(data)
                         if inbound_protocol == "anthropic":
                             translated_resp = translate_response_o2a(resp_data, requested_model or "")
+                        elif inbound_protocol == "responses":
+                            # Downstream is Chat Completions JSON (openai) or
+                            # Anthropic JSON (anthropic) -> normalize to Chat
+                            # Completions first, then to Responses API.
+                            cc_resp = translate_response_a2o(resp_data, requested_model or "") \
+                                if outbound_protocol == "anthropic" else resp_data
+                            translated_resp = chatcompletions_to_responses(cc_resp, requested_model or "")
                         else:
                             translated_resp = translate_response_a2o(resp_data, requested_model or "")
                         data = json.dumps(translated_resp, ensure_ascii=False).encode()
@@ -630,8 +673,8 @@ class ProxyHandler:
                     _resp_obj = json.loads(data)
                     _usage = _resp_obj.get("usage") if isinstance(_resp_obj, dict) else None
                     if isinstance(_usage, dict):
-                        _tokens_in = int(_usage.get("prompt_tokens", 0))
-                        _tokens_out = int(_usage.get("completion_tokens", 0))
+                        _tokens_in = int(_usage.get("prompt_tokens", _usage.get("input_tokens", 0)))
+                        _tokens_out = int(_usage.get("completion_tokens", _usage.get("output_tokens", 0)))
                         k.record_tokens(_tokens_in, _tokens_out)
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
@@ -778,6 +821,18 @@ class ProxyHandler:
                         elif inbound_protocol == "openai" and outbound_protocol == "anthropic":
                             translated_req = translate_request_o2a(body_obj_s, k.anthropic_version)
                             upstream_path = "/v1/messages"
+                        elif inbound_protocol == "responses":
+                            cc = convert_responses_request_to_chatcompletions(body_obj_s)
+                            if outbound_protocol == "anthropic":
+                                translated_req = translate_request_o2a(cc, k.anthropic_version)
+                                upstream_path = "/v1/messages"
+                            else:
+                                translated_req = cc
+                                upstream_path = "/v1/chat/completions"
+                            if isinstance(translated_req, dict) and body_obj_s.get("stream") is True:
+                                so = translated_req.setdefault("stream_options", {})
+                                if not so.get("include_usage"):
+                                    so["include_usage"] = True
                         else:
                             translated_req = body_obj_s
 
@@ -851,7 +906,17 @@ class ProxyHandler:
                             # Create stream translator if needed
                             stream_translator = None
                             if need_translation:
-                                if inbound_protocol == "anthropic":
+                                if inbound_protocol == "responses":
+                                    # Chat Completions SSE (or Anthropic SSE) -> Responses SSE
+                                    resp_tr = ResponsesStreamTranslator(model=requested_model or "")
+                                    if outbound_protocol == "anthropic":
+                                        # Anthropic upstream -> Chat Completions SSE -> Responses SSE
+                                        stream_translator = CompositeStreamTranslator(
+                                            StreamA2O(model=requested_model or ""), resp_tr
+                                        )
+                                    else:
+                                        stream_translator = resp_tr
+                                elif inbound_protocol == "anthropic":
                                     # OpenAI upstream → Anthropic client
                                     stream_translator = StreamO2A(model=requested_model or "")
                                 else:

@@ -15,3 +15,13 @@ venv/
 src/secret.key
 *.db-shm
 *.db-wal
+
+# 本地运行时配置（可能含真实 key）
+src/config.yaml
+
+# 外部参考实现，仅本地研究用，不入库
+/9router_research/
+/_check.js
+/dist_new/
+/mod/
+.workbuddy/

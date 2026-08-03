@@ -3,9 +3,12 @@ from __future__ import annotations
 
 
 def detect_inbound_protocol(path: str, headers: dict) -> str:
-    """Return ``"anthropic"`` or ``"openai"`` based on path + headers.
+    """Return ``"anthropic"``, ``"responses"`` or ``"openai"`` based on path + headers.
 
     Priority: path > headers.
+
+    Responses API (Codex) indicators:
+        * path is ``/v1/responses`` or starts with ``/v1/responses/``
 
     Anthropic indicators:
         * path starts with ``/v1/messages``
@@ -14,6 +17,9 @@ def detect_inbound_protocol(path: str, headers: dict) -> str:
 
     Default: ``"openai"``.
     """
+    if path and (path == "/v1/responses" or path.startswith("/v1/responses/")):
+        return "responses"
+
     if path and path.startswith("/v1/messages"):
         return "anthropic"
 
