@@ -2,7 +2,7 @@
 
 The :class:`ResponseStore` is the data-access layer over the v004 tables
 (``responses``, ``response_input_items``, ``response_output_items``,
-``response_events``, ``response_state_chain``, ``background_tasks``,
+``response_events``, ``response_state_chain``, ``background_jobs``,
 ``tool_executions``).  It backs retrieve / delete / cancel / input_items /
 state-chain recovery / background job status / tool-execution idempotency.
 
@@ -16,7 +16,7 @@ Design rules
   persists what it is given; it never materialises reasoning text itself.
 * **Append-only event log**: ``response_events`` rows carry a monotonic ``seq``
   per response so a catch-up stream or debug replay can be replayed in order.
-* **Tenant isolation**: every write takes a ``tenant_id``; reads filter by it
+* **Tenant isolation**: every write takes a ``workspace_id``; reads filter by it
   so cross-tenant access is prevented at the store boundary.
 """
 from __future__ import annotations
@@ -50,7 +50,7 @@ class ResponseRecord:
     """A persisted response row (JSON fields decoded)."""
 
     response_id: str
-    tenant_id: str = ""
+    workspace_id: str = ""
     status: str = "queued"
     model: str = ""
     created_at: int = 0
@@ -79,7 +79,7 @@ class ResponseStore:
         self,
         *,
         response_id: str,
-        tenant_id: str = "",
+        workspace_id: str = "",
         model: str = "",
         status: str = "queued",
         previous_response_id: str = "",
@@ -90,21 +90,21 @@ class ResponseStore:
         now = int(time.time())
         await self._store.execute(
             """INSERT INTO responses (
-                response_id, tenant_id, status, model, created_at, updated_at,
+                response_id, workspace_id, status, model, created_at, updated_at,
                 previous_response_id, background, request, usage
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                response_id, tenant_id, status, model, now, now,
+                response_id, workspace_id, status, model, now, now,
                 previous_response_id, int(background), _dumps(request), _dumps(usage),
             ),
         )
 
     async def get_response(
-        self, response_id: str, *, tenant_id: str = "",
+        self, response_id: str, *, workspace_id: str = "",
     ) -> ResponseRecord | None:
         row = await self._store.fetchone(
-            "SELECT * FROM responses WHERE response_id = ? AND tenant_id = ?",
-            (response_id, tenant_id),
+            "SELECT * FROM responses WHERE response_id = ? AND workspace_id = ?",
+            (response_id, workspace_id),
         )
         if row is None:
             return None
@@ -135,19 +135,19 @@ class ResponseStore:
             ),
         )
 
-    async def delete_response(self, response_id: str, *, tenant_id: str = "") -> bool:
+    async def delete_response(self, response_id: str, *, workspace_id: str = "") -> bool:
         cur = await self._store.execute(
-            "DELETE FROM responses WHERE response_id = ? AND tenant_id = ?",
-            (response_id, tenant_id),
+            "DELETE FROM responses WHERE response_id = ? AND workspace_id = ?",
+            (response_id, workspace_id),
         )
         return cur > 0
 
-    async def set_cancelled(self, response_id: str, *, tenant_id: str = "") -> None:
+    async def set_cancelled(self, response_id: str, *, workspace_id: str = "") -> None:
         now = int(time.time())
         await self._store.execute(
             "UPDATE responses SET cancelled = 1, status = 'cancelled', updated_at = ? "
-            "WHERE response_id = ? AND tenant_id = ?",
-            (now, response_id, tenant_id),
+            "WHERE response_id = ? AND workspace_id = ?",
+            (now, response_id, workspace_id),
         )
 
     # -- input / output items ------------------------------------------------
@@ -225,12 +225,12 @@ class ResponseStore:
     # -- state chain ---------------------------------------------------------
 
     async def save_state_chain(
-        self, response_id: str, previous_response_id: str, depth: int, *, tenant_id: str = "",
+        self, response_id: str, previous_response_id: str, depth: int, *, workspace_id: str = "",
     ) -> None:
         await self._store.execute(
             "INSERT OR REPLACE INTO response_state_chain "
-            "(response_id, tenant_id, previous_response_id, depth) VALUES (?, ?, ?, ?)",
-            (response_id, tenant_id, previous_response_id, depth),
+            "(response_id, workspace_id, previous_response_id, depth) VALUES (?, ?, ?, ?)",
+            (response_id, workspace_id, previous_response_id, depth),
         )
 
     async def get_previous_response_id(self, response_id: str) -> str:
@@ -254,28 +254,28 @@ class ResponseStore:
         *,
         task_id: str,
         response_id: str,
-        tenant_id: str = "",
+        workspace_id: str = "",
         max_wall_seconds: int = 900,
         max_tool_rounds: int = 32,
     ) -> None:
         now = int(time.time())
         await self._store.execute(
-            "INSERT INTO background_tasks "
-            "(task_id, response_id, tenant_id, status, created_at, updated_at, "
+            "INSERT INTO background_jobs "
+            "(task_id, response_id, workspace_id, status, created_at, updated_at, "
             " max_wall_seconds, max_tool_rounds) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?)",
-            (task_id, response_id, tenant_id, now, now, max_wall_seconds, max_tool_rounds),
+            (task_id, response_id, workspace_id, now, now, max_wall_seconds, max_tool_rounds),
         )
 
     async def update_task_status(self, task_id: str, status: str) -> None:
         await self._store.execute(
-            "UPDATE background_tasks SET status = ?, updated_at = ? WHERE task_id = ?",
+            "UPDATE background_jobs SET status = ?, updated_at = ? WHERE task_id = ?",
             (status, int(time.time()), task_id),
         )
 
     async def lease_task(self, task_id: str, lease_seconds: int) -> bool:
         now = int(time.time())
         cur = await self._store.execute(
-            "UPDATE background_tasks SET lease_until = ?, updated_at = ? "
+            "UPDATE background_jobs SET lease_until = ?, updated_at = ? "
             "WHERE task_id = ? AND (status = 'queued' OR status = 'in_progress') "
             "AND lease_until < ?",
             (now + lease_seconds, now, task_id, now),
@@ -284,14 +284,14 @@ class ResponseStore:
 
     async def request_cancel(self, task_id: str) -> None:
         await self._store.execute(
-            "UPDATE background_tasks SET cancel_requested = 1, updated_at = ? WHERE task_id = ?",
+            "UPDATE background_jobs SET cancel_requested = 1, updated_at = ? WHERE task_id = ?",
             (int(time.time()), task_id),
         )
 
-    async def get_task(self, task_id: str, *, tenant_id: str = "") -> dict[str, Any] | None:
+    async def get_task(self, task_id: str, *, workspace_id: str = "") -> dict[str, Any] | None:
         row = await self._store.fetchone(
-            "SELECT * FROM background_tasks WHERE task_id = ? AND tenant_id = ?",
-            (task_id, tenant_id),
+            "SELECT * FROM background_jobs WHERE task_id = ? AND workspace_id = ?",
+            (task_id, workspace_id),
         )
         if row is None:
             return None
@@ -300,7 +300,7 @@ class ResponseStore:
 
     async def _task_columns(self) -> list[str]:
         return [
-            "task_id", "response_id", "tenant_id", "status", "created_at",
+            "task_id", "response_id", "workspace_id", "status", "created_at",
             "updated_at", "lease_until", "cancel_requested", "max_wall_seconds",
             "max_tool_rounds", "attempt",
         ]
@@ -312,7 +312,7 @@ class ResponseStore:
         *,
         execution_id: str,
         response_id: str,
-        tenant_id: str = "",
+        workspace_id: str = "",
         call_id: str = "",
         tool_name: str = "",
         idempotency_key: str = "",
@@ -321,10 +321,10 @@ class ResponseStore:
         now = int(time.time())
         await self._store.execute(
             "INSERT INTO tool_executions "
-            "(execution_id, response_id, tenant_id, call_id, tool_name, "
+            "(execution_id, response_id, workspace_id, call_id, tool_name, "
             " idempotency_key, status, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (execution_id, response_id, tenant_id, call_id, tool_name,
+            (execution_id, response_id, workspace_id, call_id, tool_name,
              idempotency_key, status, now, now),
         )
 
@@ -341,7 +341,7 @@ class ResponseStore:
     def _row_to_record(row: tuple) -> ResponseRecord:
         return ResponseRecord(
             response_id=row[0],
-            tenant_id=row[1],
+            workspace_id=row[1],
             status=row[2],
             model=row[3],
             created_at=row[4],

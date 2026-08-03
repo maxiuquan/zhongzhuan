@@ -85,8 +85,8 @@ def test_v001_creates_tables(tmp_db):
             assert t in names, f"missing table {t}"
         # v004 response-store tables.
         for t in ("responses", "response_input_items", "response_output_items",
-                  "response_events", "response_state_chain", "background_tasks",
-                  "tool_executions"):
+                  "response_events", "response_state_chain", "background_jobs",
+                  "tool_executions", "idempotency_records"):
             assert t in names, f"missing v004 table {t}"
     finally:
         _run(db.close())
