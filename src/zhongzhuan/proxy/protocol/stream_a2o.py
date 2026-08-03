@@ -104,7 +104,20 @@ class StreamA2O:
         """
         if self._finished:
             return []
-        return self._finish()
+        out: list[bytes] = []
+        # Synthesize a closing choice chunk if we never emitted a terminal
+        # finish_reason (e.g. the upstream body ended without message_stop).
+        finish = self._stop_reason or "stop"
+        out.append(_openai_chunk(
+            chunk_id=self._chunk_id,
+            created=self._created,
+            model=self.model,
+            delta={},
+            finish_reason=finish,
+        ))
+        out.append(_done_marker())
+        self._finished = True
+        return out
 
     async def feed(self, chunk: bytes) -> list[bytes]:
         """Feed a raw Anthropic SSE chunk, return list of OpenAI SSE chunk bytes.

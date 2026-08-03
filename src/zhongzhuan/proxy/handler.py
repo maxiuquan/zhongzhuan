@@ -963,6 +963,8 @@ class ProxyHandler:
                                     f"state={stream_translator.state}"
                                 )
                                 closing = stream_translator.finish_safely()
+                                if hasattr(closing, "__await__"):
+                                    closing = await closing
                                 for ev in closing:
                                     await resp.write(ev)
 

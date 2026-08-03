@@ -631,11 +631,16 @@ class CompositeStreamTranslator:
     def usage(self) -> dict:
         return getattr(self.second, "usage", {"prompt_tokens": 0, "completion_tokens": 0})
 
-    def finish_safely(self) -> list[bytes]:
+    async def finish_safely(self) -> list[bytes]:
+        """Finish the pipeline, flushing both translators.
+
+        ``async`` per §13: a synchronous method must never call an async
+        ``feed()``.  The first translator is finished, its output is piped into
+        the second via ``await second.feed()``, then the second is finished.
+        """
         out: list[bytes] = []
-        out.extend(self.first.finish_safely())
-        for c in out:
-            out.extend(self.second.feed(c))
+        for c in self.first.finish_safely():
+            out.extend(await self.second.feed(c))
         out.extend(self.second.finish_safely())
         return out
 

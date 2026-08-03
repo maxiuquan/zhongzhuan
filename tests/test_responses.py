@@ -13,6 +13,7 @@ import pytest
 
 from zhongzhuan.proxy.protocol.detect import detect_inbound_protocol
 from zhongzhuan.proxy.protocol.responses import (
+    CompositeStreamTranslator,
     ResponsesStreamTranslator,
     chatcompletions_to_responses,
     convert_responses_request_to_chatcompletions,
@@ -412,3 +413,41 @@ class TestStreaming:
         text = b"".join(out).decode()
         assert "response.output_text.delta" in _event_names(text)
         assert "Hello" in text
+
+
+# ---------------------------------------------------------------------------
+# CompositeStreamTranslator async finish_safely (T13)
+# ---------------------------------------------------------------------------
+class TestCompositeFinishAsync:
+    async def test_composite_finish_safely_is_awaitable(self):
+        """Composite.finish_safely is async and pipes Anthropic->Responses."""
+        from zhongzhuan.proxy.protocol.stream_a2o import StreamA2O
+
+        # Anthropic SSE chunk -> StreamA2O -> Chat Completions SSE -> Responses.
+        anthropic_chunk = (
+            b'event: content_block_delta\n'
+            b'data: {"type":"content_block_delta","index":0,'
+            b'"delta":{"type":"text_delta","text":"hi"}}\n\n'
+        )
+        composite = CompositeStreamTranslator(
+            StreamA2O(model="claude-3-5"), ResponsesStreamTranslator(model="gpt-4o")
+        )
+        out = await composite.feed(anthropic_chunk)
+        closing = await composite.finish_safely()
+        all_bytes = b"".join(out + closing).decode()
+        assert "response.output_text.delta" in _event_names(all_bytes)
+        assert "response.completed" in _event_names(all_bytes)
+
+    async def test_composite_finish_safely_finalizes_second_only(self):
+        """First translator already finished; second must still complete."""
+        from zhongzhuan.proxy.protocol.stream_a2o import StreamA2O
+
+        first = StreamA2O(model="claude-3-5")
+        # Feed and finish the first so it is marked done.
+        first.finish_safely()
+        second = ResponsesStreamTranslator(model="gpt-4o")
+        composite = CompositeStreamTranslator(first, second)
+        closing = await composite.finish_safely()
+        text = b"".join(closing).decode()
+        assert "response.completed" in _event_names(text)
+        assert "[DONE]" in text
