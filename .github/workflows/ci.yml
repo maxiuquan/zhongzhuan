@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
+
+      - name: Run tests (skip live)
+        run: python -m pytest tests/ -q -m "not live" --ignore=tests/test_proxy_live.py
+
+      - name: Pytest collect-only sanity (zero errors)
+        run: python -m pytest tests/ --collect-only -q --ignore=tests/test_proxy_live.py
+
+  # 旧协议字节级 golden 基线：确保搬迁 legacy 时未悄悄改变协议行为
+  golden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
+      - name: Run golden baseline tests
+        run: python -m pytest tests/test_legacy_golden.py -q -m "golden"

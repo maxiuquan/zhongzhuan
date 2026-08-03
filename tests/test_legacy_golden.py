@@ -212,6 +212,7 @@ async def _proxy_harness():
 @pytest.mark.parametrize("case_id,path,behavior,body,expected_status", _CASES,
                          ids=_CASE_IDS)
 @pytest.mark.asyncio
+@pytest.mark.golden
 async def test_legacy_golden(case_id, path, behavior, body, expected_status,
                              _proxy_harness):
     golden = GOLDEN_DIR / f"{case_id}.sse"
