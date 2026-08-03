@@ -21,6 +21,12 @@ Design goals
   pending migration runs.
 * Re-running the engine is a no-op: applied versions are skipped, so the
   version table grows monotonically and each migration executes exactly once.
+* The recorded ``sql_digest`` of every already-applied version is compared
+  against the current one on each run.  A mismatch means somebody rewrote a
+  released migration -- the engine's *same version => same schema* invariant is
+  broken and the database may still carry the old schema.  This is reported as
+  a ``logger.warning`` plus a ``digest_mismatch`` status, **never** as a
+  startup failure; see :meth:`MigrationRunner.warn_digest_drift`.
 
 Naming note
 -----------
@@ -85,6 +91,10 @@ MYSQL_VERSION_TABLE_DDL: str = (
 
 STATUS_APPLIED: str = "applied"
 STATUS_BASELINED: str = "baselined"
+
+#: Recorded on a migration whose SQL was changed *after* it was applied.
+#: Kept <= 16 chars to fit the MySQL ``status VARCHAR(16)`` column.
+STATUS_DIGEST_MISMATCH: str = "digest_mismatch"
 
 
 class MigrationError(RuntimeError):
@@ -377,6 +387,15 @@ class MigrationRunner:
         rows = await self._ex.fetchall("SELECT version FROM schema_migrations")
         return {int(r[0]) for r in rows}
 
+    async def recorded_digests(self) -> dict[int, str]:
+        """Return ``{version: sql_digest}`` as recorded when each ran."""
+        if not await self.version_table_exists():
+            return {}
+        rows = await self._ex.fetchall(
+            "SELECT version, sql_digest FROM schema_migrations"
+        )
+        return {int(r[0]): str(r[1] or "") for r in rows}
+
     async def current_version(self) -> int:
         """Return the highest applied version (0 when nothing is applied)."""
         versions = await self.applied_versions()
@@ -425,6 +444,7 @@ class MigrationRunner:
 
         had_version_table = await self.version_table_exists()
         applied = await self.applied_versions()
+        await self.warn_digest_drift(ordered, applied)
         report = MigrationReport(from_version=max(applied) if applied else 0)
 
         pending = [m for m in ordered if m.version not in applied]
@@ -458,6 +478,74 @@ class MigrationRunner:
             f"(applied={report.applied}, baselined={report.baselined})"
         )
         return report
+
+    # -- drift detection --------------------------------------------------- #
+    async def warn_digest_drift(
+        self, migrations: Sequence[Migration], applied: set[int]
+    ) -> int:
+        """Warn when an already-applied migration's SQL has since changed.
+
+        The engine's core invariant is **same version => same schema**.  It is
+        broken the moment somebody rewrites a migration that is already
+        recorded in ``schema_migrations``: the new statements will never run on
+        any database that recorded the old ones, yet the version table keeps
+        reporting success.  That is exactly how a database ended up stuck on
+        the pre-B2 schema while claiming to be at v006 (see
+        :mod:`.migrations.v007_schema_realign`).
+
+        This check makes such a rewrite **visible**; it cannot repair it.  A
+        recorded version can never be re-run, so the only fix is a new,
+        corrective migration.
+
+        Deliberately a warning, never a hard failure: every database migrated
+        by the pre-rewrite v004 carries a stale digest, and a fail-closed check
+        would refuse to start all of them -- *including* the ones a corrective
+        migration has already repaired, because the recorded digest stays stale
+        forever.  Refusing to boot a healthy deployment over a bookkeeping
+        mismatch is self-harm.
+
+        Args:
+            migrations: The registry being run.
+            applied: Versions already recorded (from :meth:`applied_versions`).
+
+        Returns:
+            How many drifted versions were found.
+        """
+        if not applied:
+            return 0
+        recorded = await self.recorded_digests()
+        dialect = self._ex.dialect
+        drifted = 0
+        for migration in migrations:
+            expected = recorded.get(migration.version)
+            if not expected:
+                continue
+            current = migration.digest(dialect)
+            if expected == current:
+                continue
+            drifted += 1
+            logger.warning(
+                f"migration v{migration.version:03d} '{migration.name}' was "
+                f"REWRITTEN after it was applied to this database "
+                f"(recorded digest {expected[:12]}, current {current[:12]}). "
+                "The recorded version can never be re-run, so this database "
+                "may still carry the OLD schema for that version. Fix it with "
+                "a new corrective migration, never by editing the old one."
+            )
+            await self._mark_digest_mismatch(migration.version)
+        return drifted
+
+    async def _mark_digest_mismatch(self, version: int) -> None:
+        """Flag the drifted row in ``schema_migrations`` (best effort)."""
+        try:
+            await self._ex.execute(
+                "UPDATE schema_migrations SET status = ? "
+                "WHERE version = ? AND status <> ?",
+                (STATUS_DIGEST_MISMATCH, version, STATUS_DIGEST_MISMATCH),
+            )
+            await self._ex.commit()
+        except Exception as exc:  # pragma: no cover - bookkeeping only
+            logger.debug(f"could not flag v{version:03d} as digest_mismatch: {exc}")
 
     # -- internals --------------------------------------------------------- #
     @staticmethod
