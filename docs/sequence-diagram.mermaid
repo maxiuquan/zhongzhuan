@@ -1,0 +1,13 @@
+sequenceDiagram
+    participant M as __main__
+    participant S as Store
+    participant F as Fallback
+    participant P as ProxyServer
+    M->>S: _load_keys_from_store()
+    S-->>M: keys=[]
+    M->>F: should_inject_fallback(keys, cfg)
+    F-->>M: True (no keys + fallback.enabled)
+    M->>F: fetch_opencode_models()
+    F-->>M: [oc-glm-5.2-free, ...]
+    M->>M: KeyHealth(key_id=-1, is_fallback=True, upstream_base=https://opencode.ai, api_key="public")
+    M->>P: ProxyServer(keys=[fallback], models=[oc-*])

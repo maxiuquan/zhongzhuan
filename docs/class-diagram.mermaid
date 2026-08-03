@@ -1,0 +1,37 @@
+classDiagram
+    class KeyHealth {
+        +int key_id
+        +str api_key
+        +str status
+        +bool is_fallback
+        +int rpm_limit
+        +int tpm_limit
+        +int rpd_limit
+        +float cooldown_until
+        +is_available() bool
+        +record_request() void
+        +record_tokens(in, out) void
+    }
+    class FallbackConfig {
+        +bool enabled
+        +str upstream_base
+        +str api_key
+        +str models_url
+        +str model_prefix
+    }
+    class KeyHealthStore {
+        +save(health) void
+        +load(key_id) dict
+        +load_all() list
+    }
+    class ProxyHandler {
+        -_sticky dict
+        -_sticky_ttl float
+        -_sticky_cleaner Task
+        +_classify_failure(k, status, headers) bool
+        +_session_key(request, body) str
+        +reload_keys() int
+    }
+    KeyHealth --> FallbackConfig : uses
+    ProxyHandler --> KeyHealth : routes
+    KeyHealthStore --> KeyHealth : persists

@@ -1,0 +1,17 @@
+[Unit]
+Description=Zhongzhuan API Relay
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/zhongzhuan
+ExecStart=/usr/bin/python3 -m zhongzhuan
+Restart=always
+RestartSec=5
+EnvironmentFile=/root/zhongzhuan/.env
+StandardOutput=append:/var/log/zhongzhuan.log
+StandardError=append:/var/log/zhongzhuan.log
+
+[Install]
+WantedBy=multi-user.target

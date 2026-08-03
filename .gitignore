@@ -1,0 +1,41 @@
+/dist/
+/build/
+build/
+dist/
+*.exe
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-shm
+*.db-wal
+*.db.bak.*
+data.db-wal
+data.db-shm
+data/
+logs/
+.venv/
+.venv*/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env
+src/secret.key
+
+# 打包 / 安装产物
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# 本地运行时配置（可能含真实 key）
+src/config.yaml
+
+# 外部参考实现，仅本地研究用，不入库
+/9router_research/
+/_check.js
+/dist_new/
+/mod/
+.workbuddy/
+.git_corrupt_backup/
