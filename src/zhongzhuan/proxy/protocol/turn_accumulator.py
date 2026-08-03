@@ -27,6 +27,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .responses_models import (
+    ItemStatus,
+    ItemType,
+    OutputItem,
+    make_function_call_item_id,
     make_message_item_id,
     make_reasoning_item_id,
     make_synthetic_call_id,
@@ -205,6 +209,50 @@ class TurnAccumulator:
         items.extend(self.tools.list_all())
         items.sort(key=lambda it: it.output_index)
         return items
+
+    def open_items(self) -> list[OutputItem]:
+        """Items already announced with ``output_item.added`` but not yet done.
+
+        Read-only view used by the T23 circuit breaker to close a stream that
+        is being torn down mid-flight: an ``added`` without its ``done`` is a
+        malformed Responses stream, so every one of these must be closed before
+        the terminal event.
+
+        "Open" means *added and not done* -- an item that was never announced
+        must not be closed, because the emitter rejects a ``done`` it never saw
+        an ``added`` for.  Returned in ``output_index`` order so the teardown
+        is deterministic.
+        """
+        out: list[OutputItem] = []
+        for msg in self.messages:
+            if msg.added and not msg.done:
+                out.append(OutputItem(
+                    id=msg.item_id,
+                    output_index=msg.output_index,
+                    item_type=ItemType.MESSAGE,
+                    status=ItemStatus.IN_PROGRESS,
+                    role="assistant",
+                ))
+        rsn = self.reasoning
+        if rsn is not None and rsn.added and not rsn.done:
+            out.append(OutputItem(
+                id=rsn.item_id,
+                output_index=rsn.output_index,
+                item_type=ItemType.REASONING,
+                status=ItemStatus.IN_PROGRESS,
+            ))
+        for tool in self.tools.list_all():
+            if tool.item_added and not tool.item_done:
+                out.append(OutputItem(
+                    id=make_function_call_item_id(tool.call_id),
+                    output_index=tool.output_index,
+                    item_type=ItemType.FUNCTION_CALL,
+                    status=ItemStatus.IN_PROGRESS,
+                    call_id=tool.call_id,
+                    name=tool.name,
+                ))
+        out.sort(key=lambda it: it.output_index)
+        return out
 
 
 __all__ = [

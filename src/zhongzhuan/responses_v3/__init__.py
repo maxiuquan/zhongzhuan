@@ -13,6 +13,11 @@ resource endpoints on top of :class:`~zhongzhuan.store.response_store.ResponseSt
 T22 adds :mod:`.chain`: ``previous_response_id`` recovery with the R-P0-29
 cycle / depth / budget guards, feeding a reasoning-free replay array.
 
+T23 adds :mod:`.budget` and :mod:`.attempt`: the execution ceilings of
+R-P0-27, the no-progress loop signatures of R-P0-28, the six-step circuit
+breaker of R-P0-32 and the upstream retry policy of R-P0-30 / R-P0-34.  They
+are self-contained and injectable -- the live pipeline consumes them in T24.
+
 It is the successor to the legacy ``/v1/responses`` handler and is selected by
 the v3 feature switch (T12).  This module is a **skeleton** on the critical
 path: persistence + object mapping + routing are real and tested; the live
@@ -21,6 +26,16 @@ in T37.
 """
 from __future__ import annotations
 
+from ..proxy.protocol.responses_models import TerminalReason
+from .attempt import AttemptManager
+from .budget import (
+    BACKGROUND_BUDGET,
+    SYNC_BUDGET,
+    BudgetLedger,
+    CircuitBreaker,
+    ExecutionBudget,
+    tool_signature,
+)
 from .chain import ChainResolution, ChainResolver, build_upstream_input
 from .handler import ResponsesV3Handler
 from .schema import to_error_object, to_input_items_list, to_response_object
@@ -33,4 +48,14 @@ __all__ = [
     "to_response_object",
     "to_input_items_list",
     "to_error_object",
+    # T23: budget / circuit breaker / retry policy
+    "ExecutionBudget",
+    "SYNC_BUDGET",
+    "BACKGROUND_BUDGET",
+    "BudgetLedger",
+    "tool_signature",
+    "CircuitBreaker",
+    "AttemptManager",
+    # re-exported for call sites that only import from this package
+    "TerminalReason",
 ]
