@@ -36,6 +36,13 @@ T26 adds :mod:`.hosted_tools`: hosted tool 的 schema 识别与持久化（R-P1-
 四形态校验（R-P1-48），以及运行期才暴露时的 ``capability_route_unavailable``
 终止事件构造器 —— 事件真正进 SSE 流由 T28 接线。
 
+T27 adds :mod:`.mcp_client`: 7 类 hosted tool 里唯一 🟢 完整实现的那一类
+（PRD §3.3 #4）。``mcp_list_tools`` / ``mcp_call`` / ``mcp_approval_request`` /
+``mcp_approval_response`` 四类 item 与 §10.3 的三个事件族，真实的 Streamable
+HTTP JSON-RPC 传输（:class:`~.mcp_client.HttpMcpTransport`，只用核心依赖
+``aiohttp``），以及审批往返、幂等租约、超时与五类失败到官方
+``response.mcp_call.failed`` 的映射（R-P1-39/46/47）。
+
 It is the successor to the legacy ``/v1/responses`` handler and is selected by
 the v3 feature switch (T12).  This module is a **skeleton** on the critical
 path: persistence + object mapping + routing are real and tested; the live
@@ -75,6 +82,25 @@ from .hosted_tools import (
     build_runtime_unavailable_event,
     build_unsupported_tool_error,
     validate_tool_choice,
+)
+from .mcp_client import (
+    MCP_EVENT_TYPES,
+    ApprovalDecision,
+    HttpMcpTransport,
+    InMemoryMcpServer,
+    JsonRpcMcpSession,
+    McpClient,
+    McpDependencyError,
+    McpError,
+    McpOutcome,
+    McpServerConfig,
+    McpSession,
+    McpToolError,
+    McpTransport,
+    McpTransportError,
+    SdkMcpSession,
+    connect,
+    load_mcp_sdk,
 )
 from .passthrough import (
     NativePassthrough,
@@ -123,6 +149,24 @@ __all__ = [
     "build_unsupported_tool_error",
     "validate_tool_choice",
     "build_runtime_unavailable_event",
+    # T27: Remote MCP client（真实执行器，非 stub）
+    "McpClient",
+    "McpServerConfig",
+    "McpOutcome",
+    "ApprovalDecision",
+    "McpTransport",
+    "McpSession",
+    "JsonRpcMcpSession",
+    "HttpMcpTransport",
+    "SdkMcpSession",
+    "InMemoryMcpServer",
+    "connect",
+    "load_mcp_sdk",
+    "McpError",
+    "McpDependencyError",
+    "McpTransportError",
+    "McpToolError",
+    "MCP_EVENT_TYPES",
     # re-exported for call sites that only import from this package
     "TerminalReason",
 ]

@@ -45,7 +45,18 @@ HONEST STUB
   上游时由 T25 的直通承担，没有原生上游时按 ④ 报错。本模块不模拟任何执行器，
   也不会声称能模拟（R-P1-45：运行时不假装成功）。
 * :meth:`HostedToolRecognizer.persist` 写入的 ``approval_state`` 恒为 ``none``；
-  把它翻成 ``pending`` 并驱动 ``mcp_approval_request`` 是 T27。
+  把它翻成 ``pending`` 并驱动 ``mcp_approval_request`` 由 T27 的
+  :meth:`~.mcp_client.McpClient.request_approval` 完成（已落地）。
+
+例外：``mcp``
+-------------
+7 类 hosted tool 里只有 ``mcp`` 不走「无执行器 -> 标准错误」这条路。PRD §3.3 #4
+把它裁定为 🟢 完整实现，执行器就在
+:mod:`~zhongzhuan.responses_v3.mcp_client`。要让它对本模块的
+:class:`HostedToolValidator` 可服务，构造时把
+:attr:`~..proxy.protocol.responses_models.Capability.REMOTE_MCP` 加进
+``emulated=``（默认集合仍不含它 —— 是否启用 MCP 由部署配置说了算，默认打开一个
+能对外发网络请求的执行器不是安全的默认）。
 """
 from __future__ import annotations
 

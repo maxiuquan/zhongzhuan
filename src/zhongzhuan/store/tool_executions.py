@@ -25,11 +25,15 @@
 ``approval_state`` 列：同一个状态存两处，迟早会出现两处不一致而没人知道以哪个
 为准。空字符串（v004 默认值）在读出时归一为 :data:`APPROVAL_NONE`。
 
-HONEST STUB
------------
-:meth:`ToolExecutionStore.set_approval` 只负责状态落库。真正的
-``mcp_approval_request`` / ``mcp_approval_response`` item 与事件族是 T27；
-T26 只保证「审批状态可写、可读、可筛」这一个槽位是真的。
+审批往返（T27 已接）
+--------------------
+:meth:`ToolExecutionStore.set_approval` 只负责状态落库；
+``mcp_approval_request`` / ``mcp_approval_response`` item 与事件族由
+:mod:`zhongzhuan.responses_v3.mcp_client` 驱动 ——
+:meth:`~zhongzhuan.responses_v3.mcp_client.McpClient.request_approval` 把状态从
+``none`` 推到 ``pending``（于是 :meth:`get_pending_approvals` 查得到），
+:meth:`~zhongzhuan.responses_v3.mcp_client.McpClient.submit_approval` 消费客户端
+回执落 ``approved`` / ``rejected``。本层不认识事件，也不该认识。
 """
 from __future__ import annotations
 

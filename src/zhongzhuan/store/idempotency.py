@@ -30,11 +30,17 @@ R-P1-47 的判据是「同一幂等键重复请求**不二次执行**」。要�
 T16 的两个方法保持原样，仍是 handler 回放路径的接口；本类是同一张表的
 TTL 感知视图，不改它们的行为。
 
-HONEST STUB
------------
-:meth:`IdempotencyStore.reserve` 只做「不存在则占位」的单条 CAS，够 T26 的
-判定用；T27 接 MCP 工具副作用时若需要「占位失败后等待原执行者的结果」，那部分
-（轮询 / 超时 / conflict 判定）不在 T26 范围内。
+占位失败之后（T27 已接）
+------------------------
+:meth:`reserve` 本身只做「不存在则占位」的单条 CAS。占位失败后的「等待原执行者
+出结果 / 等待超时 / 同键异体判冲突」由
+:meth:`~zhongzhuan.responses_v3.mcp_client.McpClient._acquire` 实现 —— 那是调用
+方的策略（等多久、失败映射成哪个事件），不该固化在存储层。本层为它提供的唯一
+支撑是 :meth:`lookup` 投影出的 ``request_digest``。
+
+冲突**不写回存储**：改写那条记录会把原执行者的租约放掉，第三个并发请求就能占位
+并真的执行一次副作用。为了记一笔冲突而制造一次重复执行是净损失，所以
+:data:`STATE_CONFLICT` 只作为判定结果向上报，不落库。
 """
 from __future__ import annotations
 
@@ -84,12 +90,16 @@ class IdempotencyStore:
 
         过期行不会被删除（清扫是 T34 的事），只是不再被看见 —— 下一次
         :meth:`mark_executed` 会用 ``INSERT OR REPLACE`` 直接覆盖它。
+
+        ``request_digest`` 一并投影出来（T27 加）：「同键异体」只能靠比对请求体
+        摘要判定，投影里少了它，:data:`STATE_CONFLICT` 就永远没有判据可依，
+        本模块头声称的三个状态里就有一个是死的。
         """
         if not key:
             return None
         row = await self._store.fetchone(
-            "SELECT response_id, status_code, state, created_at, expires_at "
-            "FROM idempotency_records "
+            "SELECT response_id, status_code, state, created_at, expires_at, "
+            "request_digest FROM idempotency_records "
             "WHERE workspace_id = ? AND idempotency_key = ?",
             (workspace_id, key),
         )
@@ -107,6 +117,7 @@ class IdempotencyStore:
             "state": str(row[2] or STATE_IN_FLIGHT),
             "created_at": int(row[3] or 0),
             "expires_at": expires_at,
+            "request_digest": str(row[5] or ""),
         }
 
     # -- 写入 ----------------------------------------------------------------
