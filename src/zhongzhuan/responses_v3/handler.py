@@ -9,6 +9,9 @@ without an HTTP server.
 
 Return contract: ``dispatch(...) -> (status: int, body: dict)``.  Unmatched
 methods / unknown sub-resources yield ``405`` (official matrix, T15).
+
+T22 wires the :class:`~.chain.ChainResolver` in here so every ``create`` shares
+one (optionally tenant-narrowed) instance of the R-P0-29 guards.
 """
 from __future__ import annotations
 
@@ -21,14 +24,25 @@ from ..proxy.protocol.responses_routes import (
 )
 from ..store.response_store import ResponseStore
 from . import endpoints
+from .chain import ChainResolution, ChainResolver
 from .schema import to_error_object
 
 
 class ResponsesV3Handler:
     """Dispatch ``/v1/responses*`` requests to the resource handlers."""
 
-    def __init__(self, store: ResponseStore) -> None:
+    def __init__(self, store: ResponseStore, *, chain: ChainResolver | None = None) -> None:
         self._store = store
+        #: T22: state-chain recovery + cycle guard (R-P0-29 / R-P1-31).  A
+        #: tenant-narrowed resolver can be injected; the default uses the
+        #: documented 64 / 2000 / 200k ceilings.
+        self._chain = chain or ChainResolver(store)
+
+    async def resolve_chain(
+        self, previous_response_id: str, *, workspace_id: str = "",
+    ) -> ChainResolution:
+        """Expose chain recovery to the request builder (T24 upstream wiring)."""
+        return await self._chain.resolve_chain(previous_response_id, workspace_id)
 
     async def dispatch(
         self,
@@ -58,7 +72,9 @@ class ResponsesV3Handler:
         ep = match.endpoint
         rid = match.response_id
         if ep is ResponsesEndpoint.CREATE:
-            return await endpoints.create(self._store, workspace_id=workspace_id, body=body)
+            return await endpoints.create(
+                self._store, workspace_id=workspace_id, body=body, chain=self._chain,
+            )
         if ep is ResponsesEndpoint.RETRIEVE:
             return await endpoints.retrieve(self._store, workspace_id=workspace_id, response_id=rid)
         if ep is ResponsesEndpoint.DELETE:

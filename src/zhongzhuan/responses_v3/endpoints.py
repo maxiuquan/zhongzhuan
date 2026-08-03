@@ -3,8 +3,12 @@
 Each handler is a pure ``(handler, request) -> (status, body)`` coroutine with
 no routing logic of its own; :class:`~.handler.ResponsesV3Handler` resolves the
 endpoint and dispatches here.  They rely only on
-:class:`~zhongzhuan.store.response_store.ResponseStore` and the schema mappers,
-so they are trivially unit-testable.
+:class:`~zhongzhuan.store.response_store.ResponseStore`, the schema mappers and
+:class:`~.chain.ChainResolver`, so they are trivially unit-testable.
+
+T22 additions on ``create``: ``previous_response_id`` is resolved through the
+chain guard (R-P0-29) before anything is written, and the persisted request /
+input items are reasoning-redacted first (铁律 1 / R-P1-40).
 """
 from __future__ import annotations
 
@@ -12,7 +16,9 @@ import time
 import uuid
 from typing import Any
 
+from ..proxy.protocol.item_registry import parse_input_items, serialize_item
 from ..store.response_store import ResponseStore
+from .chain import ChainResolver, chain_error_response
 from .schema import to_error_object, to_input_items_list, to_response_object
 
 DEFAULT_PAGE_LIMIT = 20
@@ -24,14 +30,38 @@ def _new_response_id() -> str:
 
 
 async def create(
-    rs: ResponseStore, *, workspace_id: str, body: dict[str, Any],
+    rs: ResponseStore,
+    *,
+    workspace_id: str,
+    body: dict[str, Any],
+    chain: ChainResolver | None = None,
 ) -> tuple[int, dict[str, Any]]:
     store = bool(body.get("store", True))
     response_id = _new_response_id()
     model = str(body.get("model", ""))
     previous_response_id = str(body.get("previous_response_id", "") or "")
     now = int(time.time())
+
+    # R-P0-29: a chain that cannot be resolved is a standard Responses error --
+    # never a silent downgrade to a stateless turn.  ``response_id`` is freshly
+    # minted, so the only reachable self-reference lives inside the stored
+    # chain and is caught by the resolver.
+    chain_depth = 0
+    if previous_response_id:
+        resolver = chain or ChainResolver(rs)
+        resolution = await resolver.resolve_chain(previous_response_id, workspace_id)
+        if not resolution.ok:
+            return chain_error_response(resolution)
+        chain_depth = resolution.depth
+
     if store:
+        # 铁律 1: reasoning items are redacted to metadata before anything is
+        # written, so no reasoning text ever reaches the request row or the
+        # input-items table (R-P0-14 / R-P1-29 / R-P1-40).
+        input_items = [serialize_item(it) for it in parse_input_items(body.get("input"))]
+        stored_request = dict(body)
+        if "input" in stored_request:
+            stored_request["input"] = input_items
         await rs.create_response(
             response_id=response_id,
             workspace_id=workspace_id,
@@ -39,8 +69,15 @@ async def create(
             status="in_progress",
             previous_response_id=previous_response_id,
             background=bool(body.get("background", False)),
-            request=body,
+            request=stored_request,
         )
+        if input_items:
+            await rs.save_input_items(response_id, input_items)
+        if previous_response_id:
+            await rs.save_state_chain(
+                response_id, previous_response_id, chain_depth + 1,
+                workspace_id=workspace_id,
+            )
     obj = {
         "id": response_id,
         "object": "response",
@@ -51,6 +88,8 @@ async def create(
         "usage": {},
         "error": None,
         "incomplete_details": None,
+        # R-P1-31: instructions are per-request and are NEVER inherited from an
+        # ancestor in the chain -- only conversation items travel down a chain.
         "instructions": body.get("instructions"),
         "metadata": body.get("metadata", {}),
         "previous_response_id": previous_response_id or None,
