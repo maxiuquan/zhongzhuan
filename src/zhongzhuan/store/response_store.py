@@ -186,11 +186,13 @@ class ResponseStore:
                 ),
             )
 
-    async def list_input_items(self, response_id: str, *, limit: int = 100) -> list[dict]:
+    async def list_input_items(
+        self, response_id: str, *, after_seq: int = -1, limit: int = 100,
+    ) -> list[dict]:
         rows = await self._store.fetchall(
-            "SELECT payload FROM response_input_items WHERE response_id = ? "
-            "ORDER BY seq LIMIT ?",
-            (response_id, limit),
+            "SELECT payload FROM response_input_items "
+            "WHERE response_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+            (response_id, after_seq, limit),
         )
         return [_loads(r[0], {}) for r in rows]
 
@@ -210,7 +212,7 @@ class ResponseStore:
             response_id=response_id, event_type=event_type, data=data, workspace_id="",
         )
 
-    async def list_events(self, response_id: str, *, after_seq: int = 0) -> list[dict]:
+    async def list_events(self, response_id: str, *, after_seq: int = -1) -> list[dict]:
         rows = await self._store.fetchall(
             "SELECT seq, event_type, data FROM response_events "
             "WHERE response_id = ? AND seq > ? ORDER BY seq",

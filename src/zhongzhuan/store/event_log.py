@@ -104,7 +104,7 @@ class EventLog:
         return seq
 
     async def read_events(
-        self, response_id: str, *, after_seq: int = 0,
+        self, response_id: str, *, after_seq: int = -1,
     ) -> list[dict[str, Any]]:
         """Return events for ``response_id`` ordered by ``seq`` after ``after_seq``."""
         rows = await self._store.fetchall(
