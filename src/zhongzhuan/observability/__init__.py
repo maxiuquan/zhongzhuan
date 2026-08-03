@@ -1,11 +1,23 @@
-"""Observability: structured logging + Prometheus metrics (T29 / R-P1-53..55, R-P2-12).
+"""Observability: structured logging + Prometheus metrics + debug capture
+(T29 / R-P1-53..55, R-P2-12; T30 / R-P1-56).
 
 ``metrics`` -- the 13 §11.1 metrics rendered in Prometheus text format without
 the ``prometheus-client`` dependency (:func:`~.metrics.render_metrics`).
 
 ``logfields`` -- the 14-field request-log schema (:func:`~.logfields.to_log_json`)
 with redaction + truncation (:func:`~.logfields.sanitize_text`).
+
+``capture`` -- optional anonymised debug capture + offline replay
+(:class:`~.capture.DebugCapture`).  Disabled by default.
 """
+from .capture import (
+    CaptureConfig,
+    CaptureEntry,
+    CaptureStats,
+    DebugCapture,
+    capture,
+    normalize_event,
+)
 from .log import setup_logging
 from .logfields import (
     MAX_LOG_FIELD_CHARS,
@@ -58,6 +70,13 @@ from .metrics import (
 
 __all__ = [
     "setup_logging",
+    # capture
+    "CaptureConfig",
+    "CaptureEntry",
+    "CaptureStats",
+    "DebugCapture",
+    "capture",
+    "normalize_event",
     # logfields
     "REQUEST_LOG_FIELDS",
     "MAX_LOG_FIELD_CHARS",
