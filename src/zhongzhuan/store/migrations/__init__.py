@@ -13,8 +13,9 @@ from .v001_baseline import MIGRATION as M001
 from .v003_token_hash import MIGRATION as M003
 from .v004_response_store import MIGRATION as M004
 from .v005_model_capabilities import MIGRATION as M005
+from .v006_tool_executions import MIGRATION as M006
 
 #: Ordered migration registry.  Keep ascending by ``version``.
-MIGRATIONS: tuple[Migration, ...] = (M001, M003, M004, M005)
+MIGRATIONS: tuple[Migration, ...] = (M001, M003, M004, M005, M006)
 
 __all__ = ["MIGRATIONS", "Migration"]

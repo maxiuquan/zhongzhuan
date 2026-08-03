@@ -31,6 +31,11 @@ and ``strict_capability_startup`` fail-closed check, plus the native
 (R-P1-44).  The passthrough's upstream transport is injected -- the live HTTP
 client is T28.
 
+T26 adds :mod:`.hosted_tools`: hosted tool 的 schema 识别与持久化（R-P1-46 闸门
+①）、§4-Q4 的 400 ``unsupported_tool`` 请求期拒绝（闸门④）、``tool_choice``
+四形态校验（R-P1-48），以及运行期才暴露时的 ``capability_route_unavailable``
+终止事件构造器 —— 事件真正进 SSE 流由 T28 接线。
+
 It is the successor to the legacy ``/v1/responses`` handler and is selected by
 the v3 feature switch (T12).  This module is a **skeleton** on the critical
 path: persistence + object mapping + routing are real and tested; the live
@@ -63,6 +68,14 @@ from .capability import (
 from .catchup import CatchupStream
 from .chain import ChainResolution, ChainResolver, build_upstream_input
 from .handler import ResponsesV3Handler
+from .hosted_tools import (
+    HOSTED_TOOL_TYPES,
+    HostedToolRecognizer,
+    HostedToolValidator,
+    build_runtime_unavailable_event,
+    build_unsupported_tool_error,
+    validate_tool_choice,
+)
 from .passthrough import (
     NativePassthrough,
     PassthroughPathError,
@@ -103,6 +116,13 @@ __all__ = [
     "PassthroughRequest",
     "PassthroughPathError",
     "RecordingTransport",
+    # T26: hosted tool recognition / Q4 error semantics / tool_choice
+    "HOSTED_TOOL_TYPES",
+    "HostedToolRecognizer",
+    "HostedToolValidator",
+    "build_unsupported_tool_error",
+    "validate_tool_choice",
+    "build_runtime_unavailable_event",
     # re-exported for call sites that only import from this package
     "TerminalReason",
 ]

@@ -53,8 +53,11 @@ def test_migrations_apply_in_order(tmp_db):
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         rows = _run(db.execute_fetchall("SELECT version FROM schema_migrations ORDER BY version"))
         names = _run(db.execute_fetchall("SELECT name FROM schema_migrations ORDER BY version"))
-        assert [v for v, in rows] == [1, 3, 4, 5]
-        assert [n for n, in names] == ["baseline", "token_hash", "response_store", "model_capabilities"]
+        assert [v for v, in rows] == [1, 3, 4, 5, 6]
+        assert [n for n, in names] == [
+            "baseline", "token_hash", "response_store", "model_capabilities",
+            "tool_executions",
+        ]
     finally:
         _run(db.close())
 
@@ -66,7 +69,7 @@ def test_migrations_idempotent(tmp_db):
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         rows = _run(db.execute_fetchall("SELECT version FROM schema_migrations"))
-        assert len(rows) == 4
+        assert len(rows) == 5
     finally:
         _run(db.close())
 
@@ -111,6 +114,73 @@ def test_migration_failure_exits(tmp_db):
         assert ei.value.code == MIGRATION_EXIT_CODE
     finally:
         _run(db.close())
+
+
+def test_v006_survives_legacy_tool_executions_without_workspace_id(tmp_db):
+    """回归锁：v006 必须能在「旧 v004 残留的 tool_executions（无 workspace_id）」
+
+    上完成迁移，而不是让 ``CREATE INDEX ... (workspace_id, approval)`` 报
+    ``no such column: workspace_id`` 进而触发 :data:`MIGRATION_EXIT_CODE` 把
+    服务拒启动（T26 真实升级路径 BUG 的根因）。
+
+    复现方式：先只跑 v001..v005，把当前 v004 建出的 ``workspace_id`` 列改名成
+    ``tenant_id`` —— 等价于「曾经被 B2 改名前的旧 v004 迁移过、而迁移引擎只比对
+    ``version`` 不比对 ``sql_digest``、旧表形永远不会被 ``CREATE TABLE IF NOT
+    EXISTS`` 改形」的真实部署缓存。再跑完整迁移，断言 v006 自愈、服务可启动。
+    """
+    # 1) 只应用到 v005（不含 v006），得到当前形态的 tool_executions。
+    db, ex = _executor(tmp_db)
+    _run(run_migrations_or_exit(ex, list(MIGRATIONS[:4]), sqlite_db_path=tmp_db))
+    _run(db.close())
+
+    # 2) 把 workspace_id 退化成旧 v004 的 tenant_id（移除 workspace_id 列）。
+    db2, _ = _executor(tmp_db)
+    try:
+        _run(db2.execute(
+            "ALTER TABLE tool_executions RENAME COLUMN workspace_id TO tenant_id"
+        ))
+        # expires_at 在旧形态里也可能缺失：尽量删掉以贴近真实场景；
+        # 不支持 DROP COLUMN 的旧 SQLite 上跳过（不影响 workspace_id 验证）。
+        try:
+            _run(db2.execute("ALTER TABLE tool_executions DROP COLUMN expires_at"))
+        except Exception:  # pragma: no cover - 依赖 SQLite 版本
+            pass
+        _run(db2.commit())
+    finally:
+        _run(db2.close())
+
+    # 3) 断言此时确实处于「有表、无 workspace_id」的脆弱状态。
+    db3, _ = _executor(tmp_db)
+    try:
+        cols = _run(db3.execute_fetchall("PRAGMA table_info(tool_executions)"))
+        col_names = {r[1] for r in cols}
+        assert "tenant_id" in col_names
+        assert "workspace_id" not in col_names
+    finally:
+        _run(db3.close())
+
+    # 4) 跑完整迁移：v006 必须自愈，不再把服务打死。
+    db4, ex4 = _executor(tmp_db)
+    try:
+        # run_migrations_or_exit 失败会以 MIGRATION_EXIT_CODE 退出 -> SystemExit。
+        _run(run_migrations_or_exit(ex4, MIGRATIONS, sqlite_db_path=tmp_db))
+
+        rows = _run(db4.execute_fetchall("SELECT version FROM schema_migrations"))
+        assert {int(v[0]) for v in rows} == {1, 3, 4, 5, 6}
+
+        cols = _run(db4.execute_fetchall("PRAGMA table_info(tool_executions)"))
+        col_names = {r[1] for r in cols}
+        assert "workspace_id" in col_names, "v006 必须补回 workspace_id"
+        assert "expires_at" in col_names, "v006 必须补回 expires_at"
+        assert "tool_seq" in col_names
+
+        idx = _run(db4.execute_fetchall(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name='idx_te_approval'"
+        ))
+        assert idx, "v006 必须建出 idx_te_approval"
+    finally:
+        _run(db4.close())
 
 
 def test_v003_hashes_legacy_tokens(tmp_db):
