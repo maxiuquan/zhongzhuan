@@ -168,7 +168,14 @@ class TestRequestConversion:
         assert cc["reasoning_effort"] == "high"
         assert "reasoning" not in cc
 
-    def test_reasoning_item_attached_to_assistant(self):
+    def test_reasoning_item_not_replayed_into_upstream(self):
+        """Reasoning is out-only (R-P0-14 铁律 1): never replayed upstream.
+
+        v3 removed the old ``:115-140`` reasoning replay (attaching the
+        reasoning text to the assistant message as ``reasoning_content``).
+        A reasoning input item is dropped and must not leak into the Chat
+        Completions body.
+        """
         body = {
             "model": "m",
             "input": [
@@ -178,8 +185,9 @@ class TestRequestConversion:
             ],
         }
         cc = convert_responses_request_to_chatcompletions(body)
-        assistant = [m for m in cc["messages"] if m["role"] == "assistant"][0]
-        assert assistant["reasoning_content"] == "thinking"
+        for m in cc["messages"]:
+            assert "reasoning_content" not in m
+            assert "encrypted_content" not in m
 
     def test_non_responses_body_passthrough(self):
         body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
