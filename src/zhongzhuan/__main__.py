@@ -80,6 +80,7 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
     优化点4：启动时从 key_health 表恢复之前学到的 status/cooldown/限额。
     """
     from zhongzhuan.store.key_health import load_all_health
+    from zhongzhuan.proxy.client_presets import parse_custom_headers
 
     saved_health = await load_all_health(store)
 
@@ -117,6 +118,9 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             is_fallback=bool(model.is_fallback) if model else False,
             fallback_penalty=cfg.fallback.fallback_penalty,
             aliases=model.aliases if model else "",
+            # 客户端指纹模拟（v009）：从 Model 映射, custom_headers JSON 解析容错
+            client_preset=getattr(model, "client_preset", "") if model else "",
+            custom_headers=parse_custom_headers(getattr(model, "custom_headers", "") or "") if model else [],
         )
         # 恢复持久化的健康状态（优化点4）
         if kr.id in saved_health:

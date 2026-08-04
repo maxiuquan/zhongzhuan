@@ -913,6 +913,36 @@ class ProxyHandler:
             terminal_reason=terminal_reason,
         )
 
+    def _apply_client_fingerprint(self, headers: dict, key) -> dict:
+        """根据 ``key.client_preset`` 注入上游客户端指纹头（v009）。
+
+        * ``client_preset == ""``   → 不模拟, 直接返回, headers 零修改（默认零影响）
+        * ``client_preset == "workbuddy"``（或其他内置预设）→ 注入 PRESETS 内置头
+        * ``client_preset == "custom"`` → 注入 key.custom_headers（加载链已解析）
+
+        在 Authorization 注入之后调用, 预设/自定义头若含 Authorization 会覆盖
+        P0 的内置预设不含受控头; 自定义头的受控头黑名单在 API 层拦截, 加载链
+        不重复校验以保性能。
+        """
+        preset_name = getattr(key, "client_preset", "") or ""
+        if not preset_name:
+            return headers
+
+        if preset_name == "custom":
+            headers_list = getattr(key, "custom_headers", None) or []
+        else:
+            from .client_presets import get_headers
+            headers_list = get_headers(preset_name)
+
+        if not headers_list:
+            return headers
+
+        from .header_templates import render
+        for name, value_tpl in headers_list:
+            if name:  # 防御：跳过空 name
+                headers[name] = render(value_tpl)
+        return headers
+
     async def _prepare_v3_upstream_call(
         self,
         *,
@@ -1031,6 +1061,9 @@ class ProxyHandler:
             # Never let a transport-level content codec sit between the
             # upstream and the SSE framer.
             headers["Accept-Encoding"] = "identity"
+
+        # 客户端指纹模拟（v009）：在 Authorization 注入后、path 处理前注入预设/自定义头
+        self._apply_client_fingerprint(headers, key)
 
         if key.upstream_path_override:
             upstream_path = key.upstream_path_override
@@ -1902,6 +1935,9 @@ class ProxyHandler:
                     if final_body is not ctx.raw_body:
                         headers["Content-Length"] = str(len(final_body))
 
+                # 客户端指纹模拟（v009）：Authorization 注入后、path 处理前注入
+                self._apply_client_fingerprint(headers, k)
+
                 # upstream_path_override: non-empty → use directly as path/URL
                 if k.upstream_path_override:
                     upstream_path = k.upstream_path_override
@@ -2259,6 +2295,9 @@ class ProxyHandler:
                         headers["Authorization"] = f"Bearer {k.api_key}"
                         if final_body is not body:
                             headers["Content-Length"] = str(len(final_body))
+
+                    # 客户端指纹模拟（v009）：Authorization 注入后、path 处理前注入
+                    self._apply_client_fingerprint(headers, k)
 
                     # upstream_path_override: non-empty → use directly as path/URL
                     if k.upstream_path_override:

@@ -506,13 +506,29 @@ function renderCharts(u) {
 }
 
 // ---- 模型管理 ----
+let clientPresetOptions = []; // [{key,label}] 内置预设，前端在头加"不模拟"、尾加"自定义"
+
+async function ensurePresetOptions() {
+  if (clientPresetOptions.length > 0) return;
+  const r = await api("/api/models/client-preset-options");
+  if (r && Array.isArray(r.presets)) clientPresetOptions = r.presets;
+}
+
+function presetBadge(m) {
+  if (!m.client_preset) return "";
+  if (m.client_preset === "custom") return ' <span class="tag custom">自定义模拟</span>';
+  const p = clientPresetOptions.find(x => x.key === m.client_preset);
+  return ' <span class="tag" style="background:rgba(59,130,246,0.15);color:#60a5fa">模拟' + esc(p ? p.label.split(" ")[0] : m.client_preset) + '</span>';
+}
+
 async function loadModels() {
+  await ensurePresetOptions();
   const d = await api("/api/models");
   models = d?.data || [];
   document.getElementById("modelTable").innerHTML = models.length === 0
     ? '<tr><td colspan="10" class="empty">还没有模型,点击右上角添加</td></tr>'
     : models.map(m => `
-      <tr><td><strong>${esc(m.name)}</strong></td><td>${esc(m.upstream_base)}</td><td>${esc(m.upstream_model)}</td>
+      <tr><td><strong>${esc(m.name)}</strong>${presetBadge(m)}</td><td>${esc(m.upstream_base)}</td><td>${esc(m.upstream_model)}</td>
       <td><code>${m.protocol||"openai"}</code></td>
       <td>${m.rpm_limit||"不限"}</td><td>${m.tpm_limit||"不限"}</td>
       <td>${m.aliases? '<code>'+esc(m.aliases)+'</code>' : '<span style="color:var(--text-subtle)">-</span>'}</td>
@@ -557,6 +573,19 @@ async function delModel(id) {
 
 function showModelModal(model) {
   const isEdit = !!model;
+  const preset = isEdit ? (model.client_preset || "") : "";
+  // 下拉选项：头"不模拟" + 中间内置预设(按 list_presets 顺序) + 尾"自定义"
+  const presetOpts = ['<option value=""' + (preset === "" ? " selected" : "") + '>不模拟</option>']
+    .concat(clientPresetOptions.map(p => '<option value="' + esc(p.key) + '"' + (preset === p.key ? " selected" : "") + '>' + esc(p.label) + '</option>'))
+    .concat(['<option value="custom"' + (preset === "custom" ? " selected" : "") + '>自定义</option>']);
+
+  // 自定义头初始行：编辑模式解析 model.custom_headers, 否则两空行
+  let customRows = [];
+  if (isEdit && model.custom_headers) {
+    try { customRows = JSON.parse(model.custom_headers) || []; } catch (e) { customRows = []; }
+  }
+  if (customRows.length === 0) customRows = [{name:"", value:""}, {name:"", value:""}];
+
   document.getElementById("modalContent").innerHTML = `
     <h3>${isEdit ? "编辑模型" : "添加模型"}</h3>
     <div class="form-group"><label>名称 <span style="color:var(--text-subtle)">(客户端请求时使用的模型名)</span></label><input id="f_name" value="${isEdit ? esc(model.name) : ""}"></div>
@@ -571,9 +600,87 @@ function showModelModal(model) {
       <div class="form-group"><label>RPM 限制</label><input id="f_rpm" type="number" value="${isEdit ? model.rpm_limit : 0}"></div>
       <div class="form-group"><label>TPM 限制</label><input id="f_tpm" type="number" value="${isEdit ? model.tpm_limit : 0}"></div>
     </div>
+    <div class="form-group">
+      <label>客户端模拟 <span style="color:var(--text-subtle)">(模拟特定客户端指纹以走限免通道,"自定义"在最后)</span></label>
+      <select id="f_client_preset" onchange="toggleClientPreset()">${presetOpts.join("")}</select>
+    </div>
+    <div id="f_preset_hint" style="display:none;padding:8px 12px;background:var(--bg-elevated);border-radius:6px;color:var(--text-subtle);font-size:13px;margin-bottom:12px"></div>
+    <div id="f_custom_headers_wrap" style="display:none;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <label style="margin:0">自定义请求头</label>
+        <button type="button" class="btn small" onclick="addCustomHeaderRow()">+ 添加 Header</button>
+      </div>
+      <div id="f_custom_headers" style="display:flex;flex-direction:column;gap:6px"></div>
+      <div style="color:var(--text-subtle);font-size:12px;margin-top:6px">支持模板变量：<code>{{uuid}}</code>（每请求生成新 UUID）。禁止 Authorization/Host/Content-Length 等受控头。</div>
+    </div>
     <div class="form-group"><label>启用</label><select id="f_enabled"><option value="1" ${isEdit && model.enabled ? "selected" : ""}>是</option><option value="0" ${isEdit && !model.enabled ? "selected" : ""}>否</option></select></div>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveModel(${isEdit ? model.id : ""})">保存</button></div>`;
   document.getElementById("modal").classList.add("show");
+
+  // 渲染自定义头初始行 + 触发条件展示
+  renderCustomHeaderRows(customRows);
+  toggleClientPreset();
+}
+
+function renderCustomHeaderRows(rows) {
+  const wrap = document.getElementById("f_custom_headers");
+  if (!wrap) return;
+  wrap.innerHTML = rows.map((r, i) => `
+    <div class="form-row" data-row="${i}" style="gap:6px;align-items:center">
+      <input placeholder="Header 名称,如 X-Client-Name" value="${esc(r.name||"")}" style="flex:1" oninput="validateCustomHeaderName(this)">
+      <input placeholder="值,如 workbuddy 或 {{uuid}}" value="${esc(r.value||"")}" style="flex:1">
+      <button type="button" class="btn small danger" onclick="removeCustomHeaderRow(this)">删除</button>
+    </div>`).join("");
+}
+
+function addCustomHeaderRow() {
+  const wrap = document.getElementById("f_custom_headers");
+  const i = wrap.children.length;
+  const div = document.createElement("div");
+  div.className = "form-row";
+  div.style.cssText = "gap:6px;align-items:center";
+  div.dataset.row = i;
+  div.innerHTML = `<input placeholder="Header 名称,如 X-Client-Name" value="" style="flex:1" oninput="validateCustomHeaderName(this)">
+    <input placeholder="值,如 workbuddy 或 {{uuid}}" value="" style="flex:1">
+    <button type="button" class="btn small danger" onclick="removeCustomHeaderRow(this)">删除</button>`;
+  wrap.appendChild(div);
+}
+
+function removeCustomHeaderRow(btn) {
+  btn.closest('[data-row]').remove();
+}
+
+function validateCustomHeaderName(input) {
+  const v = input.value.trim().toLowerCase();
+  if (["authorization","host","content-length","transfer-encoding","connection"].includes(v)) {
+    input.style.borderColor = "var(--danger)";
+    input.title = "不允许设置受控头: " + input.value;
+  } else {
+    input.style.borderColor = "";
+    input.title = "";
+  }
+}
+
+function toggleClientPreset() {
+  const sel = document.getElementById("f_client_preset");
+  if (!sel) return;
+  const v = sel.value;
+  const hint = document.getElementById("f_preset_hint");
+  const wrap = document.getElementById("f_custom_headers_wrap");
+  if (v === "") {
+    if (hint) hint.style.display = "none";
+    if (wrap) wrap.style.display = "none";
+  } else if (v === "custom") {
+    if (hint) hint.style.display = "none";
+    if (wrap) wrap.style.display = "block";
+  } else {
+    const p = clientPresetOptions.find(x => x.key === v);
+    if (hint) {
+      hint.style.display = "block";
+      hint.textContent = p ? ('将自动注入 ' + (p.label) + ' 的指纹头（User-Agent、X-Client-Name、X-Request-ID 等，含 {{uuid}} 动态变量）') : "";
+    }
+    if (wrap) wrap.style.display = "none";
+  }
 }
 
 function editModel(id) {
@@ -582,6 +689,24 @@ function editModel(id) {
 }
 
 async function saveModel(id) {
+  const clientPreset = document.getElementById("f_client_preset").value;
+  let customHeadersJson = "";
+  if (clientPreset === "custom") {
+    // 收集自定义头：过滤 name 空行
+    const rows = document.querySelectorAll('#f_custom_headers [data-row]');
+    const headers = [];
+    rows.forEach(row => {
+      const inputs = row.querySelectorAll('input');
+      const name = inputs[0].value.trim();
+      const value = inputs[1].value;
+      if (name) headers.push({name, value});
+    });
+    customHeadersJson = JSON.stringify(headers);
+  } else if (id) {
+    // 编辑模式下保留已有的 custom_headers（方便切换不丢失）
+    const m = models.find(x => x.id === id);
+    if (m) customHeadersJson = m.custom_headers || "";
+  }
   const body = {
     name: document.getElementById("f_name").value.trim(),
     upstream_base: document.getElementById("f_upstream_base").value.trim(),
@@ -592,6 +717,8 @@ async function saveModel(id) {
     rpm_limit: parseInt(document.getElementById("f_rpm").value)||0,
     tpm_limit: parseInt(document.getElementById("f_tpm").value)||0,
     enabled: document.getElementById("f_enabled").value === "1",
+    client_preset: clientPreset,
+    custom_headers: customHeadersJson,
   };
   if (!body.name || !body.upstream_base) { alert("名称和上游地址不能为空"); return; }
   let r;

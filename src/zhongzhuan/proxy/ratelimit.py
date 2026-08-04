@@ -109,6 +109,13 @@ class KeyHealth:
     fallback_penalty: float = 1.0
     # 模型别名：逗号分隔，客户端用别名请求时也能匹配到此 key
     aliases: str = ""
+    # 客户端模拟："" 不模拟 | "workbuddy" 内置预设 | "custom" 用户自定义头
+    # （v009 新增）。proxy 发上游请求前据此注入客户端指纹头。
+    client_preset: str = ""
+    # 自定义头列表（已解析的有序 (name, value_template) 元组），仅当
+    # client_preset="custom" 时使用。加载链从 Model.custom_headers JSON 解析；
+    # 解析失败时置空列表（该 key 退化为不注入）。
+    custom_headers: list[tuple[str, str]] = field(default_factory=list)
 
     def declared_capabilities(self) -> frozenset[Capability]:
         """本 key 声明的上游能力（强类型视图，T25）。

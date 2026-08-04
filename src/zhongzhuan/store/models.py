@@ -30,6 +30,13 @@ class Model:
     capabilities: str = ""
     # 上游执行模式：bonded(未声明) | native | emulate | translate（T25 / R-P1-44，v005 新增列）
     upstream_mode: str = "bonded"
+    # 客户端模拟："" 不模拟(默认零影响) | "workbuddy" 内置预设 | "custom" 用户自定义头
+    # （v009 新增列）。非空时, proxy 发上游请求前注入对应客户端指纹头。
+    client_preset: str = ""
+    # 自定义头 JSON 数组字符串, 仅当 client_preset="custom" 时生效。
+    # 格式: [{"name":"X-Foo","value":"bar"},{"name":"X-Request-ID","value":"{{uuid}}"}]
+    # （v009 新增列）。选预设时此字段不使用但保留值, 方便来回切换不丢失。
+    custom_headers: str = ""
     id: int | None = None
     created_at: int | None = None
     updated_at: int | None = None
@@ -48,11 +55,13 @@ class Model:
 
 # 列顺序：id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,
 #         protocol,anthropic_version,max_tokens_default,upstream_path_override,
-#         is_fallback,aliases,capabilities,upstream_mode,created_at,updated_at
+#         is_fallback,aliases,capabilities,upstream_mode,client_preset,custom_headers,
+#         created_at,updated_at
 _COLS = (
     "id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,"
     "protocol,anthropic_version,max_tokens_default,upstream_path_override,"
-    "is_fallback,aliases,capabilities,upstream_mode,created_at,updated_at"
+    "is_fallback,aliases,capabilities,upstream_mode,client_preset,custom_headers,"
+    "created_at,updated_at"
 )
 
 
@@ -74,16 +83,18 @@ def _row(r: tuple) -> Model:
         aliases=r[13] if len(r) > 13 and r[13] else "",
         capabilities=r[14] if len(r) > 14 and r[14] else "",
         upstream_mode=r[15] if len(r) > 15 and r[15] else "bonded",
-        created_at=r[16] if len(r) > 16 else None,
-        updated_at=r[17] if len(r) > 17 else None,
+        client_preset=r[16] if len(r) > 16 and r[16] else "",
+        custom_headers=r[17] if len(r) > 17 and r[17] else "",
+        created_at=r[18] if len(r) > 18 else None,
+        updated_at=r[19] if len(r) > 19 else None,
     )
 
 
 async def create_model(s: Store, m: Model) -> Model:
     now = Store.now()
     m.id = await s.execute(
-        """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, capabilities, upstream_mode, created_at, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, capabilities, upstream_mode, client_preset, custom_headers, created_at, updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             m.name,
             m.upstream_base,
@@ -100,6 +111,8 @@ async def create_model(s: Store, m: Model) -> Model:
             m.aliases,
             getattr(m, "capabilities", ""),
             getattr(m, "upstream_mode", "bonded"),
+            getattr(m, "client_preset", ""),
+            getattr(m, "custom_headers", ""),
             now,
             now,
         ),
@@ -133,7 +146,7 @@ async def list_models(s: Store) -> list[Model]:
 async def update_model(s: Store, model_id: int, m: Model) -> None:
     now = Store.now()
     await s.execute(
-        """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, protocol=?, anthropic_version=?, max_tokens_default=?, upstream_path_override=?, is_fallback=?, aliases=?, capabilities=?, upstream_mode=?, updated_at=? WHERE id=?""",
+        """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, protocol=?, anthropic_version=?, max_tokens_default=?, upstream_path_override=?, is_fallback=?, aliases=?, capabilities=?, upstream_mode=?, client_preset=?, custom_headers=?, updated_at=? WHERE id=?""",
         (
             m.name,
             m.upstream_base,
@@ -150,6 +163,8 @@ async def update_model(s: Store, model_id: int, m: Model) -> None:
             m.aliases,
             getattr(m, "capabilities", ""),
             getattr(m, "upstream_mode", "bonded"),
+            getattr(m, "client_preset", ""),
+            getattr(m, "custom_headers", ""),
             now,
             model_id,
         ),
