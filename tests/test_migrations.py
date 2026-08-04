@@ -53,10 +53,10 @@ def test_migrations_apply_in_order(tmp_db):
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         rows = _run(db.execute_fetchall("SELECT version FROM schema_migrations ORDER BY version"))
         names = _run(db.execute_fetchall("SELECT name FROM schema_migrations ORDER BY version"))
-        assert [v for v, in rows] == [1, 3, 4, 5, 6, 7]
+        assert [v for v, in rows] == [1, 3, 4, 5, 6, 7, 8]
         assert [n for n, in names] == [
             "baseline", "token_hash", "response_store", "model_capabilities",
-            "tool_executions", "schema_realign",
+            "tool_executions", "schema_realign", "route_bindings",
         ]
     finally:
         _run(db.close())
@@ -286,11 +286,11 @@ _LEGACY_V004_SQLITE: tuple[str, ...] = (
 _LEGACY_V004_DIGEST = "5e883f07f89feeb0ab6f32a4d7a91da70a792eedc91c26e3e461d70ca5427a8f"
 
 #: v004 当前形态应当存在的全部业务表（``background_tasks`` 是保留的废弃表，
-#: 不在此列）。
+#: 不在此列）。``route_bindings`` 由 v008 新增（T35 / R-P1-61）。
 _EXPECTED_TABLES: tuple[str, ...] = (
     "responses", "response_input_items", "response_output_items",
     "response_events", "response_state_chain", "background_jobs",
-    "tool_executions", "idempotency_records",
+    "tool_executions", "idempotency_records", "route_bindings",
 )
 
 #: v004 当前形态的 14 条租户 / TTL 索引。老库上一条都没有，而它们是租户过滤和

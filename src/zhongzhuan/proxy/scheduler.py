@@ -1,7 +1,6 @@
 """Scheduler: pick model / pick key."""
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 
 from .ratelimit import KeyHealth, STATE_HEALTHY, STATE_RATE_LIMITED, STATE_ERROR
@@ -26,6 +25,7 @@ def score(k: KeyHealth) -> float:
     - 兜底降权：is_fallback 的 key 总分 ×fallback_penalty（可配置，默认 0.1）
     - 随机扰动（5%）：避免相同分数时总选同一个
     """
+    import random
     if not k.is_available():
         return -1.0
     total = k.success_count + k.total_failures
@@ -52,7 +52,7 @@ def score(k: KeyHealth) -> float:
         + 0.20 * rpm_factor
         + 0.10 * tpm_factor
         + 0.15 * (1.0 if k.api_key else 0.0)
-        + 0.05 * random.random()
+        + 0.05 * random.random()  # noqa: S311 -- 仅用于分数打散，不参与加权调度
     )
     return base * status_weight * fallback_penalty
 
@@ -100,6 +100,39 @@ class ModelHealth:
 
 _round_robin_counters: dict[int, int] = {}
 
+# --------------------------------------------------------------------------- #
+# Smooth Weighted Round Robin (nginx 同款算法，T35 / R-P1-60)
+# --------------------------------------------------------------------------- #
+# 每个 (group, model) 成员维护 ``current_weight``；每轮先全体 ``+= weight``，
+# 然后选 ``current_weight`` 最大的成员，选中后 ``current_weight -= total``。
+# 与随机抽签的本质区别：**确定性可重放** —— 同一组权重连续调用 N 次，各成员的
+# 选中次数与权重成比例（权重 3:1 时 100 次 ≈ 75:25），且两次连续选中同一成员
+# 的次数有界（≤ 2），这是「平滑」的度量。状态挂在模块级字典上，天然跨调用
+# 累积；测试直接连续调用 ``pick_group_model`` 断言分布即可。
+_swrr_state: dict[int, dict[int, int]] = {}
+
+
+def _swrr_pick(group_id: int, candidates: list[tuple[int, ModelHealth, int]]) -> ModelHealth:
+    """从 ``(model_id, health, weight)`` 候选中做一次平滑加权选择。
+
+    *weight* 取 ``weight * weight_penalty`` 后的整数权重（下取整、至少 1），
+    保证全正权重下 ``total > 0`` 恒成立。
+    """
+    state = _swrr_state.setdefault(group_id, {})
+    for mid, _h, _w in candidates:
+        state[mid] = state.get(mid, 0) + _w
+    best_mid = max(candidates, key=lambda c: state[c[0]])[0]
+    total = sum(c[2] for c in candidates)
+    state[best_mid] -= total
+    # 清理不再属于本组的成员状态，防止已删除成员 / 不可用成员泄漏
+    for mid in list(state):
+        if mid not in {c[0] for c in candidates}:
+            del state[mid]
+    for mid, h, _w in candidates:
+        if mid == best_mid:
+            return h
+    return candidates[0][1]
+
 
 def pick_group_model(
     g: Group,
@@ -110,6 +143,7 @@ def pick_group_model(
     if not members:
         # 清理已删除 group 的计数器（优化点7：防止内存泄漏）
         _round_robin_counters.pop(g.id, None)
+        _swrr_state.pop(g.id, None)
         return None
     if g.strategy == "failover":
         for m in sorted(members, key=lambda x: x.ord):
@@ -136,20 +170,15 @@ def pick_group_model(
         _round_robin_counters[g.id] = idx + 1
         return candidates[idx]
     if g.strategy == "weighted":
-        weights: list[tuple[ModelHealth, float]] = []
+        weights: list[tuple[int, ModelHealth, int]] = []
         for m in members:
             h = models.get(m.model_id)
             if h and h.available:
-                weights.append((h, m.weight * h.weight_penalty))
+                # 权重 × 健康惩罚折算后四舍五入取整（≥1）：0.5 惩罚下 3→1.5→2，
+                # 若下取整会退化成 1 抹掉差异。
+                w = max(1, int(m.weight * h.weight_penalty + 0.5))
+                weights.append((m.model_id, h, w))
         if not weights:
             return None
-        total = sum(w for _, w in weights)
-        if total <= 0:
-            return weights[0][0]
-        pick = random.random() * total
-        for h, w in weights:
-            pick -= w
-            if pick < 0:
-                return h
-        return weights[-1][0]
+        return _swrr_pick(g.id, weights)
     return None

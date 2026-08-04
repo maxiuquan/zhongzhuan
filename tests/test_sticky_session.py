@@ -65,7 +65,11 @@ class TestSessionKeyExtraction:
         assert key == "hdr:first"
 
     def test_messages_hash_fallback(self):
-        """无 header 时从 messages 哈希生成会话指纹。"""
+        """无 header 时从 messages 首轮稳定指纹生成会话指纹（T35 / R-P1-61）。
+
+        用**第一条 user 消息**的归一化指纹（``fp:`` 前缀），而不是滚动消息
+        尾部 —— 这样多轮会话的 fingerprint 恒定，粘性路由才能持续命中同一 key。
+        """
         req = _make_request()
         body = {
             "messages": [
@@ -74,7 +78,7 @@ class TestSessionKeyExtraction:
             ]
         }
         key = ProxyHandler._session_key(req, body)
-        assert key.startswith("conv:")
+        assert key.startswith("fp:")
         assert len(key) > 10  # SHA-256 前 16 字符
 
     def test_messages_hash_stable(self):
@@ -91,12 +95,89 @@ class TestSessionKeyExtraction:
         key2 = ProxyHandler._session_key(req2, body)
         assert key1 == key2
 
-    def test_single_message_returns_empty(self):
-        """只有一条消息时不生成会话指纹（无法区分多轮）。"""
+    def test_single_message_returns_fingerprint(self):
+        """只有一条消息也能生成首轮稳定指纹（T35 / R-P1-61 判据③）。
+
+        旧行为「只有一条消息不生成指纹」基于「滚动尾部需要 ≥2 条」的假设；
+        首轮指纹取第一条 user 消息，单条消息天然就是首轮，因此可以生成指纹。
+        """
         req = _make_request()
         body = {"messages": [{"role": "user", "content": "Hello"}]}
         key = ProxyHandler._session_key(req, body)
-        assert key == ""
+        assert key.startswith("fp:")
+
+    def test_first_turn_fingerprint_stable_across_turns(self):
+        """10 轮会话内容各异，但 fingerprint 恒定（T35 / R-P1-61 判据③）。
+
+        只要第一条 user 消息不变，后续追加的 assistant/user 轮次都不影响指纹。
+        """
+        req = _make_request()
+        first = ProxyHandler._session_key(req, {
+            "messages": [
+                {"role": "user", "content": "帮我写一个冒泡排序"},
+                {"role": "assistant", "content": "好的"},
+            ]
+        })
+        for i in range(10):
+            body = {
+                "messages": [
+                    {"role": "user", "content": "帮我写一个冒泡排序"},
+                    {"role": "assistant", "content": f"第 {i} 轮回复"},
+                    {"role": "user", "content": f"继续优化第 {i} 轮"},
+                ]
+            }
+            assert ProxyHandler._session_key(req, body) == first
+
+    def test_reasoning_does_not_affect_fingerprint(self):
+        """reasoning 内容不参与指纹计算（T35 / R-P0-14 判据④）。
+
+        两条仅 reasoning 不同的请求，fingerprint 必须相同。
+        """
+        req = _make_request()
+        base = {
+            "messages": [
+                {"role": "user", "content": "你好"},
+                {"role": "assistant", "content": "回复", "reasoning": "思考过程A"},
+            ]
+        }
+        other = {
+            "messages": [
+                {"role": "user", "content": "你好"},
+                {"role": "assistant", "content": "回复", "reasoning": "完全不同的思考过程B"},
+            ]
+        }
+        assert ProxyHandler._session_key(req, base) == ProxyHandler._session_key(req, other)
+
+    def test_input_reasoning_items_skipped(self):
+        """Responses 输入里 ``role=reasoning`` 的项被跳过（R-P0-14）。"""
+        req = _make_request()
+        key1 = ProxyHandler._session_key(req, {
+            "input": [
+                {"role": "user", "content": "你好"},
+                {"role": "reasoning", "content": "推理内容A"},
+            ]
+        })
+        key2 = ProxyHandler._session_key(req, {
+            "input": [
+                {"role": "user", "content": "你好"},
+                {"role": "reasoning", "content": "推理内容B"},
+            ]
+        })
+        assert key1 == key2
+
+    def test_conversation_field_priority(self):
+        """显式 conversation / previous_response_id 优先于首轮指纹（R-P1-61）。"""
+        req = _make_request()
+        body = {
+            "conversation": "conv_abc",
+            "input": [{"role": "user", "content": "你好"}],
+        }
+        assert ProxyHandler._session_key(req, body) == "id:conv_abc"
+        body2 = {
+            "previous_response_id": "resp_123",
+            "input": [{"role": "user", "content": "你好"}],
+        }
+        assert ProxyHandler._session_key(req, body2) == "id:resp_123"
 
     def test_no_messages_returns_empty(self):
         req = _make_request()

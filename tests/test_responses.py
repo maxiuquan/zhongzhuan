@@ -391,6 +391,8 @@ class TestStreaming:
 
         Without this the sticky-session fingerprint is empty and multi-turn
         Codex conversations get scattered across different upstream keys.
+        T35 / R-P1-61：改用**首轮稳定指纹**（第一条 user 消息，``fp:`` 前缀），
+        而不是滚动消息尾部（``conv:``）。
         """
         from zhongzhuan.proxy.handler import ProxyHandler
 
@@ -405,7 +407,7 @@ class TestStreaming:
             ],
         }
         key = ProxyHandler._session_key(_Req(), body)
-        assert key.startswith("conv:")
+        assert key.startswith("fp:")
         # Same conversation -> same key (stable routing).
         assert key == ProxyHandler._session_key(_Req(), body)
 

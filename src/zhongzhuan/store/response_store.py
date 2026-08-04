@@ -348,6 +348,98 @@ class ResponseStore:
         )
         return tuple(row) if row is not None else None  # type: ignore[return-value]
 
+    # -- route bindings (T35 / R-P1-61) --------------------------------------
+
+    async def upsert_route_binding(
+        self,
+        *,
+        session_key: str,
+        key_id: int,
+        capabilities: frozenset[str] | set[str] | None = None,
+        workspace_id: str = "",
+        expires_at: int = 0,
+    ) -> None:
+        """Persist a session→route binding.
+
+        ``INSERT OR REPLACE`` (SQLite) / ``REPLACE INTO`` (MySQL / TiDB) share
+        one upsert path on both backends; on conflict the old row is replaced,
+        which **resets the failover counters** -- the semantics of a freshly
+        confirmed healthy binding (a successful response re-pins this key).
+        ``expires_at=0`` means "no TTL".
+        """
+        now = int(time.time())
+        caps = sorted(str(c) for c in (capabilities or ()))
+        await self._store.execute(
+            "INSERT OR REPLACE INTO route_bindings ("
+            " session_key, key_id, capabilities, workspace_id,"
+            " created_at, updated_at, expires_at,"
+            " failover_count, last_failover_reason"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, 0, '')",
+            (
+                session_key, key_id, _dumps(caps), workspace_id,
+                now, now, int(expires_at),
+            ),
+        )
+
+    async def get_route_binding(
+        self, session_key: str, *, workspace_id: str = "",
+    ) -> dict[str, Any] | None:
+        """Return the persisted binding, or ``None``.
+
+        The TTL is enforced here: expired rows are lazily deleted and reported
+        as absent (matching the in-memory sticky dictionary semantics).
+        """
+        row = await self._store.fetchone(
+            "SELECT * FROM route_bindings WHERE session_key = ?",
+            (session_key,),
+        )
+        if row is None:
+            return None
+        rec = self._route_binding_to_dict(row)
+        if rec["expires_at"] and int(time.time()) > rec["expires_at"]:
+            await self._store.execute(
+                "DELETE FROM route_bindings WHERE session_key = ?", (session_key,),
+            )
+            return None
+        if workspace_id and rec["workspace_id"] and rec["workspace_id"] != workspace_id:
+            # 租户隔离：其他 workspace 的 binding 视为不存在，但保留（不越权删别人的行）。
+            return None
+        return rec
+
+    async def record_binding_failover(
+        self, session_key: str, *, reason: str = "", workspace_id: str = "",
+    ) -> None:
+        """Append one failover event to a binding (R-P1-61 故障迁移记录).
+
+        Called when a sticky key was rejected (health / capability mismatch)
+        and the request was routed elsewhere.  ``failover_count`` bumps and the
+        reason is recorded; the row itself is left for the scheduler to
+        re-bind on the next successful response.
+        """
+        now = int(time.time())
+        await self._store.execute(
+            """UPDATE route_bindings
+               SET failover_count = failover_count + 1,
+                   last_failover_reason = ?,
+                   updated_at = ?
+               WHERE session_key = ?""",
+            (str(reason)[:255], now, session_key),
+        )
+
+    @staticmethod
+    def _route_binding_to_dict(row: tuple) -> dict[str, Any]:
+        return {
+            "session_key": str(row[0]),
+            "key_id": int(row[1]),
+            "capabilities": _loads(row[2], []),
+            "workspace_id": str(row[3]),
+            "created_at": int(row[4]),
+            "updated_at": int(row[5]),
+            "expires_at": int(row[6]),
+            "failover_count": int(row[7]),
+            "last_failover_reason": str(row[8]),
+        }
+
     # -- helpers -------------------------------------------------------------
 
     @staticmethod

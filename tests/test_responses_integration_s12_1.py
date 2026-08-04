@@ -265,10 +265,11 @@ def test_s12_02_reasoning_not_in_session_hash():
             assert "encrypted_content" not in it.payload
 
     # ② 指纹稳定：reasoning 内容不同（剔除后同一可见消息集）→ 同一 session key。
+    #   T35 / R-P1-61：首轮稳定指纹用 ``fp:`` 前缀（不再是滚动尾部的 ``conv:``）。
     key_a = ProxyHandler._session_key(_Req(), {"model": "m", "input": _clean_input(input_a)})
     key_b = ProxyHandler._session_key(_Req(), {"model": "m", "input": _clean_input(input_b)})
     key_base = ProxyHandler._session_key(_Req(), {"model": "m", "input": base})
-    assert key_a.startswith("conv:")
+    assert key_a.startswith("fp:")
     assert key_a == key_b == key_base
 
 

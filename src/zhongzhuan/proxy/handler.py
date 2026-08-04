@@ -127,7 +127,20 @@ class ProxyHandler:
         # conversations on the same upstream key to avoid mid-conversation
         # model switches that cause hallucination spikes.
         self._sticky: dict[str, tuple[int, float]] = {}
+        #: session_key → capabilities snapshot at bind time (T35 / R-P1-61).
+        #: Kept separate from ``_sticky`` so the existing two-tuple layout stays
+        #: intact (existing tests write ``_sticky[s] = (key_id, expire_at)``).
+        self._sticky_caps: dict[str, frozenset[str]] = {}
+        #: session_key → failover reason, flushed to the store by the caller
+        #: (T35 / R-P1-61 故障迁移记录). Populated when a sticky key is
+        #: rejected for health / capability mismatch.
+        self._binding_failover_reasons: dict[str, str] = {}
         self._sticky_ttl: float = sticky_ttl
+        #: Lazy ResponseStore for session→route binding persistence.
+        self._rs = None
+        #: Injectable clock (T35): tests swap in a FakeClock to avoid real
+        #: waits when exercising the sticky TTL.
+        self._now = time.time
         # 后台任务引用（优化点4+5：sticky 清理 + 健康状态快照）
         self._bg_tasks: list[asyncio.Task] = []
         self._bg_running = False
@@ -180,50 +193,217 @@ class ProxyHandler:
     # ---- Sticky session helpers ----
 
     @staticmethod
-    def _session_key(request: web.Request, body_obj: dict | None) -> str:
-        """Extract a conversation fingerprint for sticky routing.
+    def _stable_fingerprint(body_obj: dict | None) -> str:
+        """首轮稳定指纹（T35 / R-P1-61）。
 
-        Priority:
+        R-P0-14 / R-P1-61 要求：**不用滚动消息尾部**做指纹 —— 每一轮
+        ``messages[-3:]`` 的内容都在变，同一会话每轮 hash 都不同，粘性路由
+        永远落不到同一个 key。改用**会话第一条 user 消息**的归一化指纹
+        （sha256 前 16 位）：只要会话的第一条 user 消息不变，后续无论追加多少
+        轮次，指纹都恒定。
+
+        **reasoning 内容绝不参与指纹计算**（R-P0-14）：消息对象里的
+        ``reasoning`` 字段、以及 ``role=reasoning`` 的输入项一律跳过，只取
+        首条 ``role=user`` 的文本内容。
+
+        Returns:
+            ``"fp:<hex>"`` 形式的指纹；无法提取到首条 user 消息时返回 ``""``。
+        """
+        msgs = body_obj.get("messages") if body_obj else None
+        if msgs is None and body_obj:
+            # Responses API (Codex) 把对话放在 `input`（OpenAI messages 数组形态）。
+            msgs = body_obj.get("input")
+        if not isinstance(msgs, (list, tuple)):
+            return ""
+        for msg in msgs:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "")
+            item_type = str(msg.get("type") or "")
+            if role == "reasoning" or item_type == "reasoning":
+                # R-P0-14：reasoning 项绝不进入指纹（Responses 项可能只有
+                # ``type: "reasoning"`` 而没有 ``role``）。
+                continue
+            if role != "user":
+                continue
+            content = msg.get("content")
+            if content is None:
+                continue
+            text = content if isinstance(content, str) else json.dumps(
+                content, ensure_ascii=False, sort_keys=True,
+            )
+            text = text.strip()
+            if not text:
+                continue
+            import hashlib
+            return "fp:" + hashlib.sha256(text.encode()).hexdigest()[:16]
+        return ""
+
+    @staticmethod
+    def _session_key(request: web.Request, body_obj: dict | None) -> str:
+        """Extract a conversation fingerprint for sticky routing (T35).
+
+        Priority (R-P1-61):
         1. Explicit header: x-session-id / x-zhongzhuan-session / x-request-id
-        2. Hash of the last few messages (stable across multi-turn conversations)
+        2. Explicit body id: ``conversation`` (Responses API) /
+           ``previous_response_id`` (Responses chain)
+        3. First-turn stable fingerprint (first user message, reasoning
+           excluded) instead of the rolling message tail.
+
         Returns "" if no stable identifier can be derived.
         """
         for h in ("x-session-id", "x-zhongzhuan-session", "x-request-id"):
             v = request.headers.get(h)
             if v:
                 return f"hdr:{v}"
-        msgs = body_obj.get("messages") if body_obj else None
-        if msgs is None and body_obj:
-            # Responses API (Codex) carries the conversation in `input`.
-            msgs = body_obj.get("input")
-        if isinstance(msgs, list) and len(msgs) >= 2:
-            import hashlib
-            snippet = json.dumps(msgs[-3:], ensure_ascii=False, sort_keys=True)
-            return "conv:" + hashlib.sha256(snippet.encode()).hexdigest()[:16]
-        return ""
+        if body_obj:
+            for field in ("conversation", "previous_response_id"):
+                v = body_obj.get(field)
+                if isinstance(v, str) and v.strip():
+                    return f"id:{v.strip()}"
+        return ProxyHandler._stable_fingerprint(body_obj)
 
-    def _get_sticky_key(self, session_key: str, candidates: list[KeyHealth]) -> KeyHealth | None:
-        """Return the sticky key for this session if still valid and available."""
+    @staticmethod
+    def _required_capabilities(body_obj: dict | None) -> frozenset[str]:
+        """从请求体提取「本请求所需能力」集合（T35 / R-P1-60 判据⑥）。
+
+        Responses API 的 hosted tool 通过 ``tools[N].type`` 声明能力；请求侧
+        ``metadata`` / ``instructions`` 里的 ``stateful_responses`` 与
+        ``background`` 也计为所需能力。只读一次，无副作用；非 Responses 请求
+        返回空集（空集视为「无能力要求」，任何绑定都兼容）。
+        """
+        if not body_obj:
+            return frozenset()
+        req: set[str] = set()
+        tools = body_obj.get("tools")
+        if isinstance(tools, (list, tuple)):
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                tool_type = str(tool.get("type") or "").strip()
+                if not tool_type:
+                    continue
+                # 仅统计 hosted tool（R-P1-60）：普通 function tool 不需要能力承载。
+                from .protocol.responses_models import HOSTED_TOOL_CAPABILITY
+                cap = HOSTED_TOOL_CAPABILITY.get(tool_type)
+                if cap is not None:
+                    req.add(cap.value)
+        if body_obj.get("background"):
+            req.add("background")
+        if body_obj.get("metadata"):
+            md = body_obj["metadata"]
+            if isinstance(md, dict) and md.get("stateful_responses"):
+                req.add("stateful_responses")
+        return frozenset(req)
+
+    def _get_sticky_key(
+        self,
+        session_key: str,
+        candidates: list[KeyHealth],
+        body_obj: dict | None = None,
+    ) -> KeyHealth | None:
+        """Return the sticky key for this session if still valid, healthy and
+        capability-compatible (T35 / R-P1-60 判据⑥).
+
+        Checks in order:
+        1. TTL not expired (clock is injectable via ``self._now``).
+        2. The bound key is still in ``candidates`` **and** ``is_available()``.
+        3. **Capability compatibility** (新增，判据⑥): the capabilities
+           recorded at bind time must be a superset of what this request needs.
+           A mismatch invalidates the binding, records the failover reason and
+           returns ``None`` so the scheduler routes elsewhere.
+        """
         entry = self._sticky.get(session_key)
         if entry is None:
             return None
         key_id, expire_at = entry
-        if time.time() > expire_at:
+        if self._now() > expire_at:
             self._sticky.pop(session_key, None)
+            self._sticky_caps.pop(session_key, None)
             return None
         for k in candidates:
             if k.key_id == key_id and k.is_available():
+                # 判据⑥：能力兼容校验 —— sticky 只在选定模型健康**且**能力兼容时生效。
+                bound_caps = self._sticky_caps.get(session_key, frozenset())
+                required = self._required_capabilities(body_obj)
+                if required and bound_caps and not (required <= bound_caps):
+                    reason = (
+                        f"capability mismatch: required={sorted(required)} "
+                        f"bound={sorted(bound_caps)}"
+                    )
+                    self._binding_failover_reasons[session_key] = reason
+                    return None
                 return k
         return None
 
-    def _set_sticky(self, session_key: str, key_id: int) -> None:
+    def _set_sticky(self, session_key: str, key_id: int, caps: frozenset[str] | None = None) -> None:
         """Record a successful key for this session."""
         if session_key:
-            self._sticky[session_key] = (key_id, time.time() + self._sticky_ttl)
+            self._sticky[session_key] = (key_id, self._now() + self._sticky_ttl)
+            if caps is not None:
+                self._sticky_caps[session_key] = caps
             # Opportunistic cleanup: drop expired entries occasionally
             if len(self._sticky) > 256:
-                now = time.time()
+                now = self._now()
                 self._sticky = {k: v for k, v in self._sticky.items() if v[1] > now}
+
+    def _response_store(self):
+        """Lazily build the ResponseStore used for session→route binding (T35)."""
+        if self._rs is None and self.store is not None:
+            from ..store.response_store import ResponseStore
+            self._rs = ResponseStore(self.store)
+        return self._rs
+
+    async def _persist_sticky_failover(self, session_key: str) -> None:
+        """Flush a recorded failover reason to the persisted binding (T35)."""
+        reason = self._binding_failover_reasons.pop(session_key, "")
+        rs = self._response_store()
+        if rs is None or not reason:
+            return
+        try:
+            await rs.record_binding_failover(session_key, reason=reason)
+        except Exception:
+            _lg.exception("record_binding_failover failed")
+
+    async def _restore_sticky_from_store(self, session_key: str) -> None:
+        """Restore an in-memory sticky entry from the persisted binding (T35).
+
+        Called lazily on the first lookup of an unknown session when a store is
+        present, so process restarts keep the sticky continuity promise of
+        R-P1-61.  The binding's TTL is enforced by the store; an expired or
+        foreign-workspace binding returns ``None`` and is simply ignored.
+        """
+        rs = self._response_store()
+        if rs is None or not session_key or session_key in self._sticky:
+            return
+        try:
+            rec = await rs.get_route_binding(session_key)
+        except Exception:
+            _lg.exception("get_route_binding failed")
+            return
+        if rec is None:
+            return
+        self._sticky[session_key] = (rec["key_id"], self._now() + self._sticky_ttl)
+        caps = frozenset(str(c) for c in (rec.get("capabilities") or ()))
+        if caps:
+            self._sticky_caps[session_key] = caps
+
+    async def _persist_sticky_binding(
+        self, session_key: str, key_id: int, caps: frozenset[str],
+    ) -> None:
+        """Persist a session→route binding to the ResponseStore (T35 / R-P1-61)."""
+        rs = self._response_store()
+        if rs is None or not session_key:
+            return
+        try:
+            await rs.upsert_route_binding(
+                session_key=session_key,
+                key_id=key_id,
+                capabilities=caps,
+                expires_at=int(self._now() + self._sticky_ttl),
+            )
+        except Exception:
+            _lg.exception("upsert_route_binding failed")
 
     async def reload_keys(self) -> int:
         """Reload keys (and groups) from the store. Returns new key count.
@@ -430,7 +610,12 @@ class ProxyHandler:
             while True:
                 # First attempt: prefer the sticky session key (multi-turn continuity)
                 if session_key and not tried:
-                    sticky_k = self._get_sticky_key(session_key, candidates)
+                    # T35：进程重启后从 ResponseStore 恢复 binding，保持粘性连续性。
+                    await self._restore_sticky_from_store(session_key)
+                    sticky_k = self._get_sticky_key(session_key, candidates, body_obj)
+                    if sticky_k is None and session_key in self._binding_failover_reasons:
+                        # 判据⑥：sticky key 因健康/能力不兼容被拒 → 记录故障迁移
+                        await self._persist_sticky_failover(session_key)
                     k = sticky_k if sticky_k is not None else pick_key(
                         [x for x in candidates if x.key_id not in tried]
                     )
@@ -687,7 +872,12 @@ class ProxyHandler:
 
                 # Sticky session: remember which key served this conversation
                 if session_key:
-                    self._set_sticky(session_key, k.key_id)
+                    caps = self._required_capabilities(body_obj)
+                    self._set_sticky(session_key, k.key_id, caps)
+                    # T35 / R-P1-61 判据⑤：ResponseStore 持久化 session→route binding。
+                    asyncio.create_task(
+                        self._persist_sticky_binding(session_key, k.key_id, caps)
+                    )
 
                 # Log successful request asynchronously（含 token 用量 + 配额扣减 + 成本）
                 if self.store:
@@ -782,7 +972,14 @@ class ProxyHandler:
                 for _ in range(len(candidates)):
                     # First attempt in each round: prefer sticky session key
                     if session_key and not tried:
-                        sticky_k = self._get_sticky_key(session_key, candidates)
+                        # T35：进程重启后从 ResponseStore 恢复 binding，保持粘性连续性。
+                        await self._restore_sticky_from_store(session_key)
+                        sticky_k = self._get_sticky_key(
+                            session_key, candidates, body_obj or {},
+                        )
+                        if sticky_k is None and session_key in self._binding_failover_reasons:
+                            # 判据⑥：sticky key 因健康/能力不兼容被拒 → 记录故障迁移
+                            await self._persist_sticky_failover(session_key)
                         k = sticky_k if sticky_k is not None else pick_key(
                             [x for x in candidates if x.key_id not in tried]
                         )
@@ -987,7 +1184,12 @@ class ProxyHandler:
 
                             # Sticky session: remember which key served this conversation
                             if session_key:
-                                self._set_sticky(session_key, k.key_id)
+                                caps = self._required_capabilities(body_obj)
+                                self._set_sticky(session_key, k.key_id, caps)
+                                # T35 / R-P1-61 判据⑤：ResponseStore 持久化 binding。
+                                asyncio.create_task(
+                                    self._persist_sticky_binding(session_key, k.key_id, caps)
+                                )
 
                             if self.store:
                                 latency_ms = int((time.time() - _stream_start) * 1000)
