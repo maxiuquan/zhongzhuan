@@ -134,14 +134,14 @@ async def _delete_batched(
             col = id_cols[0]
             sql = (
                 f"DELETE FROM {table} WHERE {col} IN ("
-                f"SELECT {col} FROM (SELECT {col} FROM {table} WHERE {where} LIMIT ?)"
+                f"SELECT {col} FROM (SELECT {col} FROM {table} WHERE {where} LIMIT ?) AS batch"
                 f")"
             )
         else:
             cols = ", ".join(id_cols)
             sql = (
                 f"DELETE FROM {table} WHERE ({cols}) IN ("
-                f"SELECT {cols} FROM (SELECT {cols} FROM {table} WHERE {where} LIMIT ?)"
+                f"SELECT {cols} FROM (SELECT {cols} FROM {table} WHERE {where} LIMIT ?) AS batch"
                 f")"
             )
         await store.execute(sql, params + (take,))

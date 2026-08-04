@@ -353,3 +353,25 @@ async def test_custom_limits_override_matrix(store):
 
     assert report["request_logs"] == 2  # both older than 7d
     assert await _count(store, "request_logs") == 0
+
+
+# --------------------------------------------------------------------------- #
+# regression: TiDB derived-table alias (MySQL 1248)
+# --------------------------------------------------------------------------- #
+
+
+def test_delete_batched_derived_table_has_alias():
+    """TiDB requires every derived table to have its own alias (ER 1248).
+
+    ``_delete_batched`` builds ``DELETE ... WHERE id IN (SELECT id FROM
+    (SELECT ... LIMIT ?))``.  MySQL / TiDB reject an unaliased derived table;
+    SQLite tolerates it, so this only failed on the production TiDB backend.
+    """
+    import inspect
+
+    from zhongzhuan.store import retention
+
+    src = inspect.getsource(retention._delete_batched)
+    # Both the single-column and composite-key branches must alias the subquery.
+    assert "LIMIT ?) AS batch" in src
+    assert "LIMIT ?)" not in src.replace("LIMIT ?) AS batch", "")
