@@ -78,9 +78,7 @@ def _make_passthrough_app(upstream_base: str):
         resp = web.StreamResponse(
             status=200,
             headers={
-                "Content-Type": (
-                    "text/event-stream" if payload.get("stream") else "application/json"
-                ),
+                "Content-Type": ("text/event-stream" if payload.get("stream") else "application/json"),
                 "Cache-Control": "no-cache",
             },
         )

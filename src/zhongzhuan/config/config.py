@@ -313,9 +313,7 @@ def _strict_env_bool(value: str, *, name: str) -> bool:
         return True
     if normalized in ("0", "false", "no", "off"):
         return False
-    raise ConfigError(
-        f"{name} must be one of 1/true/yes/on or 0/false/no/off, got {value!r}"
-    )
+    raise ConfigError(f"{name} must be one of 1/true/yes/on or 0/false/no/off, got {value!r}")
 
 
 def _env_str_list(value: str | None) -> list[str] | None:

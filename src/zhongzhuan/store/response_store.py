@@ -95,7 +95,7 @@ class ResponseStore:
         await self._store.execute(
             """INSERT INTO responses (
                 response_id, workspace_id, status, model, created_at, updated_at,
-                previous_response_id, background, request, usage
+                previous_response_id, background, request, `usage`
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 response_id,
@@ -141,7 +141,7 @@ class ResponseStore:
         completed_at = now if status in ("completed", "failed", "incomplete", "cancelled") else 0
         await self._store.execute(
             """UPDATE responses SET status = ?, updated_at = ?, completed_at = ?,
-               terminal_reason = ?, incomplete_details = ?, error = ?, usage = ?,
+               terminal_reason = ?, incomplete_details = ?, error = ?, `usage` = ?,
                output = ?
                WHERE response_id = ? AND workspace_id = ?""",
             (

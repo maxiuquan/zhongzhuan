@@ -340,10 +340,7 @@ class ProxyHandler:
             if output:
                 await rs.save_output_items(response_id, output)
         except Exception:
-            _lg.exception(
-                f"[v3] persist terminal {status} for {response_id} failed "
-                f"(workspace={workspace_id!r})"
-            )
+            _lg.exception(f"[v3] persist terminal {status} for {response_id} failed (workspace={workspace_id!r})")
 
     async def _dispatch_v3_create(
         self,
@@ -621,8 +618,7 @@ class ProxyHandler:
         if resp.status_code >= 400:
             should_retry = classify_failure(key, resp.status_code, resp_headers)
             _lg.info(
-                f"[v3] key_id={key.key_id} upstream status={resp.status_code} "
-                f"retry={should_retry} body={data[:300]!r}"
+                f"[v3] key_id={key.key_id} upstream status={resp.status_code} retry={should_retry} body={data[:300]!r}"
             )
             if should_retry:
                 # Single-shot for now: the full scheduler retry loop is the
@@ -1084,10 +1080,7 @@ class ProxyHandler:
         # the *next* Responses request go straight back to v2.
         # ------------------------------------------------------------------
         if inbound_protocol == "responses" and self._v3 is not None:
-            v3_ok = bool(
-                self._feature_flags is None
-                or self._feature_flags.v3_enabled(ctx)
-            )
+            v3_ok = bool(self._feature_flags is None or self._feature_flags.v3_enabled(ctx))
             if v3_ok:
                 # Only CREATE consumes an upstream candidate.  Store-backed
                 # retrieve/delete/cancel/input_items and the honest compact

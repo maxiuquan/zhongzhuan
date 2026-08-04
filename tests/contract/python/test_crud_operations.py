@@ -165,8 +165,7 @@ async def test_input_items_pagination(sdk_env):
     """
     client = sdk_env["client"]
     items = [
-        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": f"m{i}"}]}
-        for i in range(50)
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": f"m{i}"}]} for i in range(50)
     ]
     created = await client.responses.create(model="gpt-4o", input=items)
 

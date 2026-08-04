@@ -57,6 +57,7 @@ test = [
     "hypothesis>=6.98",                             # R-P1-68 SSE 分片属性测试
     "respx>=0.21",                                  # R-P2-19 httpx 层 mock 上游
     "openai>=1.40",                                 # R-P1-49 T37 Python SDK contract tests
+    "psutil>=5.9",                                  # T31 nightly soak RSS sampling
 ]
 lint = ["ruff>=0.4", "mypy>=1.9", "bandit>=1.7", "pip-audit>=2.7"]
 dev = ["zhongzhuan[test,lint,tidb,admin,metrics,mcp]"]

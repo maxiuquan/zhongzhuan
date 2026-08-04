@@ -46,7 +46,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
+          pip install -e ".[dev]"
 
       - name: Run tests (skip live)
         run: python -m pytest tests/ -q -m "not live" --ignore=tests/test_proxy_live.py
@@ -67,7 +67,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] 2>/dev/null || pip install "ruff>=0.4"
+          pip install -e ".[dev]"
       - name: ruff check
         run: python -m ruff check src/zhongzhuan tests/
       - name: ruff format --check
@@ -86,7 +86,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] 2>/dev/null || pip install "mypy>=1.9"
+          pip install -e ".[dev]"
       - name: mypy
         run: python -m mypy src/zhongzhuan
 
@@ -103,11 +103,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
+          pip install -e ".[dev]"
       # --cov-fail-under 取当前实测值（本地 TOTAL 80%）留余量防 PR 波动误红。
       - name: pytest with coverage
-        run: python -m pytest tests/ -q -m "not live" --cov=zhongzhuan \
-          --cov-report=term-missing --cov-fail-under=70
+        run: |
+          python -m pytest tests/ -q -m "not live" --cov=zhongzhuan \
+            --cov-report=term-missing --cov-fail-under=70
 
   # ------------------------------------------------------------------ #
   # 5. hypothesis：Hypothesis 属性测试（T36 / R-P2-13；T31 判据②）
@@ -122,7 +123,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
+          pip install -e ".[dev]"
       - name: Hypothesis property tests
         run: python -m pytest tests/test_responses_integration_property.py -q
 
@@ -139,11 +140,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] 2>/dev/null || pip install "bandit>=1.7" "pip-audit>=2.7"
-      # -ll：仅 High 及以上失败（当前 0 High；Medium 的 B608 是动态表名白名单
+          pip install -e ".[dev]"
+      # -lll：仅 High 严重度失败（当前 0 High；Medium 的 B608 是动态表名白名单
       # 场景的误报倾向项，不阻断——诚实标注：非零 Medium 为存量）。
       - name: bandit security scan
-        run: python -m bandit -ll -r src/zhongzhuan -c pyproject.toml
+        run: python -m bandit -lll -r src/zhongzhuan -c pyproject.toml
       - name: pip-audit dependency vulnerabilities
         run: python -m pip_audit -r requirements.txt --skip-editable
 
@@ -154,7 +155,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        extra: ["", "tidb,admin"]
+        install-spec: [".", ".[tidb,admin]"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -164,7 +165,7 @@ jobs:
         run: |
           python -m venv /tmp/clean && . /tmp/clean/bin/activate
           python -m pip install --upgrade pip
-          pip install ".[${{ matrix.extra }}]"
+          pip install "${{ matrix.install-spec }}"
       - name: Verify import + CLI
         run: |
           . /tmp/clean/bin/activate
@@ -190,7 +191,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
+          pip install -e ".[dev]"
       - name: Run golden baseline tests
         run: python -m pytest tests/test_legacy_golden.py -q -m "golden"
 
@@ -224,7 +225,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] 2>/dev/null || pip install "aiomysql>=0.2"
+          pip install -e ".[dev]"
       - name: Backend matrix tests (SQLite + MySQL/TiDB-compat)
         run: |
           python -m pytest tests/test_backend_matrix.py -q \
@@ -248,7 +249,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
+          pip install -e ".[dev]"
       - name: Lifecycle start/stop + /healthz
         run: python -m pytest tests/test_lifecycle.py -q -m "lifecycle"
 

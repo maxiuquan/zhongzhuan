@@ -36,9 +36,7 @@ def test_hosted_tools_keep_original_index_and_alias_capability():
         "tools[2].type",
         "tools[3].type",
     ]
-    assert request.required_capabilities == frozenset(
-        {Capability.WEB_SEARCH, Capability.CODE_INTERPRETER}
-    )
+    assert request.required_capabilities == frozenset({Capability.WEB_SEARCH, Capability.CODE_INTERPRETER})
 
 
 def test_background_metadata_and_previous_response_are_capabilities():
@@ -50,12 +48,8 @@ def test_background_metadata_and_previous_response_are_capabilities():
 
     request = RequestSanitizer().sanitize(payload)
 
-    assert request.required_capabilities == frozenset(
-        {Capability.BACKGROUND, Capability.STATEFUL_RESPONSES}
-    )
-    assert capability_values(request) == frozenset(
-        {"background", "stateful_responses"}
-    )
+    assert request.required_capabilities == frozenset({Capability.BACKGROUND, Capability.STATEFUL_RESPONSES})
+    assert capability_values(request) == frozenset({"background", "stateful_responses"})
 
 
 def test_capability_booleans_are_strict_and_blank_previous_id_is_ignored():

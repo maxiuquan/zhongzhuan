@@ -417,9 +417,7 @@ class TestStickyCapabilityCheck:
         """Responses chain reference is stateful even without metadata opt-in."""
         handler = _make_handler()
 
-        caps = handler._required_capabilities(
-            {"previous_response_id": "resp_parent"}
-        )
+        caps = handler._required_capabilities({"previous_response_id": "resp_parent"})
 
         assert caps == frozenset({"stateful_responses"})
 

@@ -133,36 +133,52 @@ def _parse_pagination(
         try:
             after = int(raw_after)
         except (TypeError, ValueError):
-            return 0, 0, to_error_object(
-                message=f"invalid 'after' value: {raw_after!r}; expected an integer",
-                code="invalid_request_error",
-                status=400,
-                param="after",
+            return (
+                0,
+                0,
+                to_error_object(
+                    message=f"invalid 'after' value: {raw_after!r}; expected an integer",
+                    code="invalid_request_error",
+                    status=400,
+                    param="after",
+                ),
             )
         if after < -1:
-            return 0, 0, to_error_object(
-                message="'after' must be -1 or a non-negative integer",
-                code="invalid_request_error",
-                status=400,
-                param="after",
+            return (
+                0,
+                0,
+                to_error_object(
+                    message="'after' must be -1 or a non-negative integer",
+                    code="invalid_request_error",
+                    status=400,
+                    param="after",
+                ),
             )
     raw_limit = body.get("limit")
     if raw_limit is not None and raw_limit != "":
         try:
             limit = int(raw_limit)
         except (TypeError, ValueError):
-            return 0, 0, to_error_object(
-                message=f"invalid 'limit' value: {raw_limit!r}; expected an integer",
-                code="invalid_request_error",
-                status=400,
-                param="limit",
+            return (
+                0,
+                0,
+                to_error_object(
+                    message=f"invalid 'limit' value: {raw_limit!r}; expected an integer",
+                    code="invalid_request_error",
+                    status=400,
+                    param="limit",
+                ),
             )
         if limit < 1:
-            return 0, 0, to_error_object(
-                message="'limit' must be a positive integer",
-                code="invalid_request_error",
-                status=400,
-                param="limit",
+            return (
+                0,
+                0,
+                to_error_object(
+                    message="'limit' must be a positive integer",
+                    code="invalid_request_error",
+                    status=400,
+                    param="limit",
+                ),
             )
     return after, limit, None
 

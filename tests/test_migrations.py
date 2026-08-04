@@ -47,6 +47,18 @@ def _executor(path: str):
     return db, SqliteMigrationExecutor(db)
 
 
+def test_mysql_index_ddl_uses_supported_syntax():
+    """MySQL/TiDB rejects SQLite's CREATE INDEX IF NOT EXISTS form."""
+    for migration in MIGRATIONS:
+        statements = migration.mysql_sql + migration.mysql_baseline_sql
+        for sql in statements:
+            normalized = " ".join(sql.upper().split())
+            if normalized.startswith("CREATE INDEX"):
+                assert not normalized.startswith("CREATE INDEX IF NOT EXISTS"), (
+                    f"v{migration.version:03d} contains unsupported MySQL index DDL: {sql}"
+                )
+
+
 def test_migrations_apply_in_order(tmp_db):
     """v001, v003, v004 apply in order; schema_migrations records all."""
     db, ex = _executor(tmp_db)

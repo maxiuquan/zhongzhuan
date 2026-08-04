@@ -152,11 +152,7 @@ class ProxyServer:
         return ResponsesV3Handler(ResponseStore(self.store))
 
     def _available_route_count(self) -> int:
-        return sum(
-            1
-            for k in self._effective_keys
-            if getattr(k, "is_available", lambda: True)()
-        )
+        return sum(1 for k in self._effective_keys if getattr(k, "is_available", lambda: True)())
 
     async def _health_liveness(self, _request: web.Request) -> web.Response:
         from ..observability.health import build_liveness, sanitize_health_payload

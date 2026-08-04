@@ -212,9 +212,7 @@ async def test_v3_create_hosted_tool_no_executor_is_standard_400(astore):
 async def test_v3_upstream_400_passthrough(astore):
     """Upstream 4xx is returned to the client without a fake 200."""
     up = MockUpstream()
-    up.set_behavior(
-        UpstreamBehavior(status=400, error_body=openai_error_json(message="bad input"))
-    )
+    up.set_behavior(UpstreamBehavior(status=400, error_body=openai_error_json(message="bad input")))
     await up.start()
     port, runner, upstream, token = await _start_proxy(up.url, astore)
     try:

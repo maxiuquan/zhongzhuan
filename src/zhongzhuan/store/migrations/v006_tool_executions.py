@@ -111,8 +111,8 @@ MYSQL_ALTERS: tuple[str, ...] = (
     "ALTER TABLE tool_executions ADD COLUMN tool_seq BIGINT NOT NULL DEFAULT -1",
     "ALTER TABLE tool_executions ADD COLUMN tool_type VARCHAR(64) NOT NULL DEFAULT ''",
     "ALTER TABLE tool_executions ADD COLUMN capability VARCHAR(64) NOT NULL DEFAULT ''",
-    "CREATE INDEX IF NOT EXISTS idx_te_seq ON tool_executions(response_id, tool_seq)",
-    "CREATE INDEX IF NOT EXISTS idx_te_approval ON tool_executions(workspace_id, approval)",
+    "CREATE INDEX idx_te_seq ON tool_executions(response_id, tool_seq)",
+    "CREATE INDEX idx_te_approval ON tool_executions(workspace_id, approval)",
 )
 
 

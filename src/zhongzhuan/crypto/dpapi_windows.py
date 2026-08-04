@@ -31,7 +31,7 @@ def dpapi_protect(plaintext: bytes) -> bytes:
         CRYPTPROTECT_UI_FORBIDDEN,
         ctypes.byref(out_blob),
     ):
-        raise OSError(f"CryptProtectData failed: {ctypes.GetLastError()}")
+        raise OSError(f"CryptProtectData failed: {ctypes.get_last_error()}")
     buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
     ctypes.windll.kernel32.LocalFree(out_blob.pbData)
     return b"WIN:" + buf
@@ -55,7 +55,7 @@ def dpapi_unprotect(ciphertext: bytes) -> bytes:
         CRYPTPROTECT_UI_FORBIDDEN,
         ctypes.byref(out_blob),
     ):
-        raise OSError(f"CryptUnprotectData failed: {ctypes.GetLastError()}")
+        raise OSError(f"CryptUnprotectData failed: {ctypes.get_last_error()}")
     buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
     ctypes.windll.kernel32.LocalFree(out_blob.pbData)
     return buf
