@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from aiohttp import web
 
 
@@ -18,7 +20,7 @@ INDEX_HTML = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Zhongzhuan Admin</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<script src="/ui/static/echarts.min.js"></script>
 <style>
 :root{
   --bg:#0d1117; --bg-card:#161b22; --bg-hover:#1c2128; --bg-input:#0d1117;
@@ -1184,5 +1186,7 @@ def mount_ui(app: web.Application, ctx) -> None:
     async def index(_request: web.Request) -> web.Response:
         return web.Response(text=INDEX_HTML, content_type="text/html", charset="utf-8")
 
+    static_dir = Path(__file__).resolve().parent / "static"
+    app.router.add_static("/ui/static/", static_dir)
     app.router.add_get("/", index)
     app.router.add_get("/ui/", index)
