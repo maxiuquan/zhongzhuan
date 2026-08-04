@@ -99,6 +99,7 @@ class _JobRun:
 
     task_id: str
     response_id: str
+    workspace_id: str = ""
     upstream: Any = None
     stopped: bool = False
     cancelled: bool = False
@@ -254,7 +255,12 @@ class BackgroundWorker:
         workspace_id = str(job.get("workspace_id") or "")
         effective = budget or self._budget
 
-        run = _JobRun(task_id=task_id, response_id=response_id, upstream=upstream)
+        run = _JobRun(
+            task_id=task_id,
+            response_id=response_id,
+            workspace_id=workspace_id,
+            upstream=upstream,
+        )
         self._runs[task_id] = run
         ledger = BudgetLedger(effective, started_at=self._clock())
         emitter = ResponsesEventEmitter(response_id=response_id)
@@ -307,7 +313,11 @@ class BackgroundWorker:
         emitter: ResponsesEventEmitter,
     ) -> TerminalReason | None:
         """Stream the job, charging the budget; return the first ceiling hit."""
-        await self._store.update_status(run.response_id, "in_progress")
+        await self._store.update_status(
+            run.response_id,
+            "in_progress",
+            workspace_id=run.workspace_id,
+        )
         # ``start()`` drives the emitter's own created/in_progress pair; the
         # store copies below are what a catch-up reader replays.
         emitter.start()
@@ -487,6 +497,7 @@ class BackgroundWorker:
         await self._store.update_status(
             run.response_id,
             "incomplete",
+            workspace_id=run.workspace_id,
             terminal_reason=reason.value,
             incomplete_details=details,
         )
@@ -511,6 +522,7 @@ class BackgroundWorker:
         await self._store.update_status(
             run.response_id,
             "completed",
+            workspace_id=run.workspace_id,
             terminal_reason=TerminalReason.NORMAL_FINISH.value,
             usage=usage,
         )
@@ -532,6 +544,7 @@ class BackgroundWorker:
         await self._store.update_status(
             run.response_id,
             "cancelled",
+            workspace_id=run.workspace_id,
             terminal_reason=reason,
         )
         emitter.terminate(ResponseStatus.CANCELLED, terminal_reason=reason)
@@ -551,6 +564,7 @@ class BackgroundWorker:
         await self._store.update_status(
             run.response_id,
             "failed",
+            workspace_id=run.workspace_id,
             terminal_reason=TerminalReason.UPSTREAM_ERROR.value,
             error=type(exc).__name__,
         )
@@ -567,9 +581,11 @@ class BackgroundWorker:
         """Mirror a TTL expiry onto the response row + event log."""
         job = await self._jobs.get_job_any_tenant(task_id) or {}
         response_id = str(job.get("response_id") or task_id)
+        workspace_id = str(job.get("workspace_id") or "")
         await self._store.update_status(
             response_id,
             "expired",
+            workspace_id=workspace_id,
             terminal_reason="expired",
         )
         await self._store.append_event(

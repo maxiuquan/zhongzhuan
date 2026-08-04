@@ -53,6 +53,7 @@ async def test_update_status_and_usage(store):
     await rs.update_status(
         "resp_1",
         "completed",
+        workspace_id="t1",
         terminal_reason="normal_finish",
         usage={"prompt_tokens": 10, "completion_tokens": 5},
         output=[{"id": "msg_1", "type": "output_text"}],
@@ -63,6 +64,36 @@ async def test_update_status_and_usage(store):
     assert rec.usage["completion_tokens"] == 5
     assert rec.output[0]["type"] == "output_text"
     assert rec.completed_at > 0
+
+
+@pytest.mark.asyncio
+async def test_update_status_cannot_cross_tenant_boundary(store):
+    rs = ResponseStore(store)
+    await rs.create_response(
+        response_id="resp_tenant_guard",
+        workspace_id="tenant-a",
+        status="in_progress",
+        usage={"input_tokens": 1},
+    )
+
+    await rs.update_status(
+        "resp_tenant_guard",
+        "completed",
+        workspace_id="tenant-b",
+        terminal_reason="normal_finish",
+        usage={"input_tokens": 999},
+        output=[{"type": "message", "content": "cross-tenant"}],
+    )
+
+    rec = await rs.get_response(
+        "resp_tenant_guard",
+        workspace_id="tenant-a",
+    )
+    assert rec is not None
+    assert rec.status == "in_progress"
+    assert rec.terminal_reason == ""
+    assert rec.usage == {"input_tokens": 1}
+    assert rec.output == []
 
 
 @pytest.mark.asyncio

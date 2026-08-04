@@ -143,6 +143,7 @@ async def turn(
         await rs.update_status(
             created["id"],
             "completed",
+            workspace_id=workspace_id,
             output=[reasoning_placeholder("rs_" + created["id"]), assistant_message(answer)],
         )
     return status, created

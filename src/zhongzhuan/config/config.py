@@ -166,6 +166,24 @@ class SecurityConfig:
 
 
 @dataclass
+class ResponsesRolloutConfig:
+    """Responses v3 model/group/key 灰度映射（R-P0-25）。"""
+
+    groups: dict[str, bool] = field(default_factory=dict)
+    models: dict[str, bool] = field(default_factory=dict)
+    keys: dict[int, bool] = field(default_factory=dict)
+
+
+@dataclass
+class ResponsesBridgeConfig:
+    """Responses v3 bridge 总开关与灰度配置。"""
+
+    version: str = "v3"
+    enabled: bool = True
+    rollout: ResponsesRolloutConfig = field(default_factory=ResponsesRolloutConfig)
+
+
+@dataclass
 class Config:
     env: str = "development"
     server: ServerConfig = field(default_factory=ServerConfig)
@@ -177,6 +195,7 @@ class Config:
     cors: CorsConfig = field(default_factory=CorsConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    responses_bridge: ResponsesBridgeConfig = field(default_factory=ResponsesBridgeConfig)
     # Six-layer upstream timeout policy (T01).  Built by ``load_config`` from
     # the top level ``timeouts:`` YAML section + ZHONGZHUAN_TIMEOUT_* env vars.
     timeouts: TimeoutPolicy = field(default_factory=TimeoutPolicy)
@@ -256,6 +275,15 @@ def _schema_to_config(s: StrictConfig) -> Config:
             login_rate_limit_max=s.security.login_rate_limit_max,
             login_rate_limit_window=s.security.login_rate_limit_window,
         ),
+        responses_bridge=ResponsesBridgeConfig(
+            version=s.responses_bridge.version,
+            enabled=s.responses_bridge.enabled,
+            rollout=ResponsesRolloutConfig(
+                groups=dict(s.responses_bridge.rollout.groups),
+                models=dict(s.responses_bridge.rollout.models),
+                keys=dict(s.responses_bridge.rollout.keys),
+            ),
+        ),
     )
 
 
@@ -276,6 +304,18 @@ def _env_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _strict_env_bool(value: str, *, name: str) -> bool:
+    """Parse an operational boolean without silently treating typos as false."""
+    normalized = value.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(
+        f"{name} must be one of 1/true/yes/on or 0/false/no/off, got {value!r}"
+    )
 
 
 def _env_str_list(value: str | None) -> list[str] | None:
@@ -329,6 +369,22 @@ def _apply_env_overrides(raw: dict, environ: Mapping) -> dict:
         _set_path(raw, "fallback.enabled", v)
     if (v := get("ZHONGZHUAN_CSRF_ENABLED")) is not None:
         _set_path(raw, "security.csrf_enabled", v)
+
+    # T22 / R-P0-25: environment is the global hard override.  Accept the
+    # architecture name and the shorter historic alias, preferring the
+    # namespaced value when both are present.  Unlike legacy boolean knobs,
+    # invalid values abort startup instead of silently disabling the bridge.
+    v3_name = "ZHONGZHUAN_RESPONSES_BRIDGE_V3"
+    v3_raw = get(v3_name)
+    if v3_raw is None:
+        v3_name = "RESPONSES_BRIDGE_V3"
+        v3_raw = get(v3_name)
+    if v3_raw is not None:
+        _set_path(
+            raw,
+            "responses_bridge.enabled",
+            _strict_env_bool(str(v3_raw), name=v3_name),
+        )
 
     return raw
 

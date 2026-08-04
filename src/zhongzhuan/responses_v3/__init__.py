@@ -111,6 +111,7 @@ from .passthrough import (
     PassthroughRequest,
     RecordingTransport,
 )
+from .request_sanitizer import RequestSanitizer, capability_values
 from .schema import to_error_object, to_input_items_list, to_response_object
 
 __all__ = [
@@ -145,6 +146,9 @@ __all__ = [
     "PassthroughRequest",
     "PassthroughPathError",
     "RecordingTransport",
+    # Shared production request facts for capability routing / sticky binding
+    "RequestSanitizer",
+    "capability_values",
     # T26: hosted tool recognition / Q4 error semantics / tool_choice
     "HOSTED_TOOL_TYPES",
     "HostedToolRecognizer",

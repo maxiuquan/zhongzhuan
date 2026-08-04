@@ -100,6 +100,8 @@ ENV_OVERRIDE_PATHS: dict[str, str] = {
     "ZHONGZHUAN_CORS_ALLOW_ORIGINS": "cors.allow_origins",
     "ZHONGZHUAN_FALLBACK_ENABLED": "fallback.enabled",
     "ZHONGZHUAN_CSRF_ENABLED": "security.csrf_enabled",
+    "ZHONGZHUAN_RESPONSES_BRIDGE_V3": "responses_bridge.enabled",
+    "RESPONSES_BRIDGE_V3": "responses_bridge.enabled",
 }
 
 #: Env vars with *side effects* on a config field that isn't named like the var.

@@ -24,16 +24,30 @@ class ProxyServer:
         store: Store | None = None,
         load_keys_fn=None,
         sticky_ttl: float = 1800.0,
+        *,
+        responses_bridge=None,
+        feature_flags=None,
     ) -> None:
         self.upstream_clients = upstream_clients
         self.api_key = api_key
         self.keys = keys or []
+        self._effective_keys = self.keys
         self.proxy_timeout = proxy_timeout
         self.models = models or []
         self.groups = groups or []
         self.store = store
         self.load_keys_fn = load_keys_fn
         self.sticky_ttl = sticky_ttl
+        # T22: Responses v3 bridge wiring.  ``responses_bridge`` is the config
+        # object (``enabled`` + ``rollout``); when omitted the bridge stays
+        # disabled so existing callers (and the store-less setup) are
+        # unaffected.  ``feature_flags`` may be injected directly for tests.
+        self.responses_bridge = responses_bridge
+        if feature_flags is None:
+            from .feature_flags import ResponsesFeatureFlags
+
+            feature_flags = ResponsesFeatureFlags(responses_bridge)
+        self._feature_flags = feature_flags
 
     def app(self) -> web.Application:
         # CORS 中间件在最外层，Gzip 在内层（对非流式 JSON 响应压缩）
@@ -64,6 +78,7 @@ class ProxyServer:
                 )
             ]
 
+        self._effective_keys = the_keys
         handler = make_handler(
             upstream_clients=self.upstream_clients,
             keys=the_keys,
@@ -72,6 +87,8 @@ class ProxyServer:
             load_keys_fn=self.load_keys_fn,
             groups=self.groups,
             sticky_ttl=self.sticky_ttl,
+            feature_flags=self._feature_flags,
+            v3_handler=self._build_v3_handler(),
         )
         #: 供 readiness 检查 handler 的 background worker 生命周期（T33）。
         self._proxy_handler = handler
@@ -86,6 +103,19 @@ class ProxyServer:
         app.on_startup.append(_on_startup)
         app.on_cleanup.append(_on_cleanup)
 
+        # T22 / R-P1-28: the six exact Responses routes MUST be registered
+        # before the ``/v1/{tail:.*}`` catch-all — aiohttp matches routes in
+        # registration order, so a catch-all registered first would swallow
+        # every Responses request.  ``/v1/responses/compact`` must come before
+        # the parameterised ``{response_id}`` routes or it would be captured as
+        # a response id.  All six routes point at the SAME handler (which
+        # contains the single v2/v3 fork point, R-P0-22).
+        app.router.add_post("/v1/responses/compact", handler)
+        app.router.add_post("/v1/responses", handler)
+        app.router.add_get("/v1/responses/{response_id}", handler)
+        app.router.add_delete("/v1/responses/{response_id}", handler)
+        app.router.add_post("/v1/responses/{response_id}/cancel", handler)
+        app.router.add_get("/v1/responses/{response_id}/input_items", handler)
         app.router.add_route("*", "/v1/{tail:.*}", handler)
         # T33 (R-P2-07/08/09)：分层健康检查 + Prometheus /metrics 导出。
         app.router.add_get("/healthz", self._health_liveness)
@@ -102,8 +132,31 @@ class ProxyServer:
     # T33 分层健康检查（R-P2-07/08）
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # T22: Responses v3 handler construction (fail-safe for store-less setups)
+    # ------------------------------------------------------------------
+
+    def _build_v3_handler(self):
+        """Build the store-backed v3 resource handler, or ``None``.
+
+        v3 requires a store (it persists responses / input items / state
+        chains).  When ``store is None`` the bridge is unavailable and every
+        Responses request falls back to the legacy path — a deterministic,
+        testable fail-safe (no half-wired v3 with a ``None`` store).
+        """
+        if self.store is None:
+            return None
+        from ..responses_v3.handler import ResponsesV3Handler
+        from ..store.response_store import ResponseStore
+
+        return ResponsesV3Handler(ResponseStore(self.store))
+
     def _available_route_count(self) -> int:
-        return sum(1 for k in self.keys if getattr(k, "is_available", lambda: True)())
+        return sum(
+            1
+            for k in self._effective_keys
+            if getattr(k, "is_available", lambda: True)()
+        )
 
     async def _health_liveness(self, _request: web.Request) -> web.Response:
         from ..observability.health import build_liveness, sanitize_health_payload

@@ -8,13 +8,14 @@ keep working.
 
 from __future__ import annotations
 
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from aiohttp import web
 from aiohttp.streams import StreamReader
 from aiohttp.test_utils import make_mocked_request
 
+from zhongzhuan.proxy.auth import make_proxy_auth_middleware
 from zhongzhuan.proxy.context import RequestContextBuilder
 from zhongzhuan.proxy.protocol.responses_models import InboundProtocol
 
@@ -46,6 +47,38 @@ async def test_body_parsed_exactly_once():
     assert ctx.body is not None
     assert ctx.body["model"] == "gpt-4o"
     assert m.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_auth_and_context_share_one_json_parse():
+    """Auth quota checks and the handler context consume one cached body."""
+    req = _request(headers={"Authorization": "Bearer access-token"})
+    token = Mock(id=17, quota_tokens=100)
+    token.check_quota.return_value = (True, "")
+    downstream = AsyncMock()
+
+    async def build_context(request):
+        ctx = await RequestContextBuilder().build(request)
+        downstream(ctx)
+        return web.Response(status=204)
+
+    middleware = make_proxy_auth_middleware(Mock())
+    with (
+        patch("zhongzhuan.proxy.auth.proxy_auth_enabled", return_value=True),
+        patch("zhongzhuan.proxy.auth.get_token_by_value", AsyncMock(return_value=token)),
+        patch("zhongzhuan.proxy.context.json.loads", wraps=__import__("json").loads) as loads,
+    ):
+        response = await middleware(req, build_context)
+
+    assert response.status == 204
+    assert loads.call_count == 1
+    assert req["token_id"] == 17
+    ctx = downstream.call_args.args[0]
+    assert ctx.body == {
+        "model": "gpt-4o",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
 
 
 @pytest.mark.asyncio

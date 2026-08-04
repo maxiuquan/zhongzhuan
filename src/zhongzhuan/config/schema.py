@@ -46,6 +46,8 @@ __all__ = [
     "CorsSchema",
     "AuthSchema",
     "SecuritySchema",
+    "ResponsesRolloutSchema",
+    "ResponsesBridgeSchema",
     "StrictConfig",
     "parse_config",
     "filter_unknown_keys",
@@ -246,6 +248,50 @@ class SecuritySchema(BaseModel):
     login_rate_limit_window: Int = Field(300, ge=1, le=86400)
 
 
+class ResponsesRolloutSchema(BaseModel):
+    """Responses v3 四级灰度 rollout 表（R-P0-25 / 架构 §8.1）。
+
+    每个映射的键是 model 名 / group 名 / key_id，值是是否放行；未出现的
+    条目表示“不参与灰度”（即放行，与默认 true 一致，见 §8.2 求值顺序）。
+    ``keys`` 的键是 key_id（int），YAML 里用数字键。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    groups: dict[str, bool] = Field(default_factory=dict)
+    models: dict[str, bool] = Field(default_factory=dict)
+    keys: dict[int, bool] = Field(default_factory=dict)
+
+    @field_validator("groups", "models")
+    @classmethod
+    def _names_not_blank(cls, v: dict[str, bool]) -> dict[str, bool]:
+        for name in v:
+            if not name.strip():
+                raise ValueError("rollout names must not be blank")
+        return v
+
+
+class ResponsesBridgeSchema(BaseModel):
+    """Responses v3 bridge 配置段（D3.1：默认启用；架构 §8.1）。
+
+    作用域仅限 Responses：只影响 ``/v1/responses*`` 请求，绝不触碰
+    Chat / Anthropic 路径（D4 作用域硬约束）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = "v3"
+    enabled: bool = True
+    rollout: ResponsesRolloutSchema = Field(default_factory=ResponsesRolloutSchema)
+
+    @field_validator("version")
+    @classmethod
+    def _version_valid(cls, v: str) -> str:
+        if v.strip() != "v3":
+            raise ValueError("responses_bridge.version must be 'v3'")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Root model
 # ---------------------------------------------------------------------------
@@ -266,6 +312,7 @@ class StrictConfig(BaseModel):
     cors: CorsSchema = Field(default_factory=CorsSchema)
     auth: AuthSchema = Field(default_factory=AuthSchema)  # type: ignore[arg-type]
     security: SecuritySchema = Field(default_factory=SecuritySchema)  # type: ignore[arg-type]
+    responses_bridge: ResponsesBridgeSchema = Field(default_factory=ResponsesBridgeSchema)
     #: Validated separately by ``timeouts.resolve_timeouts`` (T01 hard floors).
     timeouts: dict[str, Any] = Field(default_factory=dict)
 

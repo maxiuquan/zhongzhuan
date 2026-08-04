@@ -413,6 +413,16 @@ class TestStickyCapabilityCheck:
         assert "stateful_responses" in caps
         assert "function" not in caps
 
+    def test_previous_response_id_requires_stateful_capability(self):
+        """Responses chain reference is stateful even without metadata opt-in."""
+        handler = _make_handler()
+
+        caps = handler._required_capabilities(
+            {"previous_response_id": "resp_parent"}
+        )
+
+        assert caps == frozenset({"stateful_responses"})
+
 
 # --------------------------------------------------------------------------- #
 # 判据⑤ 补充：handler 层 binding 持久化链路（store 存在时）

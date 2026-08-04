@@ -287,6 +287,15 @@ client_disconnect_total = Counter(
     "Client disconnects observed (no key-health penalty).",
 )
 
+#: Counter: v3 requests that fell back to the legacy path, by reason
+#: (R-P0-25: ``all_keys_excluded`` when every candidate key is excluded by the
+#: key rollout).  Emitted at the single v2/v3 fork point (T22 / R-P0-22).
+v3_fallback_total = Counter(
+    "responses_v3_fallback_total",
+    "Responses requests that fell back to the legacy v2 path, by reason.",
+    labelnames=("reason",),
+)
+
 
 #: Every §11.1 metric in a stable order (used by :func:`render_metrics`).
 ALL_METRICS: tuple[_BaseMetric, ...] = (
@@ -303,6 +312,7 @@ ALL_METRICS: tuple[_BaseMetric, ...] = (
     stream_duration_seconds,
     heartbeat_total,
     client_disconnect_total,
+    v3_fallback_total,
 )
 
 
@@ -389,6 +399,11 @@ def record_client_disconnect() -> None:
     client_disconnect_total.inc()
 
 
+def record_v3_fallback(reason: str) -> None:
+    """Record one ``responses_v3_fallback_total`` event (T22 fork point)."""
+    v3_fallback_total.inc(reason=reason)
+
+
 def _reason_value(reason: TerminalReason | str) -> str:
     return reason.value if isinstance(reason, TerminalReason) else str(reason)
 
@@ -444,6 +459,7 @@ __all__ = [
     "stream_duration_seconds",
     "heartbeat_total",
     "client_disconnect_total",
+    "v3_fallback_total",
     "ALL_METRICS",
     "render_metrics",
     "reset_metrics",

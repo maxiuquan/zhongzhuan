@@ -14,6 +14,9 @@ from ..store import Store
 from ..store.logs import log_request
 from ..upstream import UpstreamClient
 from ..config.timeouts import DEFAULT_TIMEOUT_POLICY, TimeoutPolicy
+from ..observability.metrics import record_v3_fallback
+from ..responses_v3.capability import CapabilityRouter, StaticRouteRegistry
+from ..responses_v3.request_sanitizer import RequestSanitizer, capability_values
 from .context import RequestContextBuilder
 from .ratelimit import KeyHealth, STATE_HEALTHY
 from .retry import (
@@ -49,11 +52,19 @@ def make_handler(
     groups: list[dict] | None = None,
     sticky_ttl: float = 1800.0,
     timeouts: TimeoutPolicy | None = None,
+    *,
+    feature_flags=None,
+    v3_handler=None,
 ) -> ProxyHandler:
     """Factory: create a ProxyHandler for the aiohttp route.
 
     ``proxy_timeout`` (single float) is the deprecated shape kept for existing
     callers/tests; ``timeouts`` is the six-layer policy introduced by T01.
+
+    ``feature_flags`` / ``v3_handler`` are the T22 Responses v3 wiring: when
+    both are supplied, Responses requests that pass the feature flag are served
+    by the v3 resource handler at the single fork point; otherwise the legacy
+    path is used (R-P0-22).
     """
     return ProxyHandler(
         clients=upstream_clients,
@@ -64,6 +75,8 @@ def make_handler(
         groups=groups,
         sticky_ttl=sticky_ttl,
         timeouts=timeouts,
+        feature_flags=feature_flags,
+        v3_handler=v3_handler,
     )
 
 
@@ -107,10 +120,19 @@ class ProxyHandler:
         groups: list[dict] | None = None,
         sticky_ttl: float = 1800.0,
         timeouts: TimeoutPolicy | None = None,
+        *,
+        feature_flags=None,
+        v3_handler=None,
     ) -> None:
         self._clients = clients
         self._keys = keys
         self.store = store
+        # T22: Responses v3 wiring.  ``_feature_flags`` decides whether a
+        # Responses request is served by ``_v3`` at the single fork point; a
+        # ``None`` v3 handler means v3 is unavailable (e.g. store-less setup)
+        # and every Responses request falls back to the legacy path.
+        self._feature_flags = feature_flags
+        self._v3 = v3_handler
         # Timeout wiring (T01): the six-layer policy wins; the legacy single
         # float is only used when no policy was supplied.
         self._timeouts: TimeoutPolicy | None = timeouts
@@ -120,6 +142,9 @@ class ProxyHandler:
         self._load_keys_fn = load_keys_fn
         # RequestContext building (T02): single-parse preamble.
         self._ctx_builder = RequestContextBuilder()
+        # One lossless v3 fact model per request. Capability routing and sticky
+        # binding consume this same object instead of re-scanning the payload.
+        self._request_sanitizer = RequestSanitizer()
         # Lazy client cache (upstream_base → UpstreamClient)
         self._client_cache: dict[str, UpstreamClient] = dict(clients)
         self._lock = asyncio.Lock()
@@ -197,7 +222,468 @@ class ProxyHandler:
 
         return available
 
-    # ---- Sticky session helpers ----
+    # ------------------------------------------------------------------
+    # T22: Responses v3 HTTP adapter (the only v3 entry point in production).
+    # ------------------------------------------------------------------
+
+    async def _dispatch_v3(self, request: web.Request, ctx) -> web.Response:
+        """Serve a Responses request through the v3 resource handler.
+
+        This is the production adapter that turns a ``web.Request`` into the
+        ``dispatch(method, path, *, workspace_id, body)`` resource call and
+        maps the ``(status, body)`` result back to a ``web.Response``
+        (R-P1-28: six endpoints must be reachable over HTTP, not just from a
+        unit test).
+        """
+        body_obj = ctx.body or {}
+        # GET query params (input_items pagination) are merged into the body so
+        # the resource handler's ``after`` / ``limit`` parsing sees them; the
+        # resource layer rejects invalid values with a standard 400 (T22).
+        query = request.query
+        if query:
+            body_obj = dict(body_obj)
+            for key in ("after", "limit"):
+                if key in query:
+                    body_obj[key] = query[key]
+        # The access-token row is the current tenant boundary.  Anonymous/dev
+        # traffic keeps the historical default workspace; authenticated tokens
+        # are isolated from one another in ResponseStore queries.
+        token_id = int(request.get("token_id", 0) or 0)
+        workspace_id = f"token:{token_id}" if token_id > 0 else ""
+        try:
+            status, payload = await self._v3.dispatch(
+                ctx.method,
+                ctx.path,
+                workspace_id=workspace_id,
+                body=body_obj,
+            )
+        except Exception as exc:  # never leak a traceback to the client
+            _lg.exception(f"[{id(request):x}] v3 dispatch failed: {type(exc).__name__}: {exc}")
+            status, payload = (
+                500,
+                {
+                    "error": {
+                        "message": "internal server error",
+                        "type": "internal_server_error",
+                        "code": "internal_server_error",
+                    }
+                },
+            )
+        return web.json_response(payload, status=status)
+
+    # ------------------------------------------------------------------
+    # T26: v3 create over the real production upstream chain.
+    #
+    # The legacy non-stream path (below) already owns the multi-key
+    # scheduler, sticky binding, health state, retry/failure classification
+    # and the Responses -> Chat/Anthropic translators.  v3 create reuses that
+    # chain instead of building a second transport:
+    #
+    #   1. capability route  -> ExecutionMode + upstream_path (NATIVE/EMULATE/
+    #      TRANSLATE, or a standard 400/503 error);
+    #   2. response_id is minted ONCE here and used by the returned object,
+    #      the persisted row and (in T26 stream) the SSE lifecycle;
+    #   3. the sanitizer's payload becomes the single outbound body source;
+    #   4. on success the row is moved to a terminal state with output/usage
+    #      so retrieve() returns the completed resource (store=true only).
+    # ------------------------------------------------------------------
+
+    def _new_response_id(self) -> str:
+        import uuid
+
+        return "resp_" + uuid.uuid4().hex
+
+    def _v3_workspace_id(self, request: web.Request) -> str:
+        """The access-token row is the current tenant boundary (T22)."""
+        token_id = int(request.get("token_id", 0) or 0)
+        return f"token:{token_id}" if token_id > 0 else ""
+
+    def _capability_router(self, candidates: list[KeyHealth]) -> CapabilityRouter:
+        """One router per create, over the *filtered* candidate pool."""
+        return CapabilityRouter(StaticRouteRegistry(candidates))
+
+    def _v3_response_store(self):
+        rs = self._response_store()
+        if rs is not None:
+            return rs
+        # A store-less setup never reaches here: ``_v3 is None`` short-circuits
+        # the fork before create dispatch.  Defensive fallback to the handler
+        # wiring used by the v3 resource endpoints.
+        if self._v3 is not None and hasattr(self._v3, "_store"):
+            return self._v3._store
+        return None
+
+    async def _persist_v3_terminal(
+        self,
+        *,
+        response_id: str,
+        workspace_id: str,
+        status: str,
+        usage: dict[str, Any] | None = None,
+        output: list[Any] | None = None,
+        terminal_reason: str = "",
+        error: str = "",
+    ) -> None:
+        rs = self._v3_response_store()
+        if rs is None:
+            return
+        try:
+            await rs.update_status(
+                response_id,
+                status,
+                workspace_id=workspace_id,
+                terminal_reason=terminal_reason,
+                error=error,
+                usage=usage or {},
+                output=output or [],
+            )
+            if output:
+                await rs.save_output_items(response_id, output)
+        except Exception:
+            _lg.exception(
+                f"[v3] persist terminal {status} for {response_id} failed "
+                f"(workspace={workspace_id!r})"
+            )
+
+    async def _dispatch_v3_create(
+        self,
+        request: web.Request,
+        ctx,
+        candidates: list[KeyHealth],
+    ) -> web.Response:
+        """Execute one real v3 create against an upstream (T26)."""
+        body_obj = dict(ctx.body or {})
+        workspace_id = self._v3_workspace_id(request)
+        response_id = self._new_response_id()
+
+        # R-P0-29: a chain that cannot be resolved is a standard error, never a
+        # silent stateless turn.  The resource layer owns the guard; we only
+        # let it fail fast before any network I/O.
+        previous_response_id = str(body_obj.get("previous_response_id") or "")
+        if previous_response_id and self._v3 is not None:
+            resolution = await self._v3.resolve_chain(
+                previous_response_id,
+                workspace_id=workspace_id,
+            )
+            if not resolution.ok:
+                from ..responses_v3.chain import chain_error_response
+
+                status, payload = chain_error_response(resolution)
+                return web.json_response(payload, status=status)
+
+        # Capability route over the *filtered* candidate pool.  A hosted tool
+        # with no executor is a standard 400; a declared-but-down route is 503.
+        # Both must be answered BEFORE any streaming response is prepared
+        # (T26: never a fake 200 over a missing executor).
+        sanitized = self._request_sanitizer.sanitize(body_obj)
+        decision = self._capability_router(candidates).route(sanitized, candidates)
+        if hasattr(decision, "to_response"):
+            # CapabilityError: standard 400 (no executor) or 503 (route down).
+            status, payload = decision.to_response()
+            return web.json_response(payload, status=status)
+
+        store_enabled = bool(body_obj.get("store", True))
+        is_stream = bool(body_obj.get("stream", False))
+        now = int(time.time())
+
+        # Persist the skeleton row (store=true only).  The request is redacted
+        # by the resource layer on the write path; here we store the raw
+        # sanitized payload because reasoning text never reached the store in
+        # this path (the sanitizer does not materialise it either).
+        rs = self._v3_response_store()
+        if store_enabled and rs is not None:
+            from ..proxy.protocol.item_registry import parse_input_items, serialize_item
+
+            input_items = [serialize_item(it) for it in parse_input_items(body_obj.get("input"))]
+            stored_request = dict(body_obj)
+            if "input" in stored_request:
+                stored_request["input"] = input_items
+            try:
+                await rs.create_response(
+                    response_id=response_id,
+                    workspace_id=workspace_id,
+                    model=str(body_obj.get("model", "") or ""),
+                    status="in_progress",
+                    previous_response_id=previous_response_id,
+                    background=bool(body_obj.get("background", False)),
+                    request=stored_request,
+                )
+                if input_items:
+                    await rs.save_input_items(response_id, input_items)
+                if previous_response_id:
+                    from ..responses_v3.chain import ChainResolver
+
+                    resolver = ChainResolver(rs)
+                    resolution = await resolver.resolve_chain(previous_response_id, workspace_id)
+                    if resolution.ok:
+                        await rs.save_state_chain(
+                            response_id,
+                            previous_response_id,
+                            resolution.depth + 1,
+                            workspace_id=workspace_id,
+                        )
+            except Exception:
+                _lg.exception(f"[v3] skeleton persist failed for {response_id}")
+                rs = None  # do not fatal the request over a store hiccup
+
+        # Build the outbound body from the sanitizer's payload (single fact
+        # source).  The chain resolution is deliberately NOT injected here:
+        # the legacy translators consume the request body as-is; the v3
+        # chain recovery contract is exercised by the resource layer on
+        # retrieve/input_items.
+        final_body = json.dumps(body_obj, ensure_ascii=False).encode()
+
+        # -- Non-stream create: reuse the production request chain ----------
+        if not is_stream:
+            resp, payload_bytes = await self._run_v3_nonstream(
+                request=request,
+                body_obj=body_obj,
+                final_body=final_body,
+                decision=decision,
+                requested_model=ctx.requested_model or "",
+                inbound_protocol="responses",
+                session_key=self._session_key(request, body_obj),
+                required_caps=capability_values(sanitized),
+            )
+            if resp.status_code >= 400:
+                return web.Response(
+                    status=resp.status_code,
+                    body=payload_bytes,
+                    content_type="application/json",
+                )
+            # Unify the response id: upstream (native or translated) may return
+            # its own; the stored resource must be retrievable under the id we
+            # minted at the fork.
+            try:
+                resp_obj = json.loads(payload_bytes.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                resp_obj = {}
+            if isinstance(resp_obj, dict):
+                resp_obj["id"] = response_id
+                if store_enabled and rs is not None:
+                    usage = resp_obj.get("usage") if isinstance(resp_obj.get("usage"), dict) else {}
+                    output = resp_obj.get("output") if isinstance(resp_obj.get("output"), list) else []
+                    await self._persist_v3_terminal(
+                        response_id=response_id,
+                        workspace_id=workspace_id,
+                        status="completed",
+                        usage=usage,
+                        output=output,
+                    )
+                return web.json_response(resp_obj, status=200)
+
+        # -- Defensive fallback: streamed create stays on the resource
+        # skeleton until the T26 stream pass lands (the fork above already
+        # routes stream=True here through ``_dispatch_v3``; this branch exists
+        # so a direct call with ``stream=True`` cannot fabricate a stream).
+        return await self._dispatch_v3(request, ctx)
+
+    async def _run_v3_nonstream(
+        self,
+        *,
+        request: web.Request,
+        body_obj: dict,
+        final_body: bytes,
+        decision,
+        requested_model: str,
+        inbound_protocol: str,
+        session_key: str,
+        required_caps: frozenset[str],
+    ) -> tuple[Any, bytes]:
+        """Execute one non-stream create against the production upstream chain.
+
+        Reuses the scheduler pick (``decision.key``), health accounting, retry
+        classification and the existing Responses -> Chat/Anthropic translators.
+        Returns ``(httpx.Response, payload_bytes)`` so the caller can inspect
+        the status and unify the response id before sending to the client.
+        """
+        key = decision.key
+        # The capability router already picked a candidate; honour its
+        # NATIVE/TRANSLATE path decision instead of re-deriving from the body.
+        upstream_path = getattr(decision, "upstream_path", "") or ""
+        if not upstream_path:
+            upstream_path = "/v1/responses" if getattr(decision, "is_native", False) else "/v1/chat/completions"
+
+        if key.window is not None and not key.window.allow(1):
+            return _http_json(429, {"error": "all keys exhausted"}), b""
+        key.record_request()
+
+        client = await self._ensure_client(key.upstream_base)
+        if client is None:
+            return _http_json(503, {"error": "no enabled keys"}), b""
+
+        outbound_protocol = key.upstream_protocol
+        need_translation = inbound_protocol != outbound_protocol
+        headers: dict[str, str] = {}
+        for hk, hv in request.headers.items():
+            kl = hk.lower()
+            if kl not in (
+                "host",
+                "connection",
+                "transfer-encoding",
+                "content-length",
+                "content-encoding",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "te",
+                "trailer",
+                "upgrade",
+                "x-forwarded-for",
+                "x-forwarded-proto",
+            ):
+                headers[hk] = hv
+
+        if need_translation:
+            try:
+                cc = convert_responses_request_to_chatcompletions(body_obj)
+            except Exception as exc:
+                _lg.exception(f"[v3] translate request failed: {exc}")
+                return _http_json(500, {"error": "request translation failed"}), b""
+            if outbound_protocol == "anthropic":
+                translated_req = translate_request_o2a(cc, key.anthropic_version)
+                upstream_path = "/v1/messages"
+            else:
+                translated_req = cc
+                upstream_path = "/v1/chat/completions"
+            if isinstance(translated_req, dict):
+                translated_req.pop("stream", None)
+                if key.upstream_model:
+                    translated_req["model"] = key.upstream_model
+            final_body = json.dumps(translated_req, ensure_ascii=False).encode()
+            if outbound_protocol == "anthropic":
+                headers["x-api-key"] = key.api_key
+                headers["anthropic-version"] = key.anthropic_version
+                headers.pop("Authorization", None)
+            else:
+                headers["Authorization"] = f"Bearer {key.api_key}"
+                headers.pop("x-api-key", None)
+                headers.pop("anthropic-version", None)
+            headers["Content-Length"] = str(len(final_body))
+        else:
+            # NATIVE passthrough: only auth + model mapping are touched.
+            if requested_model and key.upstream_model and requested_model != key.upstream_model:
+                body_obj = dict(body_obj)
+                body_obj["model"] = key.upstream_model
+                final_body = json.dumps(body_obj, ensure_ascii=False).encode()
+            headers["Authorization"] = f"Bearer {key.api_key}"
+            headers.pop("x-api-key", None)
+            headers.pop("anthropic-version", None)
+            headers["Content-Length"] = str(len(final_body))
+
+        if key.upstream_path_override:
+            upstream_path = key.upstream_path_override
+
+        try:
+            resp = await client.request(
+                request.method,
+                upstream_path,
+                headers=headers,
+                content=final_body,
+            )
+        except (ConnectionResetError, ConnectionError, OSError) as exc:
+            transport = request.transport
+            if transport is not None and transport.is_closing():
+                return _http_json(499, b"Client Closed Request"), b""
+            _lg.error(f"[v3] key_id={key.key_id} connection error: {type(exc).__name__}: {exc}")
+            mark_network_failure(key)
+            return _http_json(502, {"error": "upstream connection failed"}), b""
+        except Exception as exc:
+            _lg.error(f"[v3] key_id={key.key_id} exception: {type(exc).__name__}: {exc}")
+            mark_network_failure(key)
+            return _http_json(502, {"error": "upstream request failed"}), b""
+
+        data = await resp.aread()
+        resp_headers = dict(resp.headers)
+        resp_headers.pop("content-encoding", None)
+        resp_headers.pop("transfer-encoding", None)
+        resp_headers.pop("content-length", None)
+        content_encoding = resp_headers.get("content-encoding", "").lower()
+        if "gzip" in content_encoding:
+            import gzip
+
+            try:
+                data = gzip.decompress(data)
+            except Exception:
+                pass
+            resp_headers.pop("content-encoding", None)
+
+        if resp.status_code >= 400:
+            should_retry = classify_failure(key, resp.status_code, resp_headers)
+            _lg.info(
+                f"[v3] key_id={key.key_id} upstream status={resp.status_code} "
+                f"retry={should_retry} body={data[:300]!r}"
+            )
+            if should_retry:
+                # Single-shot for now: the full scheduler retry loop is the
+                # T28 pass.  Keep the key healthy for the next request.
+                mark_success(key)
+            result = _V3UpstreamResult(resp.status_code, data)
+            return result, data
+
+        mark_success(key)
+        learn_rate_limits(key, resp_headers, resp.status_code)
+
+        # Record token usage for TPM tracking + quota.
+        try:
+            _resp_obj = json.loads(data.decode("utf-8"))
+            _usage = _resp_obj.get("usage") if isinstance(_resp_obj, dict) else None
+            if isinstance(_usage, dict):
+                _tokens_in = int(_usage.get("prompt_tokens") or _usage.get("input_tokens") or 0)
+                _tokens_out = int(_usage.get("completion_tokens") or _usage.get("output_tokens") or 0)
+                key.record_tokens(_tokens_in, _tokens_out)
+        except (ValueError, TypeError):
+            pass
+
+        # Sticky binding: remember which key served this conversation.
+        if session_key:
+            self._set_sticky(session_key, key.key_id, required_caps)
+            asyncio.create_task(
+                self._persist_sticky_binding(
+                    session_key,
+                    key.key_id,
+                    required_caps,
+                )
+            )
+
+        # Translate the response body if needed (Chat/Anthropic -> Responses).
+        if need_translation:
+            try:
+                resp_data = json.loads(data.decode("utf-8"))
+                cc_resp = (
+                    translate_response_a2o(resp_data, requested_model)
+                    if outbound_protocol == "anthropic"
+                    else resp_data
+                )
+                translated_resp = chatcompletions_to_responses(cc_resp, requested_model)
+                data = json.dumps(translated_resp, ensure_ascii=False).encode()
+            except (json.JSONDecodeError, ValueError) as exc:
+                _lg.warning(f"[v3] failed to translate response: {exc}, returning raw")
+
+        return _V3UpstreamResult(resp.status_code, data), data
+
+    def _filter_v3_candidates(
+        self,
+        candidates: list[KeyHealth],
+        ctx,
+    ) -> list[KeyHealth]:
+        """Apply the key rollout to candidate keys (R-P0-25).
+
+        With no feature flags wired, every candidate passes (backwards
+        compatible).  With flags, only keys that ``v3_key_allowed`` pass;
+        an empty ``keys`` rollout means "allow all" (per the config schema).
+        """
+        if self._feature_flags is None or not candidates:
+            return candidates
+        allowed = []
+        for k in candidates:
+            if self._feature_flags.v3_key_allowed(k.key_id):
+                allowed.append(k)
+        return allowed
+
+    # ------------------------------------------------------------------
+    # Sticky session helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _stable_fingerprint(body_obj: dict | None) -> str:
@@ -279,43 +765,20 @@ class ProxyHandler:
 
     @staticmethod
     def _required_capabilities(body_obj: dict | None) -> frozenset[str]:
-        """从请求体提取「本请求所需能力」集合（T35 / R-P1-60 判据⑥）。
+        """Compatibility adapter over the shared v3 request fact model.
 
-        Responses API 的 hosted tool 通过 ``tools[N].type`` 声明能力；请求侧
-        ``metadata`` / ``instructions`` 里的 ``stateful_responses`` 与
-        ``background`` 也计为所需能力。只读一次，无副作用；非 Responses 请求
-        返回空集（空集视为「无能力要求」，任何绑定都兼容）。
+        T35 callers persist string values, while capability routing consumes the
+        enum values in :class:`SanitizedRequest`. Both now come from the same
+        sanitizer, including ``previous_response_id`` as a stateful requirement.
         """
-        if not body_obj:
-            return frozenset()
-        req: set[str] = set()
-        tools = body_obj.get("tools")
-        if isinstance(tools, (list, tuple)):
-            for tool in tools:
-                if not isinstance(tool, dict):
-                    continue
-                tool_type = str(tool.get("type") or "").strip()
-                if not tool_type:
-                    continue
-                # 仅统计 hosted tool（R-P1-60）：普通 function tool 不需要能力承载。
-                from .protocol.responses_models import HOSTED_TOOL_CAPABILITY
-
-                cap = HOSTED_TOOL_CAPABILITY.get(tool_type)
-                if cap is not None:
-                    req.add(cap.value)
-        if body_obj.get("background"):
-            req.add("background")
-        if body_obj.get("metadata"):
-            md = body_obj["metadata"]
-            if isinstance(md, dict) and md.get("stateful_responses"):
-                req.add("stateful_responses")
-        return frozenset(req)
+        return capability_values(RequestSanitizer().sanitize(body_obj))
 
     def _get_sticky_key(
         self,
         session_key: str,
         candidates: list[KeyHealth],
         body_obj: dict | None = None,
+        required_caps: frozenset[str] | None = None,
     ) -> KeyHealth | None:
         """Return the sticky key for this session if still valid, healthy and
         capability-compatible (T35 / R-P1-60 判据⑥).
@@ -340,7 +803,9 @@ class ProxyHandler:
             if k.key_id == key_id and k.is_available():
                 # 判据⑥：能力兼容校验 —— sticky 只在选定模型健康**且**能力兼容时生效。
                 bound_caps = self._sticky_caps.get(session_key, frozenset())
-                required = self._required_capabilities(body_obj)
+                required = required_caps
+                if required is None:
+                    required = self._required_capabilities(body_obj)
                 if required and bound_caps and not (required <= bound_caps):
                     reason = f"capability mismatch: required={sorted(required)} bound={sorted(bound_caps)}"
                     self._binding_failover_reasons[session_key] = reason
@@ -572,6 +1037,8 @@ class ProxyHandler:
         path = ctx.path
         method = ctx.method
         body_obj = ctx.body
+        sanitized_request = self._request_sanitizer.sanitize(body_obj)
+        required_caps = capability_values(sanitized_request)
         inbound_protocol = ctx.inbound_protocol
         requested_model = ctx.requested_model
         remote = ctx.remote
@@ -588,9 +1055,69 @@ class ProxyHandler:
         if path.rstrip("/") == "/v1/models" and method.upper() == "GET":
             return await self._list_models()
 
-        # Responses API (Codex): only POST is supported. GET /v1/responses/{id}
-        # (retrieve) / DELETE are not implemented — return 405 so Codex doesn't
-        # hang or retry with bogus bodies.
+        # ------------------------------------------------------------------
+        # T22 / R-P0-22: the single v2/v3 fork point.
+        #
+        # A Responses request is served by the v3 resource handler when ALL of
+        # the following hold, otherwise it falls through to the legacy path:
+        #   1. the inbound protocol is RESPONSES,
+        #   2. a v3 handler is wired in (store-backed setup),
+        #   3. the feature flag evaluates to enabled for this request
+        #      (env hard override > key rollout > model rollout > group
+        #      rollout > global enabled > default true, R-P0-25).
+        # Key rollout is applied to the *candidate* keys: when the feature
+        # flag would enable v3 but every candidate key is excluded, we fall
+        # back to the legacy path and record the fallback metric with reason
+        # ``all_keys_excluded`` (so a bad rollout can never strand requests).
+        # The feature flag is evaluated here — once, at the single fork — so
+        # Chat / Anthropic traffic is never touched and a disabled flag makes
+        # the *next* Responses request go straight back to v2.
+        # ------------------------------------------------------------------
+        if inbound_protocol == "responses" and self._v3 is not None:
+            v3_ok = bool(
+                self._feature_flags is None
+                or self._feature_flags.v3_enabled(ctx)
+            )
+            if v3_ok:
+                # Only CREATE consumes an upstream candidate.  Store-backed
+                # retrieve/delete/cancel/input_items and the honest compact
+                # capability response must remain usable even when no upstream
+                # key is currently healthy.
+                is_create = method.upper() == "POST" and path.rstrip("/") == "/v1/responses"
+                ctx.v3_enabled = True
+                ctx.endpoint = "create" if is_create else "resource"
+                if not is_create:
+                    return await self._dispatch_v3(request, ctx)
+
+                candidates = self._resolve_candidates(requested_model)
+                v3_candidates = self._filter_v3_candidates(candidates, ctx)
+                if candidates and not v3_candidates:
+                    # Rollout excluded every otherwise-eligible key — fall back
+                    # to legacy and expose the exact operational reason.
+                    record_v3_fallback(reason="all_keys_excluded")
+                elif v3_candidates:
+                    # T26: create now executes against a REAL upstream through
+                    # the production chain (capability routing -> scheduler ->
+                    # translator -> terminal persistence).  Only store-backed
+                    # resource endpoints and the honest compact 501 go through
+                    # the resource skeleton.
+                    if not (body_obj and body_obj.get("stream")):
+                        return await self._dispatch_v3_create(
+                            request,
+                            ctx,
+                            v3_candidates,
+                        )
+                    # Streaming create still uses the resource skeleton for now
+                    # (full SSE lifecycle is the T26 stream pass); the skeleton
+                    # returns in_progress so the client receives a valid
+                    # response object without a fabricated stream.
+                    return await self._dispatch_v3(request, ctx)
+
+        # Legacy: Responses API (Codex): only POST is supported. GET
+        # /v1/responses/{id} (retrieve) / DELETE are not implemented — return
+        # 405 so Codex doesn't hang or retry with bogus bodies.  (When the v3
+        # handler is wired, non-POST Responses requests above were already
+        # served by v3; reaching this 405 means v3 was disabled or absent.)
         if path.startswith("/v1/responses") and method.upper() != "POST":
             return web.json_response(
                 {"error": {"message": "method not allowed for /v1/responses", "type": "invalid_request_error"}},
@@ -643,7 +1170,12 @@ class ProxyHandler:
                 if session_key and not tried:
                     # T35：进程重启后从 ResponseStore 恢复 binding，保持粘性连续性。
                     await self._restore_sticky_from_store(session_key)
-                    sticky_k = self._get_sticky_key(session_key, candidates, body_obj)
+                    sticky_k = self._get_sticky_key(
+                        session_key,
+                        candidates,
+                        body_obj,
+                        required_caps,
+                    )
                     if sticky_k is None and session_key in self._binding_failover_reasons:
                         # 判据⑥：sticky key 因健康/能力不兼容被拒 → 记录故障迁移
                         await self._persist_sticky_failover(session_key)
@@ -688,7 +1220,7 @@ class ProxyHandler:
                 if need_translation:
                     # Translate request body
                     try:
-                        body_obj_t = json.loads(ctx.raw_body) if ctx.raw_body else {}
+                        body_obj_t = ctx.body or {}
                     except (json.JSONDecodeError, ValueError):
                         body_obj_t = {}
 
@@ -897,10 +1429,15 @@ class ProxyHandler:
 
                 # Sticky session: remember which key served this conversation
                 if session_key:
-                    caps = self._required_capabilities(body_obj)
-                    self._set_sticky(session_key, k.key_id, caps)
+                    self._set_sticky(session_key, k.key_id, required_caps)
                     # T35 / R-P1-61 判据⑤：ResponseStore 持久化 session→route binding。
-                    asyncio.create_task(self._persist_sticky_binding(session_key, k.key_id, caps))
+                    asyncio.create_task(
+                        self._persist_sticky_binding(
+                            session_key,
+                            k.key_id,
+                            required_caps,
+                        )
+                    )
 
                 # Log successful request asynchronously（含 token 用量 + 配额扣减 + 成本）
                 if self.store:
@@ -936,6 +1473,7 @@ class ProxyHandler:
             inbound_protocol=inbound_protocol,
             requested_model=requested_model,
             session_key=self._session_key(request, body_obj),
+            required_caps=required_caps,
         )
 
     async def _stream_proxy(
@@ -949,6 +1487,7 @@ class ProxyHandler:
         inbound_protocol: str,
         requested_model: str,
         session_key: str = "",
+        required_caps: frozenset[str] = frozenset(),
     ) -> web.StreamResponse:
         _stream_start = time.time()
         resp = web.StreamResponse(status=200)
@@ -1004,6 +1543,7 @@ class ProxyHandler:
                             session_key,
                             candidates,
                             body_obj or {},
+                            required_caps,
                         )
                         if sticky_k is None and session_key in self._binding_failover_reasons:
                             # 判据⑥：sticky key 因健康/能力不兼容被拒 → 记录故障迁移
@@ -1039,14 +1579,10 @@ class ProxyHandler:
                     headers["Accept-Encoding"] = "identity"
 
                     if need_translation:
-                        # Reuse the already-parsed body dict from __call__
-                        # to avoid re-parsing a 100KB body on every retry.
-                        body_obj_s = body_obj if body_obj is not None else {}
-                        if not body_obj_s and body:
-                            try:
-                                body_obj_s = json.loads(body)
-                            except (json.JSONDecodeError, ValueError):
-                                body_obj_s = {}
+                        # ``body_obj`` comes from RequestContext and is the
+                        # authoritative parse result, including a valid empty
+                        # object. Never parse the raw bytes again on retries.
+                        body_obj_s = body_obj
 
                         if inbound_protocol == "anthropic" and outbound_protocol == "openai":
                             translated_req = translate_request_a2o(body_obj_s, k.max_tokens_default)
@@ -1213,10 +1749,19 @@ class ProxyHandler:
 
                             # Sticky session: remember which key served this conversation
                             if session_key:
-                                caps = self._required_capabilities(body_obj)
-                                self._set_sticky(session_key, k.key_id, caps)
+                                self._set_sticky(
+                                    session_key,
+                                    k.key_id,
+                                    required_caps,
+                                )
                                 # T35 / R-P1-61 判据⑤：ResponseStore 持久化 binding。
-                                asyncio.create_task(self._persist_sticky_binding(session_key, k.key_id, caps))
+                                asyncio.create_task(
+                                    self._persist_sticky_binding(
+                                        session_key,
+                                        k.key_id,
+                                        required_caps,
+                                    )
+                                )
 
                             if self.store:
                                 latency_ms = int((time.time() - _stream_start) * 1000)
@@ -1375,3 +1920,31 @@ class ProxyHandler:
                 seen.add(gname)
                 data.append({"id": gname, "object": "model", "created": now, "owned_by": "zhongzhuan"})
         return web.json_response({"object": "list", "data": data})
+
+
+class _V3UpstreamResult:
+    """Minimal status+body pair returned by :meth:`_run_v3_nonstream`.
+
+    Both the early-error branch (``_http_json``) and the real ``httpx.Response``
+    expose ``status_code`` + ``body`` so the caller needs no type dispatch.
+    """
+
+    __slots__ = ("status_code", "body")
+
+    def __init__(self, status_code: int, body: bytes) -> None:
+        self.status_code = int(status_code)
+        self.body = body if isinstance(body, bytes) else str(body).encode("utf-8")
+
+
+def _http_json(status: int, payload: Any) -> _V3UpstreamResult:
+    """Build an early-error result with ``status_code`` + ``body``.
+
+    ``payload`` may be bytes, str or a JSON-serialisable object.
+    """
+    if isinstance(payload, bytes):
+        body = payload
+    elif isinstance(payload, str):
+        body = payload.encode("utf-8")
+    else:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return _V3UpstreamResult(status, body)

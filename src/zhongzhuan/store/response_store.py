@@ -130,6 +130,7 @@ class ResponseStore:
         response_id: str,
         status: str,
         *,
+        workspace_id: str,
         terminal_reason: str = "",
         incomplete_details: Mapping[str, Any] | None = None,
         error: str = "",
@@ -142,7 +143,7 @@ class ResponseStore:
             """UPDATE responses SET status = ?, updated_at = ?, completed_at = ?,
                terminal_reason = ?, incomplete_details = ?, error = ?, usage = ?,
                output = ?
-               WHERE response_id = ?""",
+               WHERE response_id = ? AND workspace_id = ?""",
             (
                 status,
                 now,
@@ -153,6 +154,7 @@ class ResponseStore:
                 _dumps(usage),
                 _dumps(output),
                 response_id,
+                workspace_id,
             ),
         )
 

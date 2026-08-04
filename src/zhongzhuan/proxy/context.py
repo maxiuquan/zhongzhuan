@@ -24,6 +24,30 @@ from .protocol.detect import detect_inbound_protocol
 from .protocol.responses_models import InboundProtocol
 
 
+_RAW_BODY_KEY = "zhongzhuan.raw_body"
+_JSON_BODY_KEY = "zhongzhuan.json_body"
+
+
+async def read_request_body(request: web.Request) -> tuple[bytes, dict[str, Any] | None]:
+    """Read and parse a JSON object once, caching both values on the request."""
+    if _RAW_BODY_KEY in request:
+        return request[_RAW_BODY_KEY], request.get(_JSON_BODY_KEY)
+
+    raw_body = await request.read()
+    body_obj: dict[str, Any] | None = None
+    if raw_body:
+        try:
+            parsed = json.loads(raw_body)
+            if isinstance(parsed, dict):
+                body_obj = parsed
+        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            pass
+
+    request[_RAW_BODY_KEY] = raw_body
+    request[_JSON_BODY_KEY] = body_obj
+    return raw_body, body_obj
+
+
 @dataclass(slots=True)
 class RequestContext:
     """Everything the pipeline needs to know about a single inbound request.
@@ -57,7 +81,7 @@ class RequestContextBuilder:
         self._detect = detect_fn
 
     async def build(self, request: web.Request) -> RequestContext:
-        raw_body = await request.read()
+        raw_body, body_obj = await read_request_body(request)
         path = request.path
         method = request.method
         content_length = len(raw_body) if raw_body else None
@@ -68,18 +92,12 @@ class RequestContextBuilder:
         detected = self._detect(path, headers)
         inbound_protocol = InboundProtocol(detected)
 
-        # Single JSON parse; malformed/empty bodies → None.
-        body_obj: dict[str, Any] | None = None
+        # The shared request cache guarantees one JSON parse across middleware
+        # and the handler context builder.
         requested_model = ""
-        if raw_body:
-            try:
-                parsed = json.loads(raw_body)
-                if isinstance(parsed, dict):
-                    body_obj = parsed
-                    candidate = parsed.get("model")
-                    requested_model = (candidate or "").strip() if candidate else ""
-            except (json.JSONDecodeError, ValueError):
-                pass
+        if body_obj is not None:
+            candidate = body_obj.get("model")
+            requested_model = candidate.strip() if isinstance(candidate, str) else ""
 
         is_stream = bool(body_obj and body_obj.get("stream", False))
 

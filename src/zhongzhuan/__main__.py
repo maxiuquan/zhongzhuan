@@ -409,6 +409,7 @@ async def run_foreground(
         store=store,
         load_keys_fn=lambda: _load_keys_from_store(store, cfg),
         sticky_ttl=float(cfg.limits.sticky_session_ttl),
+        responses_bridge=cfg.responses_bridge,
     )
     proxy_runner = web.AppRunner(proxy.app())
     await proxy_runner.setup()

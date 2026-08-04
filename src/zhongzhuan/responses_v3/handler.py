@@ -25,6 +25,7 @@ from ..proxy.protocol.responses_routes import (
 )
 from ..store.response_store import ResponseStore
 from . import endpoints
+from .endpoints import DEFAULT_PAGE_LIMIT
 from .chain import ChainResolution, ChainResolver
 from .schema import to_error_object
 
@@ -91,8 +92,11 @@ class ResponsesV3Handler:
         if ep is ResponsesEndpoint.COMPACT:
             return await endpoints.compact(self._store, workspace_id=workspace_id, body=body)
         if ep is ResponsesEndpoint.INPUT_ITEMS:
-            after = int(body.get("after", -1)) if isinstance(body.get("after"), (int, str)) else -1
-            limit = int(body.get("limit", 20)) if isinstance(body.get("limit"), (int, str)) else 20
+            # GET /input_items 的分页参数来自 query string；非法值必须返回
+            # 标准 400，而不是让 int() 抛出未处理 ValueError (T22)。
+            after, limit, page_err = _parse_pagination(body)
+            if page_err is not None:
+                return page_err
             return await endpoints.input_items(
                 self._store,
                 workspace_id=workspace_id,
@@ -106,6 +110,61 @@ class ResponsesV3Handler:
             code="not_implemented",
             status=501,
         )
+
+
+def _parse_pagination(
+    body: dict[str, Any] | None,
+) -> tuple[int, int, tuple[int, dict[str, Any]] | None]:
+    """Parse ``after`` / ``limit`` from the merged (query + body) mapping.
+
+    Returns ``(after, limit, None)`` on success, or ``(0, 0, error_tuple)`` with
+    a standard 400 response when a value is present but not a valid integer
+    (T22: GET query params must never raise an uncaught ``ValueError``).
+
+    ``after == -1`` is the internal "start from the beginning" cursor that the
+    pagination loop echoes back on the first page; clients may send it too.
+    Anything below ``-1`` is a client error.
+    """
+    body = body or {}
+    after = -1
+    limit = DEFAULT_PAGE_LIMIT
+    raw_after = body.get("after")
+    if raw_after is not None and raw_after != "":
+        try:
+            after = int(raw_after)
+        except (TypeError, ValueError):
+            return 0, 0, to_error_object(
+                message=f"invalid 'after' value: {raw_after!r}; expected an integer",
+                code="invalid_request_error",
+                status=400,
+                param="after",
+            )
+        if after < -1:
+            return 0, 0, to_error_object(
+                message="'after' must be -1 or a non-negative integer",
+                code="invalid_request_error",
+                status=400,
+                param="after",
+            )
+    raw_limit = body.get("limit")
+    if raw_limit is not None and raw_limit != "":
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            return 0, 0, to_error_object(
+                message=f"invalid 'limit' value: {raw_limit!r}; expected an integer",
+                code="invalid_request_error",
+                status=400,
+                param="limit",
+            )
+        if limit < 1:
+            return 0, 0, to_error_object(
+                message="'limit' must be a positive integer",
+                code="invalid_request_error",
+                status=400,
+                param="limit",
+            )
+    return after, limit, None
 
 
 __all__ = ["ResponsesV3Handler"]

@@ -230,7 +230,7 @@ async def _assert_response_store_roundtrip(store) -> None:
             {"output_index": 0, "item_type": "message", "role": "assistant", "payload": {"content": "hello"}},
         ],
     )
-    await rs.update_status("r2", "completed")
+    await rs.update_status("r2", "completed", workspace_id="ws2")
 
     rec = await rs.get_response("r2", workspace_id="ws2")
     assert rec is not None and rec.status == "completed"
