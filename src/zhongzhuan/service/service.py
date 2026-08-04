@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from typing import Any
 
 if sys.platform == "win32":
     import winreg
+else:
+    winreg: Any = None
 
 
 def _sc(*args: str) -> tuple[int, str, str]:

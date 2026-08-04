@@ -95,8 +95,9 @@ class ResponseStore:
         await self._store.execute(
             """INSERT INTO responses (
                 response_id, workspace_id, status, model, created_at, updated_at,
-                previous_response_id, background, request, `usage`
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                previous_response_id, background, request, output, `usage`, error,
+                incomplete_details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 response_id,
                 workspace_id,
@@ -107,7 +108,10 @@ class ResponseStore:
                 previous_response_id,
                 int(background),
                 _dumps(request),
+                _dumps([]),
                 _dumps(usage),
+                "",
+                _dumps({}),
             ),
         )
 

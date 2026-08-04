@@ -186,8 +186,8 @@ MYSQL_TABLES: tuple[str, ...] = (
         request          TEXT NOT NULL,
         output           TEXT NOT NULL,
         `usage`          TEXT NOT NULL,
-        error            TEXT NOT NULL DEFAULT '',
-        incomplete_details TEXT NOT NULL DEFAULT '',
+        error            TEXT NOT NULL,
+        incomplete_details TEXT NOT NULL,
         terminal_reason  VARCHAR(64) NOT NULL DEFAULT '',
         cancelled        TINYINT NOT NULL DEFAULT 0,
         expires_at       BIGINT NOT NULL DEFAULT 0

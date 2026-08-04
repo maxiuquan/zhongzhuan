@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
+from typing import Any
 
 CRYPTPROTECT_UI_FORBIDDEN = 0x1
+_ctypes_windll: Any = getattr(ctypes, "windll", None)
+_get_last_error: Any = getattr(ctypes, "get_last_error", lambda: 0)
 
 
 class DATA_BLOB(ctypes.Structure):
@@ -22,7 +25,7 @@ def dpapi_protect(plaintext: bytes) -> bytes:
         pbData=ctypes.cast(ctypes.c_char_p(plaintext), ctypes.POINTER(ctypes.c_byte)),
     )
     out_blob = DATA_BLOB()
-    if not ctypes.windll.crypt32.CryptProtectData(
+    if not _ctypes_windll.crypt32.CryptProtectData(
         ctypes.byref(in_blob),
         None,
         None,
@@ -31,9 +34,9 @@ def dpapi_protect(plaintext: bytes) -> bytes:
         CRYPTPROTECT_UI_FORBIDDEN,
         ctypes.byref(out_blob),
     ):
-        raise OSError(f"CryptProtectData failed: {ctypes.get_last_error()}")
+        raise OSError(f"CryptProtectData failed: {_get_last_error()}")
     buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
-    ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+    _ctypes_windll.kernel32.LocalFree(out_blob.pbData)
     return b"WIN:" + buf
 
 
@@ -55,7 +58,7 @@ def dpapi_unprotect(ciphertext: bytes) -> bytes:
         CRYPTPROTECT_UI_FORBIDDEN,
         ctypes.byref(out_blob),
     ):
-        raise OSError(f"CryptUnprotectData failed: {ctypes.get_last_error()}")
+        raise OSError(f"CryptUnprotectData failed: {_get_last_error()}")
     buf = ctypes.string_at(out_blob.pbData, out_blob.cbData)
-    ctypes.windll.kernel32.LocalFree(out_blob.pbData)
+    _ctypes_windll.kernel32.LocalFree(out_blob.pbData)
     return buf

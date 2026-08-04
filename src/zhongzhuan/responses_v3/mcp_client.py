@@ -914,7 +914,7 @@ class McpClient:
                 session.list_tools(),
                 timeout=self._timeout,
             )
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             return await self._list_tools_failed(
                 base,
                 events,
@@ -1236,7 +1236,7 @@ class McpClient:
                 session.call_tool(name, args),
                 timeout=self._timeout,
             )
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             return await self._call_failed(
                 base,
                 events,
