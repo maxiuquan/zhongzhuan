@@ -1,4 +1,5 @@
 """AES-256-GCM encryption for cross-platform key protection."""
+
 from __future__ import annotations
 
 import os

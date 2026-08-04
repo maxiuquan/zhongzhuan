@@ -1,4 +1,5 @@
 """TLS/SSL context builder + self-signed certificate generation."""
+
 from __future__ import annotations
 
 import ssl
@@ -44,7 +45,7 @@ def selfsign(
     try:
         from cryptography import x509
         from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
-        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import rsa
         import datetime
         import ipaddress
@@ -67,12 +68,20 @@ def selfsign(
             .not_valid_before(now)
             .not_valid_after(now + datetime.timedelta(days=days))
             .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-            .add_extension(x509.KeyUsage(
-                digital_signature=True, content_commitment=False,
-                key_encipherment=False, data_encipherment=False,
-                key_agreement=False, key_cert_sign=True, crl_sign=True,
-                encipher_only=False, decipher_only=False,
-            ), critical=True)
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
             .add_extension(ca_ski, critical=False)
             .sign(ca_key, hashes.SHA256())
         )
@@ -122,6 +131,7 @@ def selfsign(
 
 def _write_key(path: str, key) -> None:
     from cryptography.hazmat.primitives import serialization
+
     pem = key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.TraditionalOpenSSL,
@@ -136,17 +146,22 @@ def _write_key(path: str, key) -> None:
 
 def _write_cert(path: str, cert) -> None:
     from cryptography.hazmat.primitives import serialization
+
     pem = cert.public_bytes(serialization.Encoding.PEM)
     Path(path).write_bytes(pem)
 
 
 def _selfsign_openssl(
-    out_cert: str, out_key: str, out_ca: str,
-    cn: str, san_dns: list[str], san_ip: list[str], days: int,
+    out_cert: str,
+    out_key: str,
+    out_ca: str,
+    cn: str,
+    san_dns: list[str],
+    san_ip: list[str],
+    days: int,
 ) -> None:
     """Fallback: use openssl CLI to generate self-signed cert."""
     import subprocess
-    import sys
 
     san_parts = [f"DNS:{d}" for d in san_dns] + [f"IP:{i}" for i in san_ip]
     if not san_parts:
@@ -155,11 +170,22 @@ def _selfsign_openssl(
 
     # Generate key + self-signed cert with SANs (single cert, no separate CA)
     cmd = [
-        "openssl", "req", "-x509", "-newkey", "rsa:2048",
-        "-keyout", out_key, "-out", out_cert,
-        "-days", str(min(days, 365)), "-nodes",
-        "-subj", f"/CN={cn}",
-        "-addext", f"subjectAltName={san_str}",
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-keyout",
+        out_key,
+        "-out",
+        out_cert,
+        "-days",
+        str(min(days, 365)),
+        "-nodes",
+        "-subj",
+        f"/CN={cn}",
+        "-addext",
+        f"subjectAltName={san_str}",
     ]
     subprocess.run(cmd, check=True, capture_output=True)
     try:
@@ -170,4 +196,5 @@ def _selfsign_openssl(
     # If CA output requested, copy the cert as CA (single-cert mode)
     if out_ca:
         import shutil
+
         shutil.copy2(out_cert, out_ca)

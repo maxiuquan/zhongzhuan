@@ -1,11 +1,15 @@
 """Model CRUD API."""
+
 from __future__ import annotations
 
 from aiohttp import web
 
 from ..store.models import (
-    Model, create_model, get_model, get_model_by_id,
-    list_models, update_model, delete_model,
+    Model,
+    create_model,
+    list_models,
+    update_model,
+    delete_model,
 )
 from .notify import notify_proxy_reload
 
@@ -18,7 +22,8 @@ def register_routes(app: web.Application, ctx) -> None:
     async def create(request):
         data = await request.json()
         m = Model(
-            name=data["name"], upstream_base=data["upstream_base"],
+            name=data["name"],
+            upstream_base=data["upstream_base"],
             upstream_model=data["upstream_model"],
             rpm_limit=int(data.get("rpm_limit", 0)),
             tpm_limit=int(data.get("tpm_limit", 0)),
@@ -38,7 +43,8 @@ def register_routes(app: web.Application, ctx) -> None:
         model_id = int(request.match_info["id"])
         data = await request.json()
         m = Model(
-            name=data["name"], upstream_base=data["upstream_base"],
+            name=data["name"],
+            upstream_base=data["upstream_base"],
             upstream_model=data["upstream_model"],
             rpm_limit=int(data.get("rpm_limit", 0)),
             tpm_limit=int(data.get("tpm_limit", 0)),
@@ -68,14 +74,20 @@ def register_routes(app: web.Application, ctx) -> None:
 
 def _to_dict(m: Model) -> dict:
     return {
-        "id": m.id, "name": m.name,
-        "upstream_base": m.upstream_base, "upstream_model": m.upstream_model,
-        "rpm_limit": m.rpm_limit, "tpm_limit": m.tpm_limit,
-        "enabled": m.enabled, "weight": m.weight,
-        "protocol": m.protocol, "anthropic_version": m.anthropic_version,
+        "id": m.id,
+        "name": m.name,
+        "upstream_base": m.upstream_base,
+        "upstream_model": m.upstream_model,
+        "rpm_limit": m.rpm_limit,
+        "tpm_limit": m.tpm_limit,
+        "enabled": m.enabled,
+        "weight": m.weight,
+        "protocol": m.protocol,
+        "anthropic_version": m.anthropic_version,
         "max_tokens_default": m.max_tokens_default,
         "upstream_path_override": m.upstream_path_override,
         "is_fallback": m.is_fallback,
         "aliases": m.aliases,
-        "created_at": m.created_at, "updated_at": m.updated_at,
+        "created_at": m.created_at,
+        "updated_at": m.updated_at,
     }

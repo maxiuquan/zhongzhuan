@@ -5,12 +5,12 @@ produces OpenAI SSE chunk bytes (``data: {json}\\n\\n``).
 
 State machine: ``INIT`` -> ``TEXT_OPEN`` -> ``DONE``.
 """
+
 from __future__ import annotations
 
 import json
 import time
 import uuid
-from typing import Any
 
 from loguru import logger
 
@@ -104,7 +104,22 @@ class StreamA2O:
         """
         if self._finished:
             return []
-        return self._finish()
+        out: list[bytes] = []
+        # Synthesize a closing choice chunk if we never emitted a terminal
+        # finish_reason (e.g. the upstream body ended without message_stop).
+        finish = self._stop_reason or "stop"
+        out.append(
+            _openai_chunk(
+                chunk_id=self._chunk_id,
+                created=self._created,
+                model=self.model,
+                delta={},
+                finish_reason=finish,
+            )
+        )
+        out.append(_done_marker())
+        self._finished = True
+        return out
 
     async def feed(self, chunk: bytes) -> list[bytes]:
         """Feed a raw Anthropic SSE chunk, return list of OpenAI SSE chunk bytes.
@@ -130,10 +145,10 @@ class StreamA2O:
                 # SSE comment / keepalive.
                 continue
             if line.startswith("event:"):
-                self._pending_event = line[len("event:"):].strip()
+                self._pending_event = line[len("event:") :].strip()
                 continue
             if line.startswith("data:"):
-                data_str = line[len("data:"):].lstrip()
+                data_str = line[len("data:") :].lstrip()
                 try:
                     data = json.loads(data_str)
                 except (json.JSONDecodeError, ValueError):
@@ -213,20 +228,24 @@ class StreamA2O:
             self._tool_oai_index += 1
             self._block_to_oai_tool_index[index] = oai_tool_index
             self._tool_block_index = index
-            out.append(_openai_chunk(
-                chunk_id=self._chunk_id,
-                created=self._created,
-                model=self.model,
-                delta={
-                    "tool_calls": [{
-                        "index": oai_tool_index,
-                        "id": tool_id,
-                        "type": "function",
-                        "function": {"name": tool_name, "arguments": ""},
-                    }]
-                },
-                finish_reason=None,
-            ))
+            out.append(
+                _openai_chunk(
+                    chunk_id=self._chunk_id,
+                    created=self._created,
+                    model=self.model,
+                    delta={
+                        "tool_calls": [
+                            {
+                                "index": oai_tool_index,
+                                "id": tool_id,
+                                "type": "function",
+                                "function": {"name": tool_name, "arguments": ""},
+                            }
+                        ]
+                    },
+                    finish_reason=None,
+                )
+            )
         return out
 
     def _on_content_block_delta(self, data: dict) -> list[bytes]:
@@ -238,29 +257,35 @@ class StreamA2O:
         if dtype == "text_delta":
             text = delta.get("text", "")
             if text:
-                out.append(_openai_chunk(
-                    chunk_id=self._chunk_id,
-                    created=self._created,
-                    model=self.model,
-                    delta={"content": text},
-                    finish_reason=None,
-                ))
+                out.append(
+                    _openai_chunk(
+                        chunk_id=self._chunk_id,
+                        created=self._created,
+                        model=self.model,
+                        delta={"content": text},
+                        finish_reason=None,
+                    )
+                )
         elif dtype == "input_json_delta":
             partial = delta.get("partial_json", "")
             oai_tool_index = self._block_to_oai_tool_index.get(index, 0)
             if partial:
-                out.append(_openai_chunk(
-                    chunk_id=self._chunk_id,
-                    created=self._created,
-                    model=self.model,
-                    delta={
-                        "tool_calls": [{
-                            "index": oai_tool_index,
-                            "function": {"arguments": partial},
-                        }]
-                    },
-                    finish_reason=None,
-                ))
+                out.append(
+                    _openai_chunk(
+                        chunk_id=self._chunk_id,
+                        created=self._created,
+                        model=self.model,
+                        delta={
+                            "tool_calls": [
+                                {
+                                    "index": oai_tool_index,
+                                    "function": {"arguments": partial},
+                                }
+                            ]
+                        },
+                        finish_reason=None,
+                    )
+                )
         return out
 
     def _on_message_stop(self) -> list[bytes]:
@@ -269,13 +294,15 @@ class StreamA2O:
             return []
         stop_reason = self._stop_reason or "end_turn"
         finish_reason = MAP_STOP_REASON_A2O.get(stop_reason, "stop")
-        out = [_openai_chunk(
-            chunk_id=self._chunk_id,
-            created=self._created,
-            model=self.model,
-            delta={},
-            finish_reason=finish_reason,
-        )]
+        out = [
+            _openai_chunk(
+                chunk_id=self._chunk_id,
+                created=self._created,
+                model=self.model,
+                delta={},
+                finish_reason=finish_reason,
+            )
+        ]
         out.append(_done_marker())
         self.state = DONE
         self._finished = True
@@ -285,20 +312,24 @@ class StreamA2O:
         """Emit a final chunk with finish_reason=stop + [DONE] on stream error."""
         if self._finished:
             return []
-        out = [_openai_chunk(
-            chunk_id=self._chunk_id,
-            created=self._created,
-            model=self.model,
-            delta={"content": f"\n[stream error: {message}]"},
-            finish_reason=None,
-        )]
-        out.append(_openai_chunk(
-            chunk_id=self._chunk_id,
-            created=self._created,
-            model=self.model,
-            delta={},
-            finish_reason="stop",
-        ))
+        out = [
+            _openai_chunk(
+                chunk_id=self._chunk_id,
+                created=self._created,
+                model=self.model,
+                delta={"content": f"\n[stream error: {message}]"},
+                finish_reason=None,
+            )
+        ]
+        out.append(
+            _openai_chunk(
+                chunk_id=self._chunk_id,
+                created=self._created,
+                model=self.model,
+                delta={},
+                finish_reason="stop",
+            )
+        )
         out.append(_done_marker())
         self.state = DONE
         self._finished = True

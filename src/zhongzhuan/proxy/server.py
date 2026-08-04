@@ -1,7 +1,9 @@
 """Proxy HTTP server."""
+
 from __future__ import annotations
 
 from aiohttp import web
+from aiohttp.payload import Payload
 
 from .auth import make_proxy_auth_middleware
 from .cors import make_cors_middleware
@@ -22,16 +24,30 @@ class ProxyServer:
         store: Store | None = None,
         load_keys_fn=None,
         sticky_ttl: float = 1800.0,
+        *,
+        responses_bridge=None,
+        feature_flags=None,
     ) -> None:
         self.upstream_clients = upstream_clients
         self.api_key = api_key
         self.keys = keys or []
+        self._effective_keys = self.keys
         self.proxy_timeout = proxy_timeout
         self.models = models or []
         self.groups = groups or []
         self.store = store
         self.load_keys_fn = load_keys_fn
         self.sticky_ttl = sticky_ttl
+        # T22: Responses v3 bridge wiring.  ``responses_bridge`` is the config
+        # object (``enabled`` + ``rollout``); when omitted the bridge stays
+        # disabled so existing callers (and the store-less setup) are
+        # unaffected.  ``feature_flags`` may be injected directly for tests.
+        self.responses_bridge = responses_bridge
+        if feature_flags is None:
+            from .feature_flags import ResponsesFeatureFlags
+
+            feature_flags = ResponsesFeatureFlags(responses_bridge)
+        self._feature_flags = feature_flags
 
     def app(self) -> web.Application:
         # CORS 中间件在最外层，Gzip 在内层（对非流式 JSON 响应压缩）
@@ -51,42 +67,175 @@ class ProxyServer:
         the_keys = list(self.keys)
         if not the_keys and self.api_key:
             from .ratelimit import KeyHealth, SlidingWindow
-            fallback_base = next(iter(self.upstream_clients)) if self.upstream_clients else ""
-            the_keys = [KeyHealth(
-                key_id=0, api_key=self.api_key,
-                window=SlidingWindow(60, 1000),
-                upstream_base=fallback_base,
-            )]
 
+            fallback_base = next(iter(self.upstream_clients)) if self.upstream_clients else ""
+            the_keys = [
+                KeyHealth(
+                    key_id=0,
+                    api_key=self.api_key,
+                    window=SlidingWindow(60, 1000),
+                    upstream_base=fallback_base,
+                )
+            ]
+
+        self._effective_keys = the_keys
         handler = make_handler(
-            upstream_clients=self.upstream_clients, keys=the_keys,
-            proxy_timeout=self.proxy_timeout, store=self.store,
-            load_keys_fn=self.load_keys_fn, groups=self.groups,
+            upstream_clients=self.upstream_clients,
+            keys=the_keys,
+            proxy_timeout=self.proxy_timeout,
+            store=self.store,
+            load_keys_fn=self.load_keys_fn,
+            groups=self.groups,
             sticky_ttl=self.sticky_ttl,
+            feature_flags=self._feature_flags,
+            v3_handler=self._build_v3_handler(),
         )
+        #: 供 readiness 检查 handler 的 background worker 生命周期（T33）。
+        self._proxy_handler = handler
+
         # 注册后台任务钩子（优化点4+5：sticky 清理 + 健康状态快照）
         async def _on_startup(app: web.Application) -> None:
             await handler.start_background_tasks()
+
         async def _on_cleanup(app: web.Application) -> None:
             await handler.stop_background_tasks()
+
         app.on_startup.append(_on_startup)
         app.on_cleanup.append(_on_cleanup)
 
+        # T22 / R-P1-28: the six exact Responses routes MUST be registered
+        # before the ``/v1/{tail:.*}`` catch-all — aiohttp matches routes in
+        # registration order, so a catch-all registered first would swallow
+        # every Responses request.  ``/v1/responses/compact`` must come before
+        # the parameterised ``{response_id}`` routes or it would be captured as
+        # a response id.  All six routes point at the SAME handler (which
+        # contains the single v2/v3 fork point, R-P0-22).
+        app.router.add_post("/v1/responses/compact", handler)
+        app.router.add_post("/v1/responses", handler)
+        app.router.add_get("/v1/responses/{response_id}", handler)
+        app.router.add_delete("/v1/responses/{response_id}", handler)
+        app.router.add_post("/v1/responses/{response_id}/cancel", handler)
+        app.router.add_get("/v1/responses/{response_id}/input_items", handler)
         app.router.add_route("*", "/v1/{tail:.*}", handler)
-        app.router.add_get("/healthz", lambda r: web.Response(text="ok"))
+        # T33 (R-P2-07/08/09)：分层健康检查 + Prometheus /metrics 导出。
+        app.router.add_get("/healthz", self._health_liveness)
+        app.router.add_get("/healthz/live", self._health_liveness)
+        app.router.add_get("/healthz/ready", self._health_readiness)
+        app.router.add_get("/healthz/deps", self._health_dependencies)
+        app.router.add_get("/metrics", self._metrics)
         app.router.add_get("/version", self._version)
         app.router.add_get("/v1/models", self._list_models)
         app.router.add_post("/api/reload", lambda r: self._reload(r, handler))
         return app
 
+    # ------------------------------------------------------------------
+    # T33 分层健康检查（R-P2-07/08）
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # T22: Responses v3 handler construction (fail-safe for store-less setups)
+    # ------------------------------------------------------------------
+
+    def _build_v3_handler(self):
+        """Build the store-backed v3 resource handler, or ``None``.
+
+        v3 requires a store (it persists responses / input items / state
+        chains).  When ``store is None`` the bridge is unavailable and every
+        Responses request falls back to the legacy path — a deterministic,
+        testable fail-safe (no half-wired v3 with a ``None`` store).
+        """
+        if self.store is None:
+            return None
+        from ..responses_v3.handler import ResponsesV3Handler
+        from ..store.response_store import ResponseStore
+
+        return ResponsesV3Handler(ResponseStore(self.store))
+
+    def _available_route_count(self) -> int:
+        return sum(1 for k in self._effective_keys if getattr(k, "is_available", lambda: True)())
+
+    async def _health_liveness(self, _request: web.Request) -> web.Response:
+        from ..observability.health import build_liveness, sanitize_health_payload
+
+        return web.json_response(sanitize_health_payload(build_liveness()))
+
+    async def _health_readiness(self, _request: web.Request) -> web.Response:
+        from ..observability.health import (
+            build_readiness,
+            migration_status,
+            sanitize_health_payload,
+        )
+
+        migration_ok, migration_detail = await migration_status(self.store)
+        routes_ok = self._available_route_count() > 0
+        routes_detail = "ok" if routes_ok else "no available upstream route"
+        handler = getattr(self, "_proxy_handler", None)
+        worker_ok = bool(handler is not None and getattr(handler, "_bg_running", False))
+        worker_detail = (
+            "ok" if worker_ok else "background worker not started" if handler is not None else "no proxy handler"
+        )
+        payload, status = build_readiness(
+            migration_ok=migration_ok,
+            migration_detail=migration_detail,
+            routes_ok=routes_ok,
+            routes_detail=routes_detail,
+            worker_ok=worker_ok,
+            worker_detail=worker_detail,
+        )
+        return web.json_response(sanitize_health_payload(payload), status=status)
+
+    async def _health_dependencies(self, _request: web.Request) -> web.Response:
+        from ..observability.health import (
+            build_dependency_status,
+            dependency_item,
+            migration_status,
+            sanitize_health_payload,
+        )
+
+        deps: list[dict] = []
+        mig_ok, mig_detail = await migration_status(self.store)
+        deps.append(dependency_item("store", mig_ok, mig_detail))
+        up_ok = bool(self.upstream_clients)
+        deps.append(
+            dependency_item(
+                "upstream",
+                up_ok,
+                "ok" if up_ok else "no upstream clients configured",
+            )
+        )
+        # 工具执行器（T25/26）：无可注入执行器时报告 optional_unavailable。
+        executor = getattr(self, "tool_executor", None)
+        deps.append(
+            dependency_item(
+                "tool_executor",
+                executor is not None,
+                "ok" if executor is not None else "no tool executor configured",
+                optional=True,
+            )
+        )
+        return web.json_response(
+            sanitize_health_payload(build_dependency_status(deps)),
+        )
+
+    async def _metrics(self, _request: web.Request) -> web.Response:
+        from ..observability.metrics import render_metrics
+
+        # Prometheus 标准 content-type 带 version/charset 参数；
+        # aiohttp 的 content_type 参数不接受 charset，故直接设头。
+        resp = web.Response(text=render_metrics(), content_type="text/plain")
+        resp.headers["Content-Type"] = "text/plain; version=0.0.4; charset=utf-8"
+        return resp
+
     async def _reload(self, _request: web.Request, handler) -> web.Response:
         n = await handler.reload_keys()
         from loguru import logger
+
         logger.info(f"reloaded {n} keys from store")
         return web.json_response({"ok": True, "keys": n})
 
     async def _version(self, _request: web.Request) -> web.Response:
         from zhongzhuan import __version__
+
         return web.json_response({"name": "zhongzhuan", "version": __version__})
 
     async def _list_models(self, _request: web.Request) -> web.Response:
@@ -122,6 +271,14 @@ def _make_gzip_middleware(min_size: int = 1024):
         if not isinstance(resp, web.Response):
             return resp
 
+        content_type = resp.headers.get("Content-Type", "").lower()
+
+        # SSE 响应禁止压缩（R-P1-27）：gzip 会缓冲输出，event 边界被延迟，
+        # heartbeat 永远到不了客户端。按 content-type 显式跳过，不能依赖
+        # Content-Encoding（SSE 响应不会自己设置该头）。
+        if content_type.startswith("text/event-stream"):
+            return resp
+
         # 检查客户端是否接受 gzip
         accept_encoding = request.headers.get("Accept-Encoding", "").lower()
         if "gzip" not in accept_encoding:
@@ -132,11 +289,10 @@ def _make_gzip_middleware(min_size: int = 1024):
             return resp
 
         body = resp.body
-        if body is None or len(body) < min_size:
+        if body is None or isinstance(body, Payload) or len(body) < min_size:
             return resp
 
         # 只压缩 JSON / text 类响应
-        content_type = resp.headers.get("Content-Type", "").lower()
         if not (content_type.startswith("application/json") or content_type.startswith("text/")):
             return resp
 

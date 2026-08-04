@@ -1,4 +1,5 @@
 """Proxy pass-through tests."""
+
 import socket
 
 import pytest
@@ -29,8 +30,10 @@ async def mock_upstream():
 
 
 def _free_port() -> int:
-    s = socket.socket(); s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]; s.close()
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
     return p
 
 

@@ -1,4 +1,5 @@
 """Config tests."""
+
 from zhongzhuan.config.config import Config, default_config, load_config
 
 

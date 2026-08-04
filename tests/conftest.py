@@ -1,5 +1,7 @@
 """pytest configuration: add src/ to import path."""
+
 import os
+
 os.environ.setdefault("ZHONGZHUAN_DEV_NO_DPAPI", "1")
 
 import sys
@@ -13,6 +15,11 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+# Make `tests/support` importable as a top-level package (`from support import ...`).
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
 
 @pytest_asyncio.fixture
 async def store(tmp_path, monkeypatch):
@@ -25,6 +32,7 @@ async def store(tmp_path, monkeypatch):
     monkeypatch.delenv("ZHONGZHUAN_TIDB_DATABASE", raising=False)
     from zhongzhuan.store.store import create_store
     from zhongzhuan.config import default_config
+
     cfg = default_config()
     cfg.storage.backend = "sqlite"
     cfg.storage.db_path = str(tmp_path / "test.db")
@@ -32,6 +40,7 @@ async def store(tmp_path, monkeypatch):
     s = await create_store(cfg)
     # 初始化 crypto（AES key）
     from zhongzhuan.crypto import init
+
     await init(tmp_path)
     try:
         yield s

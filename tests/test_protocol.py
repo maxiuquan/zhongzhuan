@@ -1,4 +1,5 @@
 """Unit tests for protocol translation modules (OpenAI <-> Anthropic)."""
+
 import json
 
 import pytest
@@ -58,9 +59,7 @@ class TestRequestA2O:
         body = {
             "model": "claude-sonnet-4-5",
             "max_tokens": 1024,
-            "messages": [
-                {"role": "user", "content": "Hello"}
-            ],
+            "messages": [{"role": "user", "content": "Hello"}],
         }
         out = translate_request_a2o(body)
         assert out["model"] == "claude-sonnet-4-5"
@@ -95,13 +94,15 @@ class TestRequestA2O:
     def test_content_blocks_text_concatenated(self):
         body = {
             "max_tokens": 100,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Hello "},
-                    {"type": "text", "text": "World"},
-                ],
-            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Hello "},
+                        {"type": "text", "text": "World"},
+                    ],
+                }
+            ],
         }
         out = translate_request_a2o(body)
         assert out["messages"][0] == {"role": "user", "content": "Hello World"}
@@ -109,36 +110,42 @@ class TestRequestA2O:
     def test_assistant_tool_use_becomes_tool_calls(self):
         body = {
             "max_tokens": 100,
-            "messages": [{
-                "role": "assistant",
-                "content": [
-                    {"type": "text", "text": "calling tool"},
-                    {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "SF"}},
-                ],
-            }],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "calling tool"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "SF"}},
+                    ],
+                }
+            ],
         }
         out = translate_request_a2o(body)
         msg = out["messages"][0]
         assert msg["role"] == "assistant"
         assert msg["content"] == "calling tool"
-        assert msg["tool_calls"] == [{
-            "id": "toolu_1",
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "arguments": json.dumps({"city": "SF"}, ensure_ascii=False),
-            },
-        }]
+        assert msg["tool_calls"] == [
+            {
+                "id": "toolu_1",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": json.dumps({"city": "SF"}, ensure_ascii=False),
+                },
+            }
+        ]
 
     def test_user_tool_result_becomes_tool_message(self):
         body = {
             "max_tokens": 100,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "sunny, 22C"},
-                ],
-            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1", "content": "sunny, 22C"},
+                    ],
+                }
+            ],
         }
         out = translate_request_a2o(body)
         assert out["messages"][0] == {
@@ -150,14 +157,18 @@ class TestRequestA2O:
     def test_tool_result_with_block_content(self):
         body = {
             "max_tokens": 100,
-            "messages": [{
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": "t1",
-                    "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
-                }],
-            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t1",
+                            "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
+                        }
+                    ],
+                }
+            ],
         }
         out = translate_request_a2o(body)
         assert out["messages"][0]["content"] == "ab"
@@ -165,15 +176,22 @@ class TestRequestA2O:
     def test_image_block_becoves_image_url(self):
         body = {
             "max_tokens": 100,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "what is this?"},
-                    {"type": "image", "source": {
-                        "type": "base64", "media_type": "image/png", "data": "BASE64DATA",
-                    }},
-                ],
-            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "what is this?"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "BASE64DATA",
+                            },
+                        },
+                    ],
+                }
+            ],
         }
         out = translate_request_a2o(body)
         msg = out["messages"][0]
@@ -188,21 +206,25 @@ class TestRequestA2O:
         body = {
             "max_tokens": 100,
             "messages": [{"role": "user", "content": "hi"}],
-            "tools": [{
-                "name": "get_weather",
-                "description": "Get the weather",
-                "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}},
-            }],
+            "tools": [
+                {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+                }
+            ],
         }
         out = translate_request_a2o(body)
-        assert out["tools"] == [{
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get the weather",
-                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
-            },
-        }]
+        assert out["tools"] == [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                },
+            }
+        ]
 
     def test_tool_choice_translation(self):
         body = {
@@ -254,11 +276,13 @@ class TestResponseO2A:
         resp = {
             "id": "chatcmpl-1",
             "model": "gpt-4o",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": "Hello!"},
-                "finish_reason": "stop",
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Hello!"},
+                    "finish_reason": "stop",
+                }
+            ],
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         }
         out = translate_response_o2a(resp, model="claude")
@@ -272,18 +296,22 @@ class TestResponseO2A:
     def test_tool_calls_response(self):
         resp = {
             "id": "chatcmpl-2",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {"name": "get_weather", "arguments": '{"city":"SF"}'},
-                    }],
-                },
-                "finish_reason": "tool_calls",
-            }],
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "get_weather", "arguments": '{"city":"SF"}'},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
             "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
         }
         out = translate_response_o2a(resp, model="claude")
@@ -307,17 +335,22 @@ class TestResponseO2A:
     def test_text_and_tool_use_in_one_response(self):
         resp = {
             "id": "x",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Let me check.",
-                    "tool_calls": [{
-                        "id": "c1", "type": "function",
-                        "function": {"name": "f", "arguments": "{}"},
-                    }],
-                },
-                "finish_reason": "tool_calls",
-            }],
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Let me check.",
+                        "tool_calls": [
+                            {
+                                "id": "c1",
+                                "type": "function",
+                                "function": {"name": "f", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
         out = translate_response_o2a(resp, model="m")
@@ -362,21 +395,28 @@ class TestRequestO2A:
     def test_assistant_tool_calls_become_tool_use(self):
         body = {
             "max_tokens": 100,
-            "messages": [{
-                "role": "assistant",
-                "content": "calling",
-                "tool_calls": [{
-                    "id": "call_1", "type": "function",
-                    "function": {"name": "get_weather", "arguments": '{"city":"SF"}'},
-                }],
-            }],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "calling",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city":"SF"}'},
+                        }
+                    ],
+                }
+            ],
         }
         out = translate_request_o2a(body)
         msg = out["messages"][0]
         assert msg["role"] == "assistant"
         assert msg["content"][0] == {"type": "text", "text": "calling"}
         assert msg["content"][1] == {
-            "type": "tool_use", "id": "call_1", "name": "get_weather",
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "get_weather",
             "input": {"city": "SF"},
         }
 
@@ -385,9 +425,11 @@ class TestRequestO2A:
             "max_tokens": 100,
             "messages": [
                 {"role": "user", "content": "what's the weather?"},
-                {"role": "assistant", "content": None, "tool_calls": [
-                    {"id": "c1", "type": "function", "function": {"name": "w", "arguments": "{}"}}
-                ]},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "w", "arguments": "{}"}}],
+                },
                 {"role": "tool", "tool_call_id": "c1", "content": "sunny"},
             ],
         }
@@ -396,7 +438,9 @@ class TestRequestO2A:
         last = out["messages"][-1]
         assert last["role"] == "user"
         assert last["content"][0] == {
-            "type": "tool_result", "tool_use_id": "c1", "content": "sunny",
+            "type": "tool_result",
+            "tool_use_id": "c1",
+            "content": "sunny",
         }
 
     def test_stop_to_stop_sequences(self):
@@ -421,21 +465,25 @@ class TestRequestO2A:
         body = {
             "max_tokens": 100,
             "messages": [{"role": "user", "content": "hi"}],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "description": "weather",
-                    "parameters": {"type": "object"},
-                },
-            }],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "weather",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
         }
         out = translate_request_o2a(body)
-        assert out["tools"] == [{
-            "name": "get_weather",
-            "description": "weather",
-            "input_schema": {"type": "object"},
-        }]
+        assert out["tools"] == [
+            {
+                "name": "get_weather",
+                "description": "weather",
+                "input_schema": {"type": "object"},
+            }
+        ]
 
     def test_tool_choice_required_to_any(self):
         body = {
@@ -474,13 +522,15 @@ class TestRequestO2A:
     def test_image_url_to_anthropic_image(self):
         body = {
             "max_tokens": 100,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "what is this?"},
-                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,XYZ"}},
-                ],
-            }],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "what is this?"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,XYZ"}},
+                    ],
+                }
+            ],
         }
         out = translate_request_o2a(body)
         msg = out["messages"][0]
@@ -525,14 +575,16 @@ class TestResponseA2O:
         out = translate_response_a2o(resp, model="gpt-4o")
         msg = out["choices"][0]["message"]
         assert msg["content"] == "calling"
-        assert msg["tool_calls"] == [{
-            "id": "toolu_1",
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "arguments": json.dumps({"city": "SF"}, ensure_ascii=False),
-            },
-        }]
+        assert msg["tool_calls"] == [
+            {
+                "id": "toolu_1",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": json.dumps({"city": "SF"}, ensure_ascii=False),
+                },
+            }
+        ]
         assert out["choices"][0]["finish_reason"] == "tool_calls"
 
 
@@ -591,9 +643,9 @@ def _parse_anthropic_sse(data: bytes) -> list[tuple[str, dict]]:
         edata = None
         for line in raw_event.split("\n"):
             if line.startswith("event:"):
-                etype = line[len("event:"):].strip()
+                etype = line[len("event:") :].strip()
             elif line.startswith("data:"):
-                edata = json.loads(line[len("data:"):].strip())
+                edata = json.loads(line[len("data:") :].strip())
         if etype is not None:
             events.append((etype, edata))
     return events
@@ -604,22 +656,34 @@ class TestStreamO2A:
     async def test_text_stream(self):
         sm = StreamO2A(model="claude")
         chunks = [
-            _openai_sse_chunk({
-                "id": "c1", "model": "gpt-4o",
-                "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
-            }),
-            _openai_sse_chunk({
-                "id": "c1", "model": "gpt-4o",
-                "choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}],
-            }),
-            _openai_sse_chunk({
-                "id": "c1", "model": "gpt-4o",
-                "choices": [{"index": 0, "delta": {"content": " world"}, "finish_reason": None}],
-            }),
-            _openai_sse_chunk({
-                "id": "c1", "model": "gpt-4o",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            }),
+            _openai_sse_chunk(
+                {
+                    "id": "c1",
+                    "model": "gpt-4o",
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                }
+            ),
+            _openai_sse_chunk(
+                {
+                    "id": "c1",
+                    "model": "gpt-4o",
+                    "choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": None}],
+                }
+            ),
+            _openai_sse_chunk(
+                {
+                    "id": "c1",
+                    "model": "gpt-4o",
+                    "choices": [{"index": 0, "delta": {"content": " world"}, "finish_reason": None}],
+                }
+            ),
+            _openai_sse_chunk(
+                {
+                    "id": "c1",
+                    "model": "gpt-4o",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                }
+            ),
         ]
         all_out = b""
         for c in chunks:
@@ -654,32 +718,62 @@ class TestStreamO2A:
     async def test_tool_call_stream(self):
         sm = StreamO2A(model="claude")
         chunks = [
-            _openai_sse_chunk({
-                "id": "c1", "model": "gpt-4o",
-                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-            }),
-            _openai_sse_chunk({
-                "id": "c1", "model": "gpt-4o",
-                "choices": [{"index": 0, "delta": {
-                    "tool_calls": [{
-                        "index": 0, "id": "call_1", "type": "function",
-                        "function": {"name": "get_weather", "arguments": ""},
-                    }],
-                }, "finish_reason": None}],
-            }),
-            _openai_sse_chunk({
-                "id": "c1", "model": "gpt-4o",
-                "choices": [{"index": 0, "delta": {
-                    "tool_calls": [{
-                        "index": 0,
-                        "function": {"arguments": '{"city":"SF"}'},
-                    }],
-                }, "finish_reason": None}],
-            }),
-            _openai_sse_chunk({
-                "id": "c1", "model": "gpt-4o",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-            }),
+            _openai_sse_chunk(
+                {
+                    "id": "c1",
+                    "model": "gpt-4o",
+                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                }
+            ),
+            _openai_sse_chunk(
+                {
+                    "id": "c1",
+                    "model": "gpt-4o",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {"name": "get_weather", "arguments": ""},
+                                    }
+                                ],
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            ),
+            _openai_sse_chunk(
+                {
+                    "id": "c1",
+                    "model": "gpt-4o",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "function": {"arguments": '{"city":"SF"}'},
+                                    }
+                                ],
+                            },
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            ),
+            _openai_sse_chunk(
+                {
+                    "id": "c1",
+                    "model": "gpt-4o",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                }
+            ),
         ]
         all_out = b""
         for c in chunks:
@@ -701,13 +795,16 @@ class TestStreamO2A:
     async def test_buffering_across_chunks(self):
         """A single SSE event split across feed() calls should be reassembled."""
         sm = StreamO2A(model="claude")
-        full = _openai_sse_chunk({
-            "id": "c1", "model": "gpt-4o",
-            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hi"}, "finish_reason": None}],
-        })
+        full = _openai_sse_chunk(
+            {
+                "id": "c1",
+                "model": "gpt-4o",
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": "Hi"}, "finish_reason": None}],
+            }
+        )
         # Split into halves
         out1 = await sm.feed(full[: len(full) // 2])
-        out2 = await sm.feed(full[len(full) // 2:])
+        out2 = await sm.feed(full[len(full) // 2 :])
         all_out = b"".join(out1 + out2)
         assert b"message_start" in all_out
         assert b"content_block_delta" in all_out
@@ -728,7 +825,7 @@ def _parse_openai_sse(data: bytes) -> list[dict]:
     for raw in text.split("\n\n"):
         for line in raw.split("\n"):
             if line.startswith("data:"):
-                payload = line[len("data:"):].strip()
+                payload = line[len("data:") :].strip()
                 if payload == "[DONE]":
                     continue
                 out.append(json.loads(payload))
@@ -740,26 +837,50 @@ class TestStreamA2O:
     async def test_text_stream(self):
         sm = StreamA2O(model="gpt-4o")
         chunks = [
-            _anthropic_sse_event("message_start", {
-                "message": {"id": "msg_1", "type": "message", "role": "assistant",
-                            "model": "claude", "content": [],
-                            "stop_reason": None, "stop_sequence": None,
-                            "usage": {"input_tokens": 5, "output_tokens": 0}},
-            }),
-            _anthropic_sse_event("content_block_start", {
-                "index": 0, "content_block": {"type": "text", "text": ""},
-            }),
-            _anthropic_sse_event("content_block_delta", {
-                "index": 0, "delta": {"type": "text_delta", "text": "Hello"},
-            }),
-            _anthropic_sse_event("content_block_delta", {
-                "index": 0, "delta": {"type": "text_delta", "text": " world"},
-            }),
+            _anthropic_sse_event(
+                "message_start",
+                {
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 5, "output_tokens": 0},
+                    },
+                },
+            ),
+            _anthropic_sse_event(
+                "content_block_start",
+                {
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            ),
+            _anthropic_sse_event(
+                "content_block_delta",
+                {
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "Hello"},
+                },
+            ),
+            _anthropic_sse_event(
+                "content_block_delta",
+                {
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": " world"},
+                },
+            ),
             _anthropic_sse_event("content_block_stop", {"index": 0}),
-            _anthropic_sse_event("message_delta", {
-                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                "usage": {"output_tokens": 5},
-            }),
+            _anthropic_sse_event(
+                "message_delta",
+                {
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 5},
+                },
+            ),
             _anthropic_sse_event("message_stop", {}),
         ]
         all_out = b""
@@ -772,9 +893,7 @@ class TestStreamA2O:
         assert parsed[0]["choices"][0]["delta"]["role"] == "assistant"
         # Text content concatenated.
         text_content = "".join(
-            c["choices"][0]["delta"].get("content", "")
-            for c in parsed
-            if c["choices"][0]["delta"].get("content")
+            c["choices"][0]["delta"].get("content", "") for c in parsed if c["choices"][0]["delta"].get("content")
         )
         assert text_content == "Hello world"
         # Last chunk should have finish_reason=stop.
@@ -784,25 +903,43 @@ class TestStreamA2O:
     async def test_tool_use_stream(self):
         sm = StreamA2O(model="gpt-4o")
         chunks = [
-            _anthropic_sse_event("message_start", {
-                "message": {"id": "m1", "type": "message", "role": "assistant",
-                            "model": "claude", "content": [],
-                            "stop_reason": None, "stop_sequence": None,
-                            "usage": {"input_tokens": 5, "output_tokens": 0}},
-            }),
-            _anthropic_sse_event("content_block_start", {
-                "index": 0,
-                "content_block": {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {}},
-            }),
-            _anthropic_sse_event("content_block_delta", {
-                "index": 0,
-                "delta": {"type": "input_json_delta", "partial_json": '{"city":"SF"}'},
-            }),
+            _anthropic_sse_event(
+                "message_start",
+                {
+                    "message": {
+                        "id": "m1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 5, "output_tokens": 0},
+                    },
+                },
+            ),
+            _anthropic_sse_event(
+                "content_block_start",
+                {
+                    "index": 0,
+                    "content_block": {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {}},
+                },
+            ),
+            _anthropic_sse_event(
+                "content_block_delta",
+                {
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"city":"SF"}'},
+                },
+            ),
             _anthropic_sse_event("content_block_stop", {"index": 0}),
-            _anthropic_sse_event("message_delta", {
-                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
-                "usage": {"output_tokens": 5},
-            }),
+            _anthropic_sse_event(
+                "message_delta",
+                {
+                    "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                    "usage": {"output_tokens": 5},
+                },
+            ),
             _anthropic_sse_event("message_stop", {}),
         ]
         all_out = b""
@@ -821,14 +958,23 @@ class TestStreamA2O:
     @pytest.mark.asyncio
     async def test_buffering_across_chunks(self):
         sm = StreamA2O(model="gpt-4o")
-        full = _anthropic_sse_event("message_start", {
-            "message": {"id": "m1", "type": "message", "role": "assistant",
-                        "model": "claude", "content": [],
-                        "stop_reason": None, "stop_sequence": None,
-                        "usage": {"input_tokens": 0, "output_tokens": 0}},
-        })
+        full = _anthropic_sse_event(
+            "message_start",
+            {
+                "message": {
+                    "id": "m1",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude",
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            },
+        )
         out1 = await sm.feed(full[: len(full) // 2])
-        out2 = await sm.feed(full[len(full) // 2:])
+        out2 = await sm.feed(full[len(full) // 2 :])
         all_out = b"".join(out1 + out2)
         assert b"role" in all_out
         assert b"assistant" in all_out

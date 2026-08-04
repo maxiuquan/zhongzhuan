@@ -1,5 +1,7 @@
 """Admin API tests."""
+
 import os
+
 os.environ["ZHONGZHUAN_DEV_NO_DPAPI"] = "1"
 
 import socket
@@ -11,8 +13,10 @@ from zhongzhuan.admin import AdminServer
 
 
 def _free_port() -> int:
-    s = socket.socket(); s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]; s.close()
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
     return p
 
 

@@ -1,4 +1,5 @@
 """Model CRUD (async)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,6 +25,11 @@ class Model:
     is_fallback: bool = False
     # 模型别名：逗号分隔的多个别名，客户端用别名请求时路由到此模型
     aliases: str = ""
+    # 模型能力声明：逗号分隔的 Capability 名称，如 "code_interpreter,web_search"；
+    # "" 表示未声明任何能力（T25 / R-P1-44，v005 新增列）
+    capabilities: str = ""
+    # 上游执行模式：bonded(未声明) | native | emulate | translate（T25 / R-P1-44，v005 新增列）
+    upstream_mode: str = "bonded"
     id: int | None = None
     created_at: int | None = None
     updated_at: int | None = None
@@ -42,37 +48,61 @@ class Model:
 
 # 列顺序：id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,
 #         protocol,anthropic_version,max_tokens_default,upstream_path_override,
-#         is_fallback,aliases,created_at,updated_at
+#         is_fallback,aliases,capabilities,upstream_mode,created_at,updated_at
 _COLS = (
     "id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,"
     "protocol,anthropic_version,max_tokens_default,upstream_path_override,"
-    "is_fallback,aliases,created_at,updated_at"
+    "is_fallback,aliases,capabilities,upstream_mode,created_at,updated_at"
 )
 
 
 def _row(r: tuple) -> Model:
     return Model(
-        id=r[0], name=r[1], upstream_base=r[2], upstream_model=r[3],
-        rpm_limit=r[4], tpm_limit=r[5], enabled=bool(r[6]), weight=r[7],
+        id=r[0],
+        name=r[1],
+        upstream_base=r[2],
+        upstream_model=r[3],
+        rpm_limit=r[4],
+        tpm_limit=r[5],
+        enabled=bool(r[6]),
+        weight=r[7],
         protocol=r[8] if len(r) > 8 and r[8] else "openai",
         anthropic_version=r[9] if len(r) > 9 and r[9] else "2023-06-01",
         max_tokens_default=r[10] if len(r) > 10 and r[10] else 4096,
         upstream_path_override=r[11] if len(r) > 11 and r[11] else "",
         is_fallback=bool(r[12]) if len(r) > 12 else False,
         aliases=r[13] if len(r) > 13 and r[13] else "",
-        created_at=r[14] if len(r) > 14 else None,
-        updated_at=r[15] if len(r) > 15 else None,
+        capabilities=r[14] if len(r) > 14 and r[14] else "",
+        upstream_mode=r[15] if len(r) > 15 and r[15] else "bonded",
+        created_at=r[16] if len(r) > 16 else None,
+        updated_at=r[17] if len(r) > 17 else None,
     )
 
 
 async def create_model(s: Store, m: Model) -> Model:
     now = Store.now()
     m.id = await s.execute(
-        """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, created_at, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (m.name, m.upstream_base, m.upstream_model, m.rpm_limit, m.tpm_limit,
-         int(m.enabled), m.weight, m.protocol, m.anthropic_version, m.max_tokens_default,
-         m.upstream_path_override, int(m.is_fallback), m.aliases, now, now),
+        """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, capabilities, upstream_mode, created_at, updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            m.name,
+            m.upstream_base,
+            m.upstream_model,
+            m.rpm_limit,
+            m.tpm_limit,
+            int(m.enabled),
+            m.weight,
+            m.protocol,
+            m.anthropic_version,
+            m.max_tokens_default,
+            m.upstream_path_override,
+            int(m.is_fallback),
+            m.aliases,
+            getattr(m, "capabilities", ""),
+            getattr(m, "upstream_mode", "bonded"),
+            now,
+            now,
+        ),
     )
     m.created_at = now
     m.updated_at = now
@@ -96,19 +126,33 @@ async def get_model_by_id(s: Store, model_id: int) -> Model | None:
 
 
 async def list_models(s: Store) -> list[Model]:
-    rows = await s.fetchall(
-        f"SELECT {_COLS} FROM models ORDER BY id"
-    )
+    rows = await s.fetchall(f"SELECT {_COLS} FROM models ORDER BY id")
     return [_row(r) for r in rows]
 
 
 async def update_model(s: Store, model_id: int, m: Model) -> None:
     now = Store.now()
     await s.execute(
-        """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, protocol=?, anthropic_version=?, max_tokens_default=?, upstream_path_override=?, is_fallback=?, aliases=?, updated_at=? WHERE id=?""",
-        (m.name, m.upstream_base, m.upstream_model, m.rpm_limit, m.tpm_limit,
-         int(m.enabled), m.weight, m.protocol, m.anthropic_version, m.max_tokens_default,
-         m.upstream_path_override, int(m.is_fallback), m.aliases, now, model_id),
+        """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, protocol=?, anthropic_version=?, max_tokens_default=?, upstream_path_override=?, is_fallback=?, aliases=?, capabilities=?, upstream_mode=?, updated_at=? WHERE id=?""",
+        (
+            m.name,
+            m.upstream_base,
+            m.upstream_model,
+            m.rpm_limit,
+            m.tpm_limit,
+            int(m.enabled),
+            m.weight,
+            m.protocol,
+            m.anthropic_version,
+            m.max_tokens_default,
+            m.upstream_path_override,
+            int(m.is_fallback),
+            m.aliases,
+            getattr(m, "capabilities", ""),
+            getattr(m, "upstream_mode", "bonded"),
+            now,
+            model_id,
+        ),
     )
 
 

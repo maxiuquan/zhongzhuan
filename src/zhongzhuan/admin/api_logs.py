@@ -1,4 +1,5 @@
 """Logs API."""
+
 from __future__ import annotations
 
 from aiohttp import web
@@ -13,8 +14,11 @@ def register_routes(app: web.Application, ctx) -> None:
         model = request.query.get("model")
         status = request.query.get("status")
         result = await list_logs(
-            ctx.store, cursor=cursor, limit=limit,
-            model=model, status=int(status) if status else None,
+            ctx.store,
+            cursor=cursor,
+            limit=limit,
+            model=model,
+            status=int(status) if status else None,
         )
         return web.json_response(result)
 

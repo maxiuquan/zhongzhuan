@@ -1,4 +1,5 @@
 """Scheduler tests."""
+
 import time
 
 from zhongzhuan.proxy.ratelimit import KeyHealth, SlidingWindow
@@ -7,9 +8,11 @@ from zhongzhuan.proxy.scheduler import pick_key, score
 
 def _kh(key_id: int, success: int = 0, failure: int = 0, cooldown: float = 0) -> KeyHealth:
     return KeyHealth(
-        key_id=key_id, api_key=f"sk-{key_id}",
+        key_id=key_id,
+        api_key=f"sk-{key_id}",
         window=SlidingWindow(60, 1000),
-        success_count=success, failure_count=failure,
+        success_count=success,
+        total_failures=failure,
         cooldown_until=cooldown,
     )
 

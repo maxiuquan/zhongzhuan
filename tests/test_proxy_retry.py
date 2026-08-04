@@ -1,4 +1,5 @@
 """Multi-key rotation + 429 retry tests."""
+
 import socket
 import time
 
@@ -34,8 +35,10 @@ async def mock_upstream_429():
 
 
 def _free_port() -> int:
-    s = socket.socket(); s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]; s.close()
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
     return p
 
 
@@ -49,7 +52,14 @@ async def test_proxy_rotates_key_on_429(mock_upstream_429):
     # 这样 scheduler 确定性先选 key 1 → 429 → 轮转到 key 2 → 200
     keys = [
         KeyHealth(key_id=1, api_key="sk-a", window=SlidingWindow(60, 1000), rpm_limit=1000, upstream_base=upstream_url),
-        KeyHealth(key_id=2, api_key="sk-b", window=SlidingWindow(60, 1000), rpm_limit=1000, upstream_base=upstream_url, failure_count=1),
+        KeyHealth(
+            key_id=2,
+            api_key="sk-b",
+            window=SlidingWindow(60, 1000),
+            rpm_limit=1000,
+            upstream_base=upstream_url,
+            total_failures=1,
+        ),
     ]
     proxy = ProxyServer(upstream_clients={upstream_url: upstream}, keys=keys, proxy_timeout=5.0)
     port = _free_port()

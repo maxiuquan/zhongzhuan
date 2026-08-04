@@ -3,6 +3,7 @@
 提供兜底上游的配置查看/修改、模型刷新端点。
 降权系数(fallback_penalty)和启用开关持久化到 system_config 表，可在后台直接修改。
 """
+
 from __future__ import annotations
 
 from aiohttp import web
@@ -36,15 +37,18 @@ def register_routes(app: web.Application, ctx) -> None:
                 status=400,
             )
         from ..__main__ import _fetch_opencode_models, _sync_fallback_models
+
         try:
             model_ids = await _fetch_opencode_models(cfg)
             upserted = await _sync_fallback_models(ctx.store, cfg, model_ids)
             await notify_proxy_reload()
-            return web.json_response({
-                "ok": True,
-                "synced": len(upserted),
-                "models": model_ids,
-            })
+            return web.json_response(
+                {
+                    "ok": True,
+                    "synced": len(upserted),
+                    "models": model_ids,
+                }
+            )
         except Exception as e:
             return web.json_response(
                 {"error": {"message": str(e), "type": "refresh_failed"}},
@@ -54,6 +58,7 @@ def register_routes(app: web.Application, ctx) -> None:
     async def status(request):
         """GET /api/fallback/status — 返回兜底配置 + 当前 DB 中的兜底模型列表。"""
         from ..store.models import list_models
+
         cfg = ctx.config
         # DB 中持久化的配置优先于 config.yaml
         db_enabled = await _get_config_value(ctx.store, _KEY_ENABLED)
@@ -63,17 +68,19 @@ def register_routes(app: web.Application, ctx) -> None:
 
         all_models = await list_models(ctx.store)
         fallback_models = [m for m in all_models if m.is_fallback]
-        return web.json_response({
-            "enabled": enabled,
-            "upstream_base": cfg.fallback.upstream_base if cfg else "",
-            "model_prefix": cfg.fallback.model_prefix if cfg else "oc-",
-            "fallback_penalty": penalty,
-            "fallback_model_count": len(fallback_models),
-            "fallback_models": [
-                {"id": m.id, "name": m.name, "enabled": m.enabled, "upstream_model": m.upstream_model}
-                for m in fallback_models
-            ],
-        })
+        return web.json_response(
+            {
+                "enabled": enabled,
+                "upstream_base": cfg.fallback.upstream_base if cfg else "",
+                "model_prefix": cfg.fallback.model_prefix if cfg else "oc-",
+                "fallback_penalty": penalty,
+                "fallback_model_count": len(fallback_models),
+                "fallback_models": [
+                    {"id": m.id, "name": m.name, "enabled": m.enabled, "upstream_model": m.upstream_model}
+                    for m in fallback_models
+                ],
+            }
+        )
 
     async def update_config(request):
         """PUT /api/fallback/config — 修改兜底配置（启用开关 + 降权系数）。
@@ -104,11 +111,13 @@ def register_routes(app: web.Application, ctx) -> None:
 
         # 通知 proxy reload，让 _load_keys_from_store 重新读取 DB 配置
         await notify_proxy_reload()
-        return web.json_response({
-            "ok": True,
-            "enabled": cfg.fallback.enabled,
-            "fallback_penalty": cfg.fallback.fallback_penalty,
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "enabled": cfg.fallback.enabled,
+                "fallback_penalty": cfg.fallback.fallback_penalty,
+            }
+        )
 
     app.router.add_post("/api/fallback/refresh", refresh)
     app.router.add_get("/api/fallback/status", status)

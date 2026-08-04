@@ -3,6 +3,7 @@
 定价单位：每 1K tokens 的价格（CNY 人民币）。
 费用计算：cost = (tokens_in/1000 * input_price) + (tokens_out/1000 * output_price)
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,14 +23,14 @@ class ModelPricing:
 # 参考_one_api 标准倍率的默认定价表（每 1K tokens，单位：CNY）
 # 实际部署时应在后台按真实上游价格调整
 _DEFAULT_PRICING = {
-    "gpt-4":        (0.21, 0.42),
-    "gpt-4-turbo":  (0.14, 0.28),
-    "gpt-4o":       (0.035, 0.14),
-    "gpt-4o-mini":  (0.00105, 0.0042),
+    "gpt-4": (0.21, 0.42),
+    "gpt-4-turbo": (0.14, 0.28),
+    "gpt-4o": (0.035, 0.14),
+    "gpt-4o-mini": (0.00105, 0.0042),
     "gpt-3.5-turbo": (0.0015, 0.002),
-    "claude-3-opus":  (0.105, 0.525),
+    "claude-3-opus": (0.105, 0.525),
     "claude-3-sonnet": (0.021, 0.105),
-    "claude-3-haiku":  (0.00168, 0.0084),
+    "claude-3-haiku": (0.00168, 0.0084),
     "claude-3.5-sonnet": (0.021, 0.105),
 }
 
@@ -43,8 +44,11 @@ async def get_pricing(s: Store, model_name: str) -> ModelPricing | None:
     if not r:
         return None
     return ModelPricing(
-        model_name=r[0], input_price_per_1k=r[1], output_price_per_1k=r[2],
-        currency=r[3] if r[3] else "CNY", updated_at=r[4],
+        model_name=r[0],
+        input_price_per_1k=r[1],
+        output_price_per_1k=r[2],
+        currency=r[3] if r[3] else "CNY",
+        updated_at=r[4],
     )
 
 
@@ -55,8 +59,11 @@ async def list_pricing(s: Store) -> list[ModelPricing]:
     )
     return [
         ModelPricing(
-            model_name=r[0], input_price_per_1k=r[1], output_price_per_1k=r[2],
-            currency=r[3] if r[3] else "CNY", updated_at=r[4],
+            model_name=r[0],
+            input_price_per_1k=r[1],
+            output_price_per_1k=r[2],
+            currency=r[3] if r[3] else "CNY",
+            updated_at=r[4],
         )
         for r in rows
     ]
@@ -94,8 +101,14 @@ async def init_default_pricing(s: Store) -> int:
         return 0
     count = 0
     for model, (inp, out) in _DEFAULT_PRICING.items():
-        await upsert_pricing(s, ModelPricing(
-            model_name=model, input_price_per_1k=inp, output_price_per_1k=out, currency="CNY",
-        ))
+        await upsert_pricing(
+            s,
+            ModelPricing(
+                model_name=model,
+                input_price_per_1k=inp,
+                output_price_per_1k=out,
+                currency="CNY",
+            ),
+        )
         count += 1
     return count

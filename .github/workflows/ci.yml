@@ -1,0 +1,301 @@
+name: CI
+
+# T36/T37 (R-P2-13)：11 项 required check，全部为独立 job。
+#
+# GitHub 的 branch protection 无法在 YAML 文件内声明 "required"，只能靠
+# repo settings 里把下列 job 全部勾选为 required。新增 job 后请在
+# Settings -> Branches 里同步勾选，否则 PR 仍可绕过（诚实标注此限制）。
+#
+# job 清单：
+#   1. test            pytest（py 3.10/3.11/3.12 矩阵，skip live）
+#   2. ruff            ruff check + ruff format --check
+#   3. mypy            mypy src/zhongzhuan
+#   4. coverage        pytest + --cov + --cov-fail-under
+#   5. hypothesis      Hypothesis 属性测试（T31 判据②）
+#   6. bandit-audit    bandit -ll + pip-audit
+#   7. clean-install   wheel/sdist 干净 venv 安装（R-P0-08/09，T05）
+#   8. golden          旧协议字节级 golden 基线（T08）
+#   9. backend-matrix  SQLite 全跑 + MySQL(TiDB 兼容) service container
+#  10. lifecycle       Windows/Linux 进程级启停 + /healthz
+#  11. sdk-contract    OpenAI SDK 合约测试（Python 直连真实 ProxyServer.app()
+#                      + MockUpstream；TS 直连本地 mock server；零真实网络）
+#  12. compat-report   T38 兼容报告生成器 --check 覆盖度校验（R-P1-50）
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  # ------------------------------------------------------------------ #
+  # 1. test：主测试矩阵（skip live）
+  # ------------------------------------------------------------------ #
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests (skip live)
+        run: python -m pytest tests/ -q -m "not live" --ignore=tests/test_proxy_live.py
+
+      - name: Pytest collect-only sanity (zero errors)
+        run: python -m pytest tests/ --collect-only -q --ignore=tests/test_proxy_live.py
+
+  # ------------------------------------------------------------------ #
+  # 2. ruff：lint + format（T36 / R-P2-13）
+  # ------------------------------------------------------------------ #
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: ruff check
+        run: python -m ruff check src/zhongzhuan tests/
+      - name: ruff format --check
+        run: python -m ruff format --check src/zhongzhuan tests/
+
+  # ------------------------------------------------------------------ #
+  # 3. mypy：静态类型检查（T36 / R-P2-13）
+  # ------------------------------------------------------------------ #
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: mypy
+        run: python -m mypy src/zhongzhuan
+
+  # ------------------------------------------------------------------ #
+  # 4. coverage：pytest + 覆盖率门槛（T36 / R-P2-13）
+  # ------------------------------------------------------------------ #
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      # --cov-fail-under 取当前实测值（本地 TOTAL 80%）留余量防 PR 波动误红。
+      - name: pytest with coverage
+        run: |
+          python -m pytest tests/ -q -m "not live" --cov=zhongzhuan \
+            --cov-report=term-missing --cov-fail-under=70
+
+  # ------------------------------------------------------------------ #
+  # 5. hypothesis：Hypothesis 属性测试（T36 / R-P2-13；T31 判据②）
+  # ------------------------------------------------------------------ #
+  hypothesis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Hypothesis property tests
+        run: python -m pytest tests/test_responses_integration_property.py -q
+
+  # ------------------------------------------------------------------ #
+  # 6. bandit-audit：bandit + 依赖漏洞扫描（T36 / R-P2-13）
+  # ------------------------------------------------------------------ #
+  bandit-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      # -lll：仅 High 严重度失败（当前 0 High；Medium 的 B608 是动态表名白名单
+      # 场景的误报倾向项，不阻断——诚实标注：非零 Medium 为存量）。
+      - name: bandit security scan
+        run: python -m bandit -lll -r src/zhongzhuan -c pyproject.toml
+      - name: pip-audit dependency vulnerabilities
+        run: python -m pip_audit -r requirements.txt --skip-editable
+
+  # ------------------------------------------------------------------ #
+  # 7. clean-install：wheel/sdist 干净 venv 安装（R-P0-08/09，T05）
+  # ------------------------------------------------------------------ #
+  clean-install:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        install-spec: [".", ".[tidb,admin]"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install in clean venv
+        run: |
+          python -m venv /tmp/clean && . /tmp/clean/bin/activate
+          python -m pip install --upgrade pip
+          pip install "${{ matrix.install-spec }}"
+      - name: Verify import + CLI
+        run: |
+          . /tmp/clean/bin/activate
+          python -c "import zhongzhuan; print('import OK')"
+          zhongzhuan --help >/dev/null && echo "CLI OK"
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Requirements sync check
+        run: python scripts/check_requirements_sync.py
+
+  # ------------------------------------------------------------------ #
+  # 8. golden：旧协议字节级 golden 基线（T08）
+  # ------------------------------------------------------------------ #
+  golden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Run golden baseline tests
+        run: python -m pytest tests/test_legacy_golden.py -q -m "golden"
+
+  # ------------------------------------------------------------------ #
+  # 9. backend-matrix：SQLite/TiDB 双后端集成（T36 / R-P2-13）
+  #
+  # SQLite 侧永远真跑；MySQL(TiDB 兼容协议) 侧由 mysql:8 service container
+  # 提供。TiDB 协议兼容 MySQL，用 MySQL 8 做 dialect 兼容代理。
+  # 测试通过 ZHONGZHUAN_TIDB_DSN 探测连接，连不上则 skip（本地无容器时）。
+  # ------------------------------------------------------------------ #
+  backend-matrix:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: zhongzhuan
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Backend matrix tests (SQLite + MySQL/TiDB-compat)
+        run: |
+          python -m pytest tests/test_backend_matrix.py -q \
+            -m "backend_matrix"
+        env:
+          ZHONGZHUAN_TIDB_DSN: 127.0.0.1:3306:root:root:zhongzhuan
+
+  # ------------------------------------------------------------------ #
+  # 10. lifecycle：Windows/Linux 进程级启停 + /healthz（T36 / R-P2-13）
+  # ------------------------------------------------------------------ #
+  lifecycle:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Lifecycle start/stop + /healthz
+        run: python -m pytest tests/test_lifecycle.py -q -m "lifecycle"
+
+  # ------------------------------------------------------------------ #
+  # T37：OpenAI SDK contract tests（R-P1-49）。Python + TypeScript 双侧都走
+  # 官方 SDK 打本地 localhost（零真实网络）：Python 侧请求真实
+  # ``ProxyServer.app()``（六条 Responses 路由 + MockUpstream 回放，mock回放
+  # 标注），TS 侧直连本地 mock server（openai-node 4.104.0 未暴露 compact，
+  # 该缺口在 README 诚实标注，SDK bump 时自动暴露）。
+  # ------------------------------------------------------------------ #
+  sdk-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Install Python deps (test extra 已含 openai)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[test]
+      - name: Python SDK contract tests
+        run: python -m pytest tests/contract/python -q
+      - name: TypeScript SDK contract tests
+        working-directory: tests/contract/typescript
+        run: |
+          npm ci --ignore-scripts
+          npm test
+
+  # ------------------------------------------------------------------ #
+  # 12. compat-report：T38 兼容报告覆盖度校验（R-P1-50 判据②）
+  #
+  # 以 --check 模式重跑生成器并比对提交物：drift 即失败，强制报告与
+  # 生成器状态矩阵保持一致。禁止手改 docs/v3/03-兼容报告.md。
+  # ------------------------------------------------------------------ #
+  compat-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[test]
+      - name: Regenerate compat report and check drift
+        run: python scripts/gen_compat_report.py --check
+  # ------------------------------------------------------------------ #

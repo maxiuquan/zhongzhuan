@@ -5,12 +5,11 @@ SSE event bytes (``event: <type>\\ndata: {json}\\n\\n``).
 
 State machine: ``INIT`` -> ``TEXT_BLOCK`` -> ``TOOL_BLOCK`` -> ``DONE``.
 """
+
 from __future__ import annotations
 
 import json
-import time
 import uuid
-from typing import Any
 
 from loguru import logger
 
@@ -25,8 +24,8 @@ MAP_FINISH_REASON_O2A: dict[str, str] = {
 }
 
 # State constants
-INIT = "INIT"          # message_start not yet emitted
-STARTED = "STARTED"    # message_start emitted, no content block open yet
+INIT = "INIT"  # message_start not yet emitted
+STARTED = "STARTED"  # message_start emitted, no content block open yet
 TEXT_BLOCK = "TEXT_BLOCK"
 TOOL_BLOCK = "TOOL_BLOCK"
 DONE = "DONE"
@@ -131,7 +130,7 @@ class StreamO2A:
                 if not line or line.startswith(":"):
                     continue
                 if line.startswith("data:"):
-                    data_lines.append(line[len("data:"):].lstrip())
+                    data_lines.append(line[len("data:") :].lstrip())
                 # event:, id:, retry: etc. — ignore for OpenAI compat.
             if not data_lines:
                 continue
@@ -144,9 +143,7 @@ class StreamO2A:
             except (json.JSONDecodeError, ValueError):
                 # Should not happen after event-boundary split — if it does,
                 # the upstream sent a malformed event. Log and drop.
-                logger.warning(
-                    "StreamO2A: failed to parse SSE event: {}", data_str[:200]
-                )
+                logger.warning("StreamO2A: failed to parse SSE event: {}", data_str[:200])
                 continue
             out.extend(self._handle_openai_chunk(data))
         return out
@@ -177,28 +174,48 @@ class StreamO2A:
                 # Open text block at index 0.
                 self._current_index = 0
                 self._next_block_index = 1
-                out.append(_sse_event("content_block_start", {
-                    "index": 0,
-                    "content_block": {"type": "text", "text": ""},
-                }))
+                out.append(
+                    _sse_event(
+                        "content_block_start",
+                        {
+                            "index": 0,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                    )
+                )
                 self.state = TEXT_BLOCK
             if self.state == TEXT_BLOCK:
-                out.append(_sse_event("content_block_delta", {
-                    "index": 0,
-                    "delta": {"type": "text_delta", "text": str(content_delta)},
-                }))
+                out.append(
+                    _sse_event(
+                        "content_block_delta",
+                        {
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": str(content_delta)},
+                        },
+                    )
+                )
             elif self.state == TOOL_BLOCK:
                 # Text after tool calls — open a new text block.
                 self._current_index = self._next_block_index
                 self._next_block_index += 1
-                out.append(_sse_event("content_block_start", {
-                    "index": self._current_index,
-                    "content_block": {"type": "text", "text": ""},
-                }))
-                out.append(_sse_event("content_block_delta", {
-                    "index": self._current_index,
-                    "delta": {"type": "text_delta", "text": str(content_delta)},
-                }))
+                out.append(
+                    _sse_event(
+                        "content_block_start",
+                        {
+                            "index": self._current_index,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                    )
+                )
+                out.append(
+                    _sse_event(
+                        "content_block_delta",
+                        {
+                            "index": self._current_index,
+                            "delta": {"type": "text_delta", "text": str(content_delta)},
+                        },
+                    )
+                )
                 self.state = TEXT_BLOCK
 
         # Handle tool_calls delta.
@@ -227,18 +244,23 @@ class StreamO2A:
         """Emit the Anthropic ``message_start`` event."""
         msg_id = first_chunk.get("id") or self._message_id
         model = self.model or first_chunk.get("model", "")
-        return [_sse_event("message_start", {
-            "message": {
-                "id": msg_id,
-                "type": "message",
-                "role": "assistant",
-                "model": model,
-                "content": [],
-                "stop_reason": None,
-                "stop_sequence": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
-            }
-        })]
+        return [
+            _sse_event(
+                "message_start",
+                {
+                    "message": {
+                        "id": msg_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "model": model,
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0},
+                    }
+                },
+            )
+        ]
 
     def _handle_tool_calls(self, tool_calls: list[dict]) -> list[bytes]:
         """Handle OpenAI delta.tool_calls array. Returns Anthropic SSE bytes."""
@@ -255,10 +277,12 @@ class StreamO2A:
                     out.append(_sse_event("content_block_stop", {"index": 0}))
                 elif self.state == TOOL_BLOCK:
                     # Close previous tool block.
-                    out.append(_sse_event(
-                        "content_block_stop",
-                        {"index": self._current_index},
-                    ))
+                    out.append(
+                        _sse_event(
+                            "content_block_stop",
+                            {"index": self._current_index},
+                        )
+                    )
                 # Allocate a new content block index for this tool_use.
                 block_index = self._next_block_index
                 self._next_block_index += 1
@@ -267,36 +291,51 @@ class StreamO2A:
                 self.state = TOOL_BLOCK
                 tool_id = tc.get("id") or f"toolu_{uuid.uuid4().hex[:22]}"
                 tool_name = fn.get("name", "")
-                out.append(_sse_event("content_block_start", {
-                    "index": block_index,
-                    "content_block": {
-                        "type": "tool_use",
-                        "id": tool_id,
-                        "name": tool_name,
-                        "input": {},
-                    },
-                }))
+                out.append(
+                    _sse_event(
+                        "content_block_start",
+                        {
+                            "index": block_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": tool_id,
+                                "name": tool_name,
+                                "input": {},
+                            },
+                        },
+                    )
+                )
                 # If arguments chunk came in the same delta, emit it.
                 args_partial = fn.get("arguments")
                 if args_partial:
-                    out.append(_sse_event("content_block_delta", {
-                        "index": block_index,
-                        "delta": {
-                            "type": "input_json_delta",
-                            "partial_json": args_partial,
-                        },
-                    }))
+                    out.append(
+                        _sse_event(
+                            "content_block_delta",
+                            {
+                                "index": block_index,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": args_partial,
+                                },
+                            },
+                        )
+                    )
             else:
                 block_index = self._tool_index_map[oai_idx]
                 args_partial = fn.get("arguments")
                 if args_partial:
-                    out.append(_sse_event("content_block_delta", {
-                        "index": block_index,
-                        "delta": {
-                            "type": "input_json_delta",
-                            "partial_json": args_partial,
-                        },
-                    }))
+                    out.append(
+                        _sse_event(
+                            "content_block_delta",
+                            {
+                                "index": block_index,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": args_partial,
+                                },
+                            },
+                        )
+                    )
         return out
 
     def _finish(self, finish_reason: str | None) -> list[bytes]:
@@ -323,7 +362,9 @@ class StreamO2A:
                     "reasoning_content (thinking) — model produced only thinking, "
                     "no final answer. finish_reason={}, state={}. "
                     "Check upstream max_tokens / reasoning_effort / content_filter.",
-                    self._reasoning_chars, finish_reason, self.state,
+                    self._reasoning_chars,
+                    finish_reason,
+                    self.state,
                 )
             else:
                 logger.warning(
@@ -331,7 +372,8 @@ class StreamO2A:
                     "no content/tool/reasoning delta received from upstream. "
                     "Likely upstream returned empty stream (check upstream model/"
                     "key/max_tokens or content_filter).",
-                    finish_reason, self.state,
+                    finish_reason,
+                    self.state,
                 )
 
         out: list[bytes] = []
@@ -352,10 +394,15 @@ class StreamO2A:
             stop_reason = MAP_FINISH_REASON_O2A.get(finish_reason, "end_turn")
         # Rough output token estimate: chars / 4.
         output_tokens = max(1, self._output_chars // 4)
-        out.append(_sse_event("message_delta", {
-            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": output_tokens},
-        }))
+        out.append(
+            _sse_event(
+                "message_delta",
+                {
+                    "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                    "usage": {"output_tokens": output_tokens},
+                },
+            )
+        )
         out.append(_sse_event("message_stop", {}))
         self.state = DONE
         self._finished = True

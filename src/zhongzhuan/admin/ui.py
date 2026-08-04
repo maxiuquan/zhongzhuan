@@ -6,10 +6,10 @@
 - ECharts 数据看板（请求趋势、模型分布、Token 堆叠）
 - GitHub Dark 配色
 """
+
 from __future__ import annotations
 
 from aiohttp import web
-from .auth import auth_enabled
 
 
 INDEX_HTML = """<!doctype html>
@@ -1056,5 +1056,6 @@ setInterval(loadOverview, 30000);
 def mount_ui(app: web.Application, ctx) -> None:
     async def index(_request: web.Request) -> web.Response:
         return web.Response(text=INDEX_HTML, content_type="text/html", charset="utf-8")
+
     app.router.add_get("/", index)
     app.router.add_get("/ui/", index)

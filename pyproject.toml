@@ -9,19 +9,65 @@ description = "Local OpenAI-compatible API relay for AI coding tools"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
+authors = [{name = "zhongzhuan contributors"}]
+keywords = ["openai", "anthropic", "llm", "proxy", "relay", "api-gateway"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: Proxy Servers",
+]
+
+# ---------------------------------------------------------------------------
+# 依赖唯一事实源（R-P0-08）
+#
+# 本节是全仓依赖的唯一权威声明。requirements.txt / requirements-vps.txt 均为
+# 本文件的派生物，禁止在那两个文件里单独增删依赖。
+# ---------------------------------------------------------------------------
 dependencies = [
-    "aiohttp>=3.9",
-    "httpx>=0.27",
+    "aiohttp>=3.9,<4",
+    "httpx>=0.27,<1",
     "pyyaml>=6.0",
     "loguru>=0.7",
+    "aiosqlite>=0.19",      # store/sqlite_store.py 已使用，此前未声明
+    "cryptography>=42",     # crypto/aes_cipher.py、proxy/tls.py 已使用，此前未声明
+    "python-dotenv>=1.0",   # __main__.py 已使用，此前未声明
+    "pydantic>=2.6,<3",     # R-P1-62 严格配置 schema（Phase 3.5）
 ]
 
 [project.optional-dependencies]
+# 已在核心依赖中（aiosqlite），保留空分组以维持 CLI / 文档口径一致
+sqlite = []
+tidb = ["aiomysql>=0.2"]
+admin = ["PyJWT>=2.8", "bcrypt>=4.1"]
 build = ["pyinstaller>=6.0"]
-dev = ["pytest>=7.4", "pytest-asyncio>=0.23", "aiohttp>=3.9"]
+mcp = ["mcp>=1.2"]                                  # R-P1-46/47 Remote MCP client（T27）
+metrics = [
+    "prometheus-client>=0.20",                      # R-P2-09 /metrics 导出
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-exporter-otlp>=1.24",
+]
+test = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+    "hypothesis>=6.98",                             # R-P1-68 SSE 分片属性测试
+    "respx>=0.21",                                  # R-P2-19 httpx 层 mock 上游
+    "openai>=1.40",                                 # R-P1-49 T37 Python SDK contract tests
+    "psutil>=5.9",                                  # T31 nightly soak RSS sampling
+]
+lint = ["ruff>=0.4", "mypy>=1.9", "bandit>=1.7", "pip-audit>=2.7"]
+dev = ["zhongzhuan[test,lint,tidb,admin,metrics,mcp]"]
 
 [project.scripts]
 zhongzhuan = "zhongzhuan.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/zhongzhuan/zhongzhuan"
+Issues = "https://github.com/zhongzhuan/zhongzhuan/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -29,6 +75,41 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = ["-m", "not soak"]
 markers = [
     "asyncio: marks tests as async",
+    "golden: 旧协议字节级 golden 基线对比",
+    "live: 需要真实网络/真实上游，默认不在 CI 运行",
+    "soak: 长稳 nightly（T31 判据④），默认跳过，pytest -m soak 显式运行",
+    "backend_matrix: SQLite/TiDB 双后端集成矩阵（T36 / R-P2-13）",
+    "lifecycle: 进程级启停 + /healthz 探测（T36 / R-P2-13）",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+exclude = [
+    ".venv",
+    ".venv3",
+    ".venv_cleantest",
+    "build",
+    "dist",
+    "dist_new",
+    "mod",
+    "9router_research",
+    "tests/golden",
+]
+
+[tool.ruff.lint]
+# Phase 0 只开启「能抓真 bug」的规则集，风格类规则留给 T36 收紧。
+select = ["E9", "F63", "F7", "F82", "F401", "F811"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+follow_imports = "silent"

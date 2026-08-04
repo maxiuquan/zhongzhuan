@@ -1,0 +1,1 @@
+{"id": "chatcmpl-fixture0001", "object": "chat.completion", "created": 0, "model": "upstream-model", "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello, world!"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15}}

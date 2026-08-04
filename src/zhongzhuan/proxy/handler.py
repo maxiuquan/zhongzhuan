@@ -1,9 +1,10 @@
 """/v1/* route handler: pass-through with multi-key retry + protocol translation."""
+
 from __future__ import annotations
 
 import json
 import time
-import urllib.parse
+from typing import Any
 
 from aiohttp import web
 
@@ -12,14 +13,20 @@ import asyncio
 from ..store import Store
 from ..store.logs import log_request
 from ..upstream import UpstreamClient
+from ..config.timeouts import DEFAULT_TIMEOUT_POLICY, TimeoutPolicy
+from ..observability.metrics import record_v3_fallback
+from ..responses_v3.capability import CapabilityRouter, StaticRouteRegistry
+from ..responses_v3.request_sanitizer import RequestSanitizer, capability_values
+from .context import RequestContextBuilder
 from .ratelimit import KeyHealth, STATE_HEALTHY
 from .retry import (
-    mark_auth_failure, mark_rate_limited, mark_server_error,
-    mark_network_failure, mark_failure, mark_success, learn_rate_limits,
-    classify_failure, reason_for_exhaustion,
+    mark_network_failure,
+    mark_success,
+    learn_rate_limits,
+    classify_failure,
+    reason_for_exhaustion,
 )
 from .scheduler import pick_key
-from .protocol.detect import detect_inbound_protocol
 from .protocol.translate_a2o import translate_request_a2o, translate_response_o2a
 from .protocol.translate_o2a import translate_request_o2a, translate_response_a2o
 from .protocol.errors import translate_error_a2o, translate_error_o2a
@@ -31,6 +38,7 @@ from .protocol.responses import (
     ResponsesStreamTranslator,
     CompositeStreamTranslator,
 )
+from .protocol.translator_base import finish_translator
 
 from loguru import logger as _lg
 
@@ -38,13 +46,26 @@ from loguru import logger as _lg
 def make_handler(
     upstream_clients: dict[str, UpstreamClient],
     keys: list[KeyHealth],
-    proxy_timeout: float = 300.0,
+    proxy_timeout: float | None = None,
     store: Store | None = None,
     load_keys_fn=None,
     groups: list[dict] | None = None,
     sticky_ttl: float = 1800.0,
+    timeouts: TimeoutPolicy | None = None,
+    *,
+    feature_flags=None,
+    v3_handler=None,
 ) -> ProxyHandler:
-    """Factory: create a ProxyHandler for the aiohttp route."""
+    """Factory: create a ProxyHandler for the aiohttp route.
+
+    ``proxy_timeout`` (single float) is the deprecated shape kept for existing
+    callers/tests; ``timeouts`` is the six-layer policy introduced by T01.
+
+    ``feature_flags`` / ``v3_handler`` are the T22 Responses v3 wiring: when
+    both are supplied, Responses requests that pass the feature flag are served
+    by the v3 resource handler at the single fork point; otherwise the legacy
+    path is used (R-P0-22).
+    """
     return ProxyHandler(
         clients=upstream_clients,
         keys=keys,
@@ -53,6 +74,9 @@ def make_handler(
         load_keys_fn=load_keys_fn,
         groups=groups,
         sticky_ttl=sticky_ttl,
+        timeouts=timeouts,
+        feature_flags=feature_flags,
+        v3_handler=v3_handler,
     )
 
 
@@ -91,16 +115,36 @@ class ProxyHandler:
         clients: dict[str, UpstreamClient],
         keys: list[KeyHealth],
         store: Store | None = None,
-        proxy_timeout: float = 300.0,
+        proxy_timeout: float | None = None,
         load_keys_fn=None,
         groups: list[dict] | None = None,
         sticky_ttl: float = 1800.0,
+        timeouts: TimeoutPolicy | None = None,
+        *,
+        feature_flags=None,
+        v3_handler=None,
     ) -> None:
         self._clients = clients
         self._keys = keys
         self.store = store
+        # T22: Responses v3 wiring.  ``_feature_flags`` decides whether a
+        # Responses request is served by ``_v3`` at the single fork point; a
+        # ``None`` v3 handler means v3 is unavailable (e.g. store-less setup)
+        # and every Responses request falls back to the legacy path.
+        self._feature_flags = feature_flags
+        self._v3 = v3_handler
+        # Timeout wiring (T01): the six-layer policy wins; the legacy single
+        # float is only used when no policy was supplied.
+        self._timeouts: TimeoutPolicy | None = timeouts
         self._timeout = proxy_timeout
+        if self._timeouts is None and proxy_timeout is None:
+            self._timeouts = DEFAULT_TIMEOUT_POLICY
         self._load_keys_fn = load_keys_fn
+        # RequestContext building (T02): single-parse preamble.
+        self._ctx_builder = RequestContextBuilder()
+        # One lossless v3 fact model per request. Capability routing and sticky
+        # binding consume this same object instead of re-scanning the payload.
+        self._request_sanitizer = RequestSanitizer()
         # Lazy client cache (upstream_base → UpstreamClient)
         self._client_cache: dict[str, UpstreamClient] = dict(clients)
         self._lock = asyncio.Lock()
@@ -111,7 +155,20 @@ class ProxyHandler:
         # conversations on the same upstream key to avoid mid-conversation
         # model switches that cause hallucination spikes.
         self._sticky: dict[str, tuple[int, float]] = {}
+        #: session_key → capabilities snapshot at bind time (T35 / R-P1-61).
+        #: Kept separate from ``_sticky`` so the existing two-tuple layout stays
+        #: intact (existing tests write ``_sticky[s] = (key_id, expire_at)``).
+        self._sticky_caps: dict[str, frozenset[str]] = {}
+        #: session_key → failover reason, flushed to the store by the caller
+        #: (T35 / R-P1-61 故障迁移记录). Populated when a sticky key is
+        #: rejected for health / capability mismatch.
+        self._binding_failover_reasons: dict[str, str] = {}
         self._sticky_ttl: float = sticky_ttl
+        #: Lazy ResponseStore for session→route binding persistence.
+        self._rs = None
+        #: Injectable clock (T35): tests swap in a FakeClock to avoid real
+        #: waits when exercising the sticky TTL.
+        self._now = time.time
         # 后台任务引用（优化点4+5：sticky 清理 + 健康状态快照）
         self._bg_tasks: list[asyncio.Task] = []
         self._bg_running = False
@@ -154,60 +211,686 @@ class ProxyHandler:
             if matched:
                 return matched
             # 3. 别名匹配：检查 KeyHealth 是否有 aliases 属性（从 DB 加载时设置）
-            matched = [k for k in available if getattr(k, "aliases", "") and requested_model in
-                       [a.strip() for a in str(getattr(k, "aliases", "")).split(",") if a.strip()]]
+            matched = [
+                k
+                for k in available
+                if getattr(k, "aliases", "")
+                and requested_model in [a.strip() for a in str(getattr(k, "aliases", "")).split(",") if a.strip()]
+            ]
             if matched:
                 return matched
 
         return available
 
-    # ---- Sticky session helpers ----
+    # ------------------------------------------------------------------
+    # T22: Responses v3 HTTP adapter (the only v3 entry point in production).
+    # ------------------------------------------------------------------
+
+    async def _dispatch_v3(self, request: web.Request, ctx) -> web.Response:
+        """Serve a Responses request through the v3 resource handler.
+
+        This is the production adapter that turns a ``web.Request`` into the
+        ``dispatch(method, path, *, workspace_id, body)`` resource call and
+        maps the ``(status, body)`` result back to a ``web.Response``
+        (R-P1-28: six endpoints must be reachable over HTTP, not just from a
+        unit test).
+        """
+        body_obj = ctx.body or {}
+        # GET query params (input_items pagination) are merged into the body so
+        # the resource handler's ``after`` / ``limit`` parsing sees them; the
+        # resource layer rejects invalid values with a standard 400 (T22).
+        query = request.query
+        if query:
+            body_obj = dict(body_obj)
+            for key in ("after", "limit"):
+                if key in query:
+                    body_obj[key] = query[key]
+        # The access-token row is the current tenant boundary.  Anonymous/dev
+        # traffic keeps the historical default workspace; authenticated tokens
+        # are isolated from one another in ResponseStore queries.
+        token_id = int(request.get("token_id", 0) or 0)
+        workspace_id = f"token:{token_id}" if token_id > 0 else ""
+        try:
+            status, payload = await self._v3.dispatch(
+                ctx.method,
+                ctx.path,
+                workspace_id=workspace_id,
+                body=body_obj,
+            )
+        except Exception as exc:  # never leak a traceback to the client
+            _lg.exception(f"[{id(request):x}] v3 dispatch failed: {type(exc).__name__}: {exc}")
+            status, payload = (
+                500,
+                {
+                    "error": {
+                        "message": "internal server error",
+                        "type": "internal_server_error",
+                        "code": "internal_server_error",
+                    }
+                },
+            )
+        return web.json_response(payload, status=status)
+
+    # ------------------------------------------------------------------
+    # T26: v3 create over the real production upstream chain.
+    #
+    # The legacy non-stream path (below) already owns the multi-key
+    # scheduler, sticky binding, health state, retry/failure classification
+    # and the Responses -> Chat/Anthropic translators.  v3 create reuses that
+    # chain instead of building a second transport:
+    #
+    #   1. capability route  -> ExecutionMode + upstream_path (NATIVE/EMULATE/
+    #      TRANSLATE, or a standard 400/503 error);
+    #   2. response_id is minted ONCE here and used by the returned object,
+    #      the persisted row and (in T26 stream) the SSE lifecycle;
+    #   3. the sanitizer's payload becomes the single outbound body source;
+    #   4. on success the row is moved to a terminal state with output/usage
+    #      so retrieve() returns the completed resource (store=true only).
+    # ------------------------------------------------------------------
+
+    def _new_response_id(self) -> str:
+        import uuid
+
+        return "resp_" + uuid.uuid4().hex
+
+    def _v3_workspace_id(self, request: web.Request) -> str:
+        """The access-token row is the current tenant boundary (T22)."""
+        token_id = int(request.get("token_id", 0) or 0)
+        return f"token:{token_id}" if token_id > 0 else ""
+
+    def _capability_router(self, candidates: list[KeyHealth]) -> CapabilityRouter:
+        """One router per create, over the *filtered* candidate pool."""
+        return CapabilityRouter(StaticRouteRegistry(candidates))
+
+    def _v3_response_store(self):
+        rs = self._response_store()
+        if rs is not None:
+            return rs
+        # A store-less setup never reaches here: ``_v3 is None`` short-circuits
+        # the fork before create dispatch.  Defensive fallback to the handler
+        # wiring used by the v3 resource endpoints.
+        if self._v3 is not None and hasattr(self._v3, "_store"):
+            return self._v3._store
+        return None
+
+    async def _persist_v3_terminal(
+        self,
+        *,
+        response_id: str,
+        workspace_id: str,
+        status: str,
+        usage: dict[str, Any] | None = None,
+        output: list[Any] | None = None,
+        terminal_reason: str = "",
+        error: str = "",
+    ) -> None:
+        rs = self._v3_response_store()
+        if rs is None:
+            return
+        try:
+            await rs.update_status(
+                response_id,
+                status,
+                workspace_id=workspace_id,
+                terminal_reason=terminal_reason,
+                error=error,
+                usage=usage or {},
+                output=output or [],
+            )
+            if output:
+                await rs.save_output_items(response_id, output)
+        except Exception:
+            _lg.exception(f"[v3] persist terminal {status} for {response_id} failed (workspace={workspace_id!r})")
+
+    async def _dispatch_v3_create(
+        self,
+        request: web.Request,
+        ctx,
+        candidates: list[KeyHealth],
+    ) -> web.Response:
+        """Execute one real v3 create against an upstream (T26)."""
+        body_obj = dict(ctx.body or {})
+        workspace_id = self._v3_workspace_id(request)
+        response_id = self._new_response_id()
+
+        # R-P0-29: a chain that cannot be resolved is a standard error, never a
+        # silent stateless turn.  The resource layer owns the guard; we only
+        # let it fail fast before any network I/O.
+        previous_response_id = str(body_obj.get("previous_response_id") or "")
+        if previous_response_id and self._v3 is not None:
+            resolution = await self._v3.resolve_chain(
+                previous_response_id,
+                workspace_id=workspace_id,
+            )
+            if not resolution.ok:
+                from ..responses_v3.chain import chain_error_response
+
+                status, payload = chain_error_response(resolution)
+                return web.json_response(payload, status=status)
+
+        # Capability route over the *filtered* candidate pool.  A hosted tool
+        # with no executor is a standard 400; a declared-but-down route is 503.
+        # Both must be answered BEFORE any streaming response is prepared
+        # (T26: never a fake 200 over a missing executor).
+        sanitized = self._request_sanitizer.sanitize(body_obj)
+        decision = self._capability_router(candidates).route(sanitized, candidates)
+        if hasattr(decision, "to_response"):
+            # CapabilityError: standard 400 (no executor) or 503 (route down).
+            status, payload = decision.to_response()
+            return web.json_response(payload, status=status)
+
+        store_enabled = bool(body_obj.get("store", True))
+        is_stream = bool(body_obj.get("stream", False))
+        now = int(time.time())
+
+        # Persist the skeleton row (store=true only).  The request is redacted
+        # by the resource layer on the write path; here we store the raw
+        # sanitized payload because reasoning text never reached the store in
+        # this path (the sanitizer does not materialise it either).
+        rs = self._v3_response_store()
+        if store_enabled and rs is not None:
+            from ..proxy.protocol.item_registry import parse_input_items, serialize_item
+
+            input_items = [serialize_item(it) for it in parse_input_items(body_obj.get("input"))]
+            stored_request = dict(body_obj)
+            if "input" in stored_request:
+                stored_request["input"] = input_items
+            try:
+                await rs.create_response(
+                    response_id=response_id,
+                    workspace_id=workspace_id,
+                    model=str(body_obj.get("model", "") or ""),
+                    status="in_progress",
+                    previous_response_id=previous_response_id,
+                    background=bool(body_obj.get("background", False)),
+                    request=stored_request,
+                )
+                if input_items:
+                    await rs.save_input_items(response_id, input_items)
+                if previous_response_id:
+                    from ..responses_v3.chain import ChainResolver
+
+                    resolver = ChainResolver(rs)
+                    resolution = await resolver.resolve_chain(previous_response_id, workspace_id)
+                    if resolution.ok:
+                        await rs.save_state_chain(
+                            response_id,
+                            previous_response_id,
+                            resolution.depth + 1,
+                            workspace_id=workspace_id,
+                        )
+            except Exception:
+                _lg.exception(f"[v3] skeleton persist failed for {response_id}")
+                rs = None  # do not fatal the request over a store hiccup
+
+        # Build the outbound body from the sanitizer's payload (single fact
+        # source).  The chain resolution is deliberately NOT injected here:
+        # the legacy translators consume the request body as-is; the v3
+        # chain recovery contract is exercised by the resource layer on
+        # retrieve/input_items.
+        final_body = json.dumps(body_obj, ensure_ascii=False).encode()
+
+        # -- Non-stream create: reuse the production request chain ----------
+        if not is_stream:
+            resp, payload_bytes = await self._run_v3_nonstream(
+                request=request,
+                body_obj=body_obj,
+                final_body=final_body,
+                decision=decision,
+                requested_model=ctx.requested_model or "",
+                inbound_protocol="responses",
+                session_key=self._session_key(request, body_obj),
+                required_caps=capability_values(sanitized),
+            )
+            if resp.status_code >= 400:
+                return web.Response(
+                    status=resp.status_code,
+                    body=payload_bytes,
+                    content_type="application/json",
+                )
+            # Unify the response id: upstream (native or translated) may return
+            # its own; the stored resource must be retrievable under the id we
+            # minted at the fork.
+            try:
+                resp_obj = json.loads(payload_bytes.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                resp_obj = {}
+            if isinstance(resp_obj, dict):
+                resp_obj["id"] = response_id
+                # The translated body is a plain Chat->Responses conversion; it
+                # carries no chain/background state.  Echo the official fields
+                # the client sent so the returned object round-trips with a
+                # later retrieve() (T37 criterion ②).
+                if previous_response_id:
+                    resp_obj["previous_response_id"] = previous_response_id
+                if body_obj.get("background"):
+                    resp_obj["background"] = True
+                if "store" not in resp_obj:
+                    resp_obj["store"] = bool(body_obj.get("store", True))
+                if store_enabled and rs is not None:
+                    usage = resp_obj.get("usage") if isinstance(resp_obj.get("usage"), dict) else {}
+                    output = resp_obj.get("output") if isinstance(resp_obj.get("output"), list) else []
+                    await self._persist_v3_terminal(
+                        response_id=response_id,
+                        workspace_id=workspace_id,
+                        status="completed",
+                        usage=usage,
+                        output=output,
+                    )
+                return web.json_response(resp_obj, status=200)
+
+        # -- Defensive fallback: streamed create stays on the resource
+        # skeleton until the T26 stream pass lands (the fork above already
+        # routes stream=True here through ``_dispatch_v3``; this branch exists
+        # so a direct call with ``stream=True`` cannot fabricate a stream).
+        return await self._dispatch_v3(request, ctx)
+
+    async def _run_v3_nonstream(
+        self,
+        *,
+        request: web.Request,
+        body_obj: dict,
+        final_body: bytes,
+        decision,
+        requested_model: str,
+        inbound_protocol: str,
+        session_key: str,
+        required_caps: frozenset[str],
+    ) -> tuple[Any, bytes]:
+        """Execute one non-stream create against the production upstream chain.
+
+        Reuses the scheduler pick (``decision.key``), health accounting, retry
+        classification and the existing Responses -> Chat/Anthropic translators.
+        Returns ``(httpx.Response, payload_bytes)`` so the caller can inspect
+        the status and unify the response id before sending to the client.
+        """
+        key = decision.key
+        # The capability router already picked a candidate; honour its
+        # NATIVE/TRANSLATE path decision instead of re-deriving from the body.
+        upstream_path = getattr(decision, "upstream_path", "") or ""
+        if not upstream_path:
+            upstream_path = "/v1/responses" if getattr(decision, "is_native", False) else "/v1/chat/completions"
+
+        if key.window is not None and not key.window.allow(1):
+            return _http_json(429, {"error": "all keys exhausted"}), b""
+        key.record_request()
+
+        client = await self._ensure_client(key.upstream_base)
+        if client is None:
+            return _http_json(503, {"error": "no enabled keys"}), b""
+
+        outbound_protocol = key.upstream_protocol
+        need_translation = inbound_protocol != outbound_protocol
+        headers: dict[str, str] = {}
+        for hk, hv in request.headers.items():
+            kl = hk.lower()
+            if kl not in (
+                "host",
+                "connection",
+                "transfer-encoding",
+                "content-length",
+                "content-encoding",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "te",
+                "trailer",
+                "upgrade",
+                "x-forwarded-for",
+                "x-forwarded-proto",
+            ):
+                headers[hk] = hv
+
+        if need_translation:
+            try:
+                cc = convert_responses_request_to_chatcompletions(body_obj)
+            except Exception as exc:
+                _lg.exception(f"[v3] translate request failed: {exc}")
+                return _http_json(500, {"error": "request translation failed"}), b""
+            if outbound_protocol == "anthropic":
+                translated_req = translate_request_o2a(cc, key.anthropic_version)
+                upstream_path = "/v1/messages"
+            else:
+                translated_req = cc
+                upstream_path = "/v1/chat/completions"
+            if isinstance(translated_req, dict):
+                translated_req.pop("stream", None)
+                if key.upstream_model:
+                    translated_req["model"] = key.upstream_model
+            final_body = json.dumps(translated_req, ensure_ascii=False).encode()
+            if outbound_protocol == "anthropic":
+                headers["x-api-key"] = key.api_key
+                headers["anthropic-version"] = key.anthropic_version
+                headers.pop("Authorization", None)
+            else:
+                headers["Authorization"] = f"Bearer {key.api_key}"
+                headers.pop("x-api-key", None)
+                headers.pop("anthropic-version", None)
+            headers["Content-Length"] = str(len(final_body))
+        else:
+            # NATIVE passthrough: only auth + model mapping are touched.
+            if requested_model and key.upstream_model and requested_model != key.upstream_model:
+                body_obj = dict(body_obj)
+                body_obj["model"] = key.upstream_model
+                final_body = json.dumps(body_obj, ensure_ascii=False).encode()
+            headers["Authorization"] = f"Bearer {key.api_key}"
+            headers.pop("x-api-key", None)
+            headers.pop("anthropic-version", None)
+            headers["Content-Length"] = str(len(final_body))
+
+        if key.upstream_path_override:
+            upstream_path = key.upstream_path_override
+
+        try:
+            resp = await client.request(
+                request.method,
+                upstream_path,
+                headers=headers,
+                content=final_body,
+            )
+        except (ConnectionResetError, ConnectionError, OSError) as exc:
+            transport = request.transport
+            if transport is not None and transport.is_closing():
+                return _http_json(499, b"Client Closed Request"), b""
+            _lg.error(f"[v3] key_id={key.key_id} connection error: {type(exc).__name__}: {exc}")
+            mark_network_failure(key)
+            return _http_json(502, {"error": "upstream connection failed"}), b""
+        except Exception as exc:
+            _lg.error(f"[v3] key_id={key.key_id} exception: {type(exc).__name__}: {exc}")
+            mark_network_failure(key)
+            return _http_json(502, {"error": "upstream request failed"}), b""
+
+        data = await resp.aread()
+        resp_headers = dict(resp.headers)
+        resp_headers.pop("content-encoding", None)
+        resp_headers.pop("transfer-encoding", None)
+        resp_headers.pop("content-length", None)
+        content_encoding = resp_headers.get("content-encoding", "").lower()
+        if "gzip" in content_encoding:
+            import gzip
+
+            try:
+                data = gzip.decompress(data)
+            except Exception:
+                pass
+            resp_headers.pop("content-encoding", None)
+
+        if resp.status_code >= 400:
+            should_retry = classify_failure(key, resp.status_code, resp_headers)
+            _lg.info(
+                f"[v3] key_id={key.key_id} upstream status={resp.status_code} retry={should_retry} body={data[:300]!r}"
+            )
+            if should_retry:
+                # Single-shot for now: the full scheduler retry loop is the
+                # T28 pass.  Keep the key healthy for the next request.
+                mark_success(key)
+            result = _V3UpstreamResult(resp.status_code, data)
+            return result, data
+
+        mark_success(key)
+        learn_rate_limits(key, resp_headers, resp.status_code)
+
+        # Record token usage for TPM tracking + quota.
+        try:
+            _resp_obj = json.loads(data.decode("utf-8"))
+            _usage = _resp_obj.get("usage") if isinstance(_resp_obj, dict) else None
+            if isinstance(_usage, dict):
+                _tokens_in = int(_usage.get("prompt_tokens") or _usage.get("input_tokens") or 0)
+                _tokens_out = int(_usage.get("completion_tokens") or _usage.get("output_tokens") or 0)
+                key.record_tokens(_tokens_in, _tokens_out)
+        except (ValueError, TypeError):
+            pass
+
+        # Sticky binding: remember which key served this conversation.
+        if session_key:
+            self._set_sticky(session_key, key.key_id, required_caps)
+            asyncio.create_task(
+                self._persist_sticky_binding(
+                    session_key,
+                    key.key_id,
+                    required_caps,
+                )
+            )
+
+        # Translate the response body if needed (Chat/Anthropic -> Responses).
+        if need_translation:
+            try:
+                resp_data = json.loads(data.decode("utf-8"))
+                cc_resp = (
+                    translate_response_a2o(resp_data, requested_model)
+                    if outbound_protocol == "anthropic"
+                    else resp_data
+                )
+                translated_resp = chatcompletions_to_responses(cc_resp, requested_model)
+                data = json.dumps(translated_resp, ensure_ascii=False).encode()
+            except (json.JSONDecodeError, ValueError) as exc:
+                _lg.warning(f"[v3] failed to translate response: {exc}, returning raw")
+
+        return _V3UpstreamResult(resp.status_code, data), data
+
+    def _filter_v3_candidates(
+        self,
+        candidates: list[KeyHealth],
+        ctx,
+    ) -> list[KeyHealth]:
+        """Apply the key rollout to candidate keys (R-P0-25).
+
+        With no feature flags wired, every candidate passes (backwards
+        compatible).  With flags, only keys that ``v3_key_allowed`` pass;
+        an empty ``keys`` rollout means "allow all" (per the config schema).
+        """
+        if self._feature_flags is None or not candidates:
+            return candidates
+        allowed = []
+        for k in candidates:
+            if self._feature_flags.v3_key_allowed(k.key_id):
+                allowed.append(k)
+        return allowed
+
+    # ------------------------------------------------------------------
+    # Sticky session helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _stable_fingerprint(body_obj: dict | None) -> str:
+        """首轮稳定指纹（T35 / R-P1-61）。
+
+        R-P0-14 / R-P1-61 要求：**不用滚动消息尾部**做指纹 —— 每一轮
+        ``messages[-3:]`` 的内容都在变，同一会话每轮 hash 都不同，粘性路由
+        永远落不到同一个 key。改用**会话第一条 user 消息**的归一化指纹
+        （sha256 前 16 位）：只要会话的第一条 user 消息不变，后续无论追加多少
+        轮次，指纹都恒定。
+
+        **reasoning 内容绝不参与指纹计算**（R-P0-14）：消息对象里的
+        ``reasoning`` 字段、以及 ``role=reasoning`` 的输入项一律跳过，只取
+        首条 ``role=user`` 的文本内容。
+
+        Returns:
+            ``"fp:<hex>"`` 形式的指纹；无法提取到首条 user 消息时返回 ``""``。
+        """
+        msgs = body_obj.get("messages") if body_obj else None
+        if msgs is None and body_obj:
+            # Responses API (Codex) 把对话放在 `input`（OpenAI messages 数组形态）。
+            msgs = body_obj.get("input")
+        if not isinstance(msgs, (list, tuple)):
+            return ""
+        for msg in msgs:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "")
+            item_type = str(msg.get("type") or "")
+            if role == "reasoning" or item_type == "reasoning":
+                # R-P0-14：reasoning 项绝不进入指纹（Responses 项可能只有
+                # ``type: "reasoning"`` 而没有 ``role``）。
+                continue
+            if role != "user":
+                continue
+            content = msg.get("content")
+            if content is None:
+                continue
+            text = (
+                content
+                if isinstance(content, str)
+                else json.dumps(
+                    content,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            text = text.strip()
+            if not text:
+                continue
+            import hashlib
+
+            return "fp:" + hashlib.sha256(text.encode()).hexdigest()[:16]
+        return ""
 
     @staticmethod
     def _session_key(request: web.Request, body_obj: dict | None) -> str:
-        """Extract a conversation fingerprint for sticky routing.
+        """Extract a conversation fingerprint for sticky routing (T35).
 
-        Priority:
+        Priority (R-P1-61):
         1. Explicit header: x-session-id / x-zhongzhuan-session / x-request-id
-        2. Hash of the last few messages (stable across multi-turn conversations)
+        2. Explicit body id: ``conversation`` (Responses API) /
+           ``previous_response_id`` (Responses chain)
+        3. First-turn stable fingerprint (first user message, reasoning
+           excluded) instead of the rolling message tail.
+
         Returns "" if no stable identifier can be derived.
         """
         for h in ("x-session-id", "x-zhongzhuan-session", "x-request-id"):
             v = request.headers.get(h)
             if v:
                 return f"hdr:{v}"
-        msgs = body_obj.get("messages") if body_obj else None
-        if msgs is None and body_obj:
-            # Responses API (Codex) carries the conversation in `input`.
-            msgs = body_obj.get("input")
-        if isinstance(msgs, list) and len(msgs) >= 2:
-            import hashlib
-            snippet = json.dumps(msgs[-3:], ensure_ascii=False, sort_keys=True)
-            return "conv:" + hashlib.sha256(snippet.encode()).hexdigest()[:16]
-        return ""
+        if body_obj:
+            for field in ("conversation", "previous_response_id"):
+                v = body_obj.get(field)
+                if isinstance(v, str) and v.strip():
+                    return f"id:{v.strip()}"
+        return ProxyHandler._stable_fingerprint(body_obj)
 
-    def _get_sticky_key(self, session_key: str, candidates: list[KeyHealth]) -> KeyHealth | None:
-        """Return the sticky key for this session if still valid and available."""
+    @staticmethod
+    def _required_capabilities(body_obj: dict | None) -> frozenset[str]:
+        """Compatibility adapter over the shared v3 request fact model.
+
+        T35 callers persist string values, while capability routing consumes the
+        enum values in :class:`SanitizedRequest`. Both now come from the same
+        sanitizer, including ``previous_response_id`` as a stateful requirement.
+        """
+        return capability_values(RequestSanitizer().sanitize(body_obj))
+
+    def _get_sticky_key(
+        self,
+        session_key: str,
+        candidates: list[KeyHealth],
+        body_obj: dict | None = None,
+        required_caps: frozenset[str] | None = None,
+    ) -> KeyHealth | None:
+        """Return the sticky key for this session if still valid, healthy and
+        capability-compatible (T35 / R-P1-60 判据⑥).
+
+        Checks in order:
+        1. TTL not expired (clock is injectable via ``self._now``).
+        2. The bound key is still in ``candidates`` **and** ``is_available()``.
+        3. **Capability compatibility** (新增，判据⑥): the capabilities
+           recorded at bind time must be a superset of what this request needs.
+           A mismatch invalidates the binding, records the failover reason and
+           returns ``None`` so the scheduler routes elsewhere.
+        """
         entry = self._sticky.get(session_key)
         if entry is None:
             return None
         key_id, expire_at = entry
-        if time.time() > expire_at:
+        if self._now() > expire_at:
             self._sticky.pop(session_key, None)
+            self._sticky_caps.pop(session_key, None)
             return None
         for k in candidates:
             if k.key_id == key_id and k.is_available():
+                # 判据⑥：能力兼容校验 —— sticky 只在选定模型健康**且**能力兼容时生效。
+                bound_caps = self._sticky_caps.get(session_key, frozenset())
+                required = required_caps
+                if required is None:
+                    required = self._required_capabilities(body_obj)
+                if required and bound_caps and not (required <= bound_caps):
+                    reason = f"capability mismatch: required={sorted(required)} bound={sorted(bound_caps)}"
+                    self._binding_failover_reasons[session_key] = reason
+                    return None
                 return k
         return None
 
-    def _set_sticky(self, session_key: str, key_id: int) -> None:
+    def _set_sticky(self, session_key: str, key_id: int, caps: frozenset[str] | None = None) -> None:
         """Record a successful key for this session."""
         if session_key:
-            self._sticky[session_key] = (key_id, time.time() + self._sticky_ttl)
+            self._sticky[session_key] = (key_id, self._now() + self._sticky_ttl)
+            if caps is not None:
+                self._sticky_caps[session_key] = caps
             # Opportunistic cleanup: drop expired entries occasionally
             if len(self._sticky) > 256:
-                now = time.time()
+                now = self._now()
                 self._sticky = {k: v for k, v in self._sticky.items() if v[1] > now}
+
+    def _response_store(self):
+        """Lazily build the ResponseStore used for session→route binding (T35)."""
+        if self._rs is None and self.store is not None:
+            from ..store.response_store import ResponseStore
+
+            self._rs = ResponseStore(self.store)
+        return self._rs
+
+    async def _persist_sticky_failover(self, session_key: str) -> None:
+        """Flush a recorded failover reason to the persisted binding (T35)."""
+        reason = self._binding_failover_reasons.pop(session_key, "")
+        rs = self._response_store()
+        if rs is None or not reason:
+            return
+        try:
+            await rs.record_binding_failover(session_key, reason=reason)
+        except Exception:
+            _lg.exception("record_binding_failover failed")
+
+    async def _restore_sticky_from_store(self, session_key: str) -> None:
+        """Restore an in-memory sticky entry from the persisted binding (T35).
+
+        Called lazily on the first lookup of an unknown session when a store is
+        present, so process restarts keep the sticky continuity promise of
+        R-P1-61.  The binding's TTL is enforced by the store; an expired or
+        foreign-workspace binding returns ``None`` and is simply ignored.
+        """
+        rs = self._response_store()
+        if rs is None or not session_key or session_key in self._sticky:
+            return
+        try:
+            rec = await rs.get_route_binding(session_key)
+        except Exception:
+            _lg.exception("get_route_binding failed")
+            return
+        if rec is None:
+            return
+        self._sticky[session_key] = (rec["key_id"], self._now() + self._sticky_ttl)
+        caps = frozenset(str(c) for c in (rec.get("capabilities") or ()))
+        if caps:
+            self._sticky_caps[session_key] = caps
+
+    async def _persist_sticky_binding(
+        self,
+        session_key: str,
+        key_id: int,
+        caps: frozenset[str],
+    ) -> None:
+        """Persist a session→route binding to the ResponseStore (T35 / R-P1-61)."""
+        rs = self._response_store()
+        if rs is None or not session_key:
+            return
+        try:
+            await rs.upsert_route_binding(
+                session_key=session_key,
+                key_id=key_id,
+                capabilities=caps,
+                expires_at=int(self._now() + self._sticky_ttl),
+            )
+        except Exception:
+            _lg.exception("upsert_route_binding failed")
 
     async def reload_keys(self) -> int:
         """Reload keys (and groups) from the store. Returns new key count.
@@ -241,16 +924,19 @@ class ProxyHandler:
         if self.store is not None:
             try:
                 from ..store.groups import list_groups as list_groups_db
+
                 rows = await list_groups_db(self.store)
-                self._set_groups([
-                    {
-                        "id": r.get("id"),
-                        "name": r.get("name"),
-                        "strategy": r.get("strategy"),
-                        "members": [m["model_id"] for m in (r.get("members") or [])],
-                    }
-                    for r in rows
-                ])
+                self._set_groups(
+                    [
+                        {
+                            "id": r.get("id"),
+                            "name": r.get("name"),
+                            "strategy": r.get("strategy"),
+                            "members": [m["model_id"] for m in (r.get("members") or [])],
+                        }
+                        for r in rows
+                    ]
+                )
             except Exception:
                 _lg.exception("reload groups failed")
         return len(self._keys)
@@ -317,6 +1003,7 @@ class ProxyHandler:
     async def _health_snapshot_loop(self) -> None:
         """优化点4：每 30 秒把 key 健康状态快照到 DB（重启后可恢复）。"""
         from ..store.key_health import save_health, KeyHealthRow
+
         while self._bg_running:
             try:
                 await asyncio.sleep(30)
@@ -326,16 +1013,19 @@ class ProxyHandler:
                     if k.key_id <= 0:
                         continue  # 跳过 env/dummy key (key_id=0)
                     try:
-                        await save_health(self.store, KeyHealthRow(
-                            key_id=k.key_id,
-                            status=k.status,
-                            cooldown_until=k.cooldown_until,
-                            rpm_limit=k.rpm_limit,
-                            tpm_limit=k.tpm_limit,
-                            success_count=k.success_count,
-                            failure_count=k.failure_count,
-                            recent_429_count=k.recent_429_count,
-                        ))
+                        await save_health(
+                            self.store,
+                            KeyHealthRow(
+                                key_id=k.key_id,
+                                status=k.status,
+                                cooldown_until=k.cooldown_until,
+                                rpm_limit=k.rpm_limit,
+                                tpm_limit=k.tpm_limit,
+                                success_count=k.success_count,
+                                failure_count=k.total_failures,
+                                recent_429_count=k.recent_429_count,
+                            ),
+                        )
                     except Exception:
                         pass
             except asyncio.CancelledError:
@@ -344,33 +1034,23 @@ class ProxyHandler:
                 _lg.exception("health snapshot loop error")
                 await asyncio.sleep(60)
 
-    async def __call__(self, request: web.Request) -> web.Response:
+    async def __call__(self, request: web.Request) -> web.StreamResponse:
         _request_start = time.time()
         store = self.store
-        path = request.path
-        method = request.method
 
-        # -- Parse body early for protocol detection and model extraction --
-        body = await request.read()
-        content_length = len(body) if body else None
-        remote = request.remote or ""
-
-        # detect inbound protocol (openai / anthropic)
-        inbound_protocol = detect_inbound_protocol(path, request.headers)
-        # extract requested model name from body
-        requested_model = ""
-        body_obj: dict | None = None
-        if body:
-            try:
-                body_obj = json.loads(body)
-                requested_model = (body_obj.get("model") or "").strip()
-            except (json.JSONDecodeError, ValueError):
-                pass
+        # -- Build request context once (T02): body is parsed exactly once here --
+        ctx = await self._ctx_builder.build(request)
+        path = ctx.path
+        method = ctx.method
+        body_obj = ctx.body
+        sanitized_request = self._request_sanitizer.sanitize(body_obj)
+        required_caps = capability_values(sanitized_request)
+        inbound_protocol = ctx.inbound_protocol
+        requested_model = ctx.requested_model
+        remote = ctx.remote
 
         # Log the incoming request early (before processing)
-        _lg.info(
-            f"[REQ] {method} {path} remote={remote} content_length={content_length}"
-        )
+        _lg.info(f"[REQ] {method} {path} remote={remote} content_length={ctx.content_length}")
         _lg.info(
             f"[{id(request):x}] processing {method} {path} "
             f"model={requested_model!r} stream={body_obj.get('stream', False) if body_obj else False} "
@@ -381,9 +1061,66 @@ class ProxyHandler:
         if path.rstrip("/") == "/v1/models" and method.upper() == "GET":
             return await self._list_models()
 
-        # Responses API (Codex): only POST is supported. GET /v1/responses/{id}
-        # (retrieve) / DELETE are not implemented — return 405 so Codex doesn't
-        # hang or retry with bogus bodies.
+        # ------------------------------------------------------------------
+        # T22 / R-P0-22: the single v2/v3 fork point.
+        #
+        # A Responses request is served by the v3 resource handler when ALL of
+        # the following hold, otherwise it falls through to the legacy path:
+        #   1. the inbound protocol is RESPONSES,
+        #   2. a v3 handler is wired in (store-backed setup),
+        #   3. the feature flag evaluates to enabled for this request
+        #      (env hard override > key rollout > model rollout > group
+        #      rollout > global enabled > default true, R-P0-25).
+        # Key rollout is applied to the *candidate* keys: when the feature
+        # flag would enable v3 but every candidate key is excluded, we fall
+        # back to the legacy path and record the fallback metric with reason
+        # ``all_keys_excluded`` (so a bad rollout can never strand requests).
+        # The feature flag is evaluated here — once, at the single fork — so
+        # Chat / Anthropic traffic is never touched and a disabled flag makes
+        # the *next* Responses request go straight back to v2.
+        # ------------------------------------------------------------------
+        if inbound_protocol == "responses" and self._v3 is not None:
+            v3_ok = bool(self._feature_flags is None or self._feature_flags.v3_enabled(ctx))
+            if v3_ok:
+                # Only CREATE consumes an upstream candidate.  Store-backed
+                # retrieve/delete/cancel/input_items and the honest compact
+                # capability response must remain usable even when no upstream
+                # key is currently healthy.
+                is_create = method.upper() == "POST" and path.rstrip("/") == "/v1/responses"
+                ctx.v3_enabled = True
+                ctx.endpoint = "create" if is_create else "resource"
+                if not is_create:
+                    return await self._dispatch_v3(request, ctx)
+
+                candidates = self._resolve_candidates(requested_model)
+                v3_candidates = self._filter_v3_candidates(candidates, ctx)
+                if candidates and not v3_candidates:
+                    # Rollout excluded every otherwise-eligible key — fall back
+                    # to legacy and expose the exact operational reason.
+                    record_v3_fallback(reason="all_keys_excluded")
+                elif v3_candidates:
+                    # T26: create now executes against a REAL upstream through
+                    # the production chain (capability routing -> scheduler ->
+                    # translator -> terminal persistence).  Only store-backed
+                    # resource endpoints and the honest compact 501 go through
+                    # the resource skeleton.
+                    if not (body_obj and body_obj.get("stream")):
+                        return await self._dispatch_v3_create(
+                            request,
+                            ctx,
+                            v3_candidates,
+                        )
+                    # Streaming create still uses the resource skeleton for now
+                    # (full SSE lifecycle is the T26 stream pass); the skeleton
+                    # returns in_progress so the client receives a valid
+                    # response object without a fabricated stream.
+                    return await self._dispatch_v3(request, ctx)
+
+        # Legacy: Responses API (Codex): only POST is supported. GET
+        # /v1/responses/{id} (retrieve) / DELETE are not implemented — return
+        # 405 so Codex doesn't hang or retry with bogus bodies.  (When the v3
+        # handler is wired, non-POST Responses requests above were already
+        # served by v3; reaching this 405 means v3 was disabled or absent.)
         if path.startswith("/v1/responses") and method.upper() != "POST":
             return web.json_response(
                 {"error": {"message": "method not allowed for /v1/responses", "type": "invalid_request_error"}},
@@ -394,7 +1131,8 @@ class ProxyHandler:
         candidates = self._resolve_candidates(requested_model)
         if not candidates:
             return web.json_response(
-                {"error": "no enabled keys"}, status=503,
+                {"error": "no enabled keys"},
+                status=503,
             )
 
         # Determine if this is a streaming request
@@ -403,15 +1141,24 @@ class ProxyHandler:
 
         # Base headers (filter hop-by-hop)
         base_headers = {}
-        for k, v in request.headers.items():
-            kl = k.lower()
+        for hk, hv in request.headers.items():
+            kl = hk.lower()
             if kl not in (
-                "host", "connection", "transfer-encoding", "content-length",
-                "content-encoding", "keep-alive", "proxy-authenticate",
-                "proxy-authorization", "te", "trailer", "upgrade",
-                "x-forwarded-for", "x-forwarded-proto",
+                "host",
+                "connection",
+                "transfer-encoding",
+                "content-length",
+                "content-encoding",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "te",
+                "trailer",
+                "upgrade",
+                "x-forwarded-for",
+                "x-forwarded-proto",
             ):
-                base_headers[k] = v
+                base_headers[hk] = hv
 
         if not is_anthropic:
             # Keep original auth header if present
@@ -424,17 +1171,26 @@ class ProxyHandler:
             while True:
                 # First attempt: prefer the sticky session key (multi-turn continuity)
                 if session_key and not tried:
-                    sticky_k = self._get_sticky_key(session_key, candidates)
-                    k = sticky_k if sticky_k is not None else pick_key(
-                        [x for x in candidates if x.key_id not in tried]
+                    # T35：进程重启后从 ResponseStore 恢复 binding，保持粘性连续性。
+                    await self._restore_sticky_from_store(session_key)
+                    sticky_k = self._get_sticky_key(
+                        session_key,
+                        candidates,
+                        body_obj,
+                        required_caps,
                     )
+                    if sticky_k is None and session_key in self._binding_failover_reasons:
+                        # 判据⑥：sticky key 因健康/能力不兼容被拒 → 记录故障迁移
+                        await self._persist_sticky_failover(session_key)
+                    k = sticky_k if sticky_k is not None else pick_key([x for x in candidates if x.key_id not in tried])
                 else:
                     k = pick_key([x for x in candidates if x.key_id not in tried])
                 if k is None:
                     # 优化点8：429 响应带 X-Zhongzhuan-Reason 头
                     reason = reason_for_exhaustion(candidates)
                     return web.json_response(
-                        {"error": "all keys exhausted"}, status=429,
+                        {"error": "all keys exhausted"},
+                        status=429,
                         headers={"X-Zhongzhuan-Reason": reason},
                     )
                 tried.add(k.key_id)
@@ -457,7 +1213,7 @@ class ProxyHandler:
 
                 # Prepare body, path, and headers
                 upstream_path = path
-                final_body = body
+                final_body = ctx.raw_body
                 headers = dict(base_headers)
                 # Non-streaming: allow upstream compression for faster response transfer.
                 # httpx handles transparent decompression.
@@ -467,7 +1223,7 @@ class ProxyHandler:
                 if need_translation:
                     # Translate request body
                     try:
-                        body_obj_t = json.loads(body) if body else {}
+                        body_obj_t = ctx.body or {}
                     except (json.JSONDecodeError, ValueError):
                         body_obj_t = {}
 
@@ -511,56 +1267,48 @@ class ProxyHandler:
                     headers["Content-Length"] = str(len(final_body))
                 else:
                     if requested_model and k.upstream_model and requested_model != k.upstream_model:
-                        final_body = _swap_model_name(body, requested_model, k.upstream_model)
+                        final_body = _swap_model_name(ctx.raw_body, requested_model, k.upstream_model)
                     headers["Authorization"] = f"Bearer {k.api_key}"
-                    if final_body is not body:
+                    if final_body is not ctx.raw_body:
                         headers["Content-Length"] = str(len(final_body))
 
                 # upstream_path_override: non-empty → use directly as path/URL
                 if k.upstream_path_override:
                     upstream_path = k.upstream_path_override
-                    _lg.info(
-                        f"[{id(request):x}] key_id={k.key_id} "
-                        f"using upstream_path_override={upstream_path!r}"
-                    )
+                    _lg.info(f"[{id(request):x}] key_id={k.key_id} using upstream_path_override={upstream_path!r}")
 
                 try:
                     # Check if client is still connected before making expensive upstream calls
                     transport = request.transport
                     if transport is not None and transport.is_closing():
-                        _lg.warning(
-                            f"[{id(request):x}] client transport closing before upstream request, aborting"
-                        )
+                        _lg.warning(f"[{id(request):x}] client transport closing before upstream request, aborting")
                         return web.Response(status=499, text="Client Closed Request")
 
                     _upstream_start = time.time()
                     resp = await client.request(
-                        request.method, upstream_path, headers=headers, content=final_body,
+                        request.method,
+                        upstream_path,
+                        headers=headers,
+                        content=final_body,
                     )
                     _upstream_elapsed = time.time() - _upstream_start
                     _lg.info(
                         f"[{id(request):x}] key_id={k.key_id} upstream responded in "
-                        f"{_upstream_elapsed*1000:.0f}ms status={resp.status_code}"
+                        f"{_upstream_elapsed * 1000:.0f}ms status={resp.status_code}"
                     )
                 except (ConnectionResetError, ConnectionError, OSError) as e:
                     # Client-side disconnect (timeout or cancel).
                     # This is NOT an upstream failure — do NOT mark the key as failed.
                     transport = request.transport
                     if transport is not None and transport.is_closing():
-                        _lg.warning(
-                            f"[{id(request):x}] client disconnected before upstream response"
-                        )
+                        _lg.warning(f"[{id(request):x}] client disconnected before upstream response")
                         return web.Response(status=499, text="Client Closed Request")
                     # Otherwise it may be an upstream connection failure; log and retry.
-                    _lg.error(
-                        f"[{id(request):x}] key_id={k.key_id} connection error: {type(e).__name__}: {e}"
-                    )
+                    _lg.error(f"[{id(request):x}] key_id={k.key_id} connection error: {type(e).__name__}: {e}")
                     mark_network_failure(k)
                     continue
                 except Exception as e:
-                    _lg.error(
-                        f"[{id(request):x}] key_id={k.key_id} exception: {type(e).__name__}: {e}"
-                    )
+                    _lg.error(f"[{id(request):x}] key_id={k.key_id} exception: {type(e).__name__}: {e}")
                     mark_network_failure(k)
                     continue
 
@@ -574,6 +1322,7 @@ class ProxyHandler:
                 content_encoding = resp_headers.get("content-encoding", "").lower()
                 if "gzip" in content_encoding:
                     import gzip
+
                     try:
                         data = gzip.decompress(data)
                     except Exception:
@@ -610,7 +1359,7 @@ class ProxyHandler:
                         asyncio.create_task(
                             log_request(
                                 self.store,
-                                client_ip=request.remote,
+                                client_ip=request.remote or "",
                                 model_name=requested_model or "",
                                 key_id=k.key_id,
                                 status=resp.status_code,
@@ -637,8 +1386,11 @@ class ProxyHandler:
                             # Downstream is Chat Completions JSON (openai) or
                             # Anthropic JSON (anthropic) -> normalize to Chat
                             # Completions first, then to Responses API.
-                            cc_resp = translate_response_a2o(resp_data, requested_model or "") \
-                                if outbound_protocol == "anthropic" else resp_data
+                            cc_resp = (
+                                translate_response_a2o(resp_data, requested_model or "")
+                                if outbound_protocol == "anthropic"
+                                else resp_data
+                            )
                             translated_resp = chatcompletions_to_responses(cc_resp, requested_model or "")
                         else:
                             translated_resp = translate_response_a2o(resp_data, requested_model or "")
@@ -650,15 +1402,14 @@ class ProxyHandler:
                         )
                     except (json.JSONDecodeError, ValueError) as e:
                         _lg.warning(
-                            f"[{id(request):x}] key_id={k.key_id} failed to translate "
-                            f"response: {e}, returning raw"
+                            f"[{id(request):x}] key_id={k.key_id} failed to translate response: {e}, returning raw"
                         )
 
                 _process_elapsed = time.time() - _process_start
                 total_elapsed = time.time() - _request_start
                 _lg.info(
-                    f"[{id(request):x}] key_id={k.key_id} upstream={_upstream_elapsed*1000:.0f}ms "
-                    f"proc={_process_elapsed*1000:.0f}ms total={total_elapsed*1000:.0f}ms body={len(data)}b"
+                    f"[{id(request):x}] key_id={k.key_id} upstream={_upstream_elapsed * 1000:.0f}ms "
+                    f"proc={_process_elapsed * 1000:.0f}ms total={total_elapsed * 1000:.0f}ms body={len(data)}b"
                 )
                 mark_success(k)
 
@@ -673,15 +1424,23 @@ class ProxyHandler:
                     _resp_obj = json.loads(data)
                     _usage = _resp_obj.get("usage") if isinstance(_resp_obj, dict) else None
                     if isinstance(_usage, dict):
-                        _tokens_in = int(_usage.get("prompt_tokens", _usage.get("input_tokens", 0)))
-                        _tokens_out = int(_usage.get("completion_tokens", _usage.get("output_tokens", 0)))
+                        _tokens_in = int(_usage.get("prompt_tokens") or _usage.get("input_tokens") or 0)
+                        _tokens_out = int(_usage.get("completion_tokens") or _usage.get("output_tokens") or 0)
                         k.record_tokens(_tokens_in, _tokens_out)
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
 
                 # Sticky session: remember which key served this conversation
                 if session_key:
-                    self._set_sticky(session_key, k.key_id)
+                    self._set_sticky(session_key, k.key_id, required_caps)
+                    # T35 / R-P1-61 判据⑤：ResponseStore 持久化 session→route binding。
+                    asyncio.create_task(
+                        self._persist_sticky_binding(
+                            session_key,
+                            k.key_id,
+                            required_caps,
+                        )
+                    )
 
                 # Log successful request asynchronously（含 token 用量 + 配额扣减 + 成本）
                 if self.store:
@@ -689,11 +1448,14 @@ class ProxyHandler:
                     _token_id = request.get("token_id", 0)
                     asyncio.create_task(
                         self._log_and_deduct(
-                            self.store, client_ip=request.remote,
+                            self.store,
+                            client_ip=request.remote or "",
                             model_name=requested_model or "",
-                            key_id=k.key_id, status=resp.status_code,
+                            key_id=k.key_id,
+                            status=resp.status_code,
                             latency_ms=latency_ms,
-                            tokens_in=_tokens_in, tokens_out=_tokens_out,
+                            tokens_in=_tokens_in,
+                            tokens_out=_tokens_out,
                             inbound_protocol=inbound_protocol,
                             outbound_protocol=outbound_protocol,
                             translated=need_translation,
@@ -706,7 +1468,7 @@ class ProxyHandler:
         # --- Streaming path ---
         return await self._stream_proxy(
             request=request,
-            body=body,
+            body=ctx.raw_body,
             body_obj=body_obj or {},
             path=path,
             base_headers=base_headers,
@@ -714,6 +1476,7 @@ class ProxyHandler:
             inbound_protocol=inbound_protocol,
             requested_model=requested_model,
             session_key=self._session_key(request, body_obj),
+            required_caps=required_caps,
         )
 
     async def _stream_proxy(
@@ -727,7 +1490,8 @@ class ProxyHandler:
         inbound_protocol: str,
         requested_model: str,
         session_key: str = "",
-    ) -> web.Response:
+        required_caps: frozenset[str] = frozenset(),
+    ) -> web.StreamResponse:
         _stream_start = time.time()
         resp = web.StreamResponse(status=200)
         resp.headers["Content-Type"] = "text/event-stream; charset=utf-8"
@@ -776,9 +1540,21 @@ class ProxyHandler:
                 for _ in range(len(candidates)):
                     # First attempt in each round: prefer sticky session key
                     if session_key and not tried:
-                        sticky_k = self._get_sticky_key(session_key, candidates)
-                        k = sticky_k if sticky_k is not None else pick_key(
-                            [x for x in candidates if x.key_id not in tried]
+                        # T35：进程重启后从 ResponseStore 恢复 binding，保持粘性连续性。
+                        await self._restore_sticky_from_store(session_key)
+                        sticky_k = self._get_sticky_key(
+                            session_key,
+                            candidates,
+                            body_obj or {},
+                            required_caps,
+                        )
+                        if sticky_k is None and session_key in self._binding_failover_reasons:
+                            # 判据⑥：sticky key 因健康/能力不兼容被拒 → 记录故障迁移
+                            await self._persist_sticky_failover(session_key)
+                        k = (
+                            sticky_k
+                            if sticky_k is not None
+                            else pick_key([x for x in candidates if x.key_id not in tried])
                         )
                     else:
                         k = pick_key([x for x in candidates if x.key_id not in tried])
@@ -806,14 +1582,10 @@ class ProxyHandler:
                     headers["Accept-Encoding"] = "identity"
 
                     if need_translation:
-                        # Reuse the already-parsed body dict from __call__
-                        # to avoid re-parsing a 100KB body on every retry.
-                        body_obj_s = body_obj if body_obj is not None else {}
-                        if not body_obj_s and body:
-                            try:
-                                body_obj_s = json.loads(body)
-                            except (json.JSONDecodeError, ValueError):
-                                body_obj_s = {}
+                        # ``body_obj`` comes from RequestContext and is the
+                        # authoritative parse result, including a valid empty
+                        # object. Never parse the raw bytes again on retries.
+                        body_obj_s = body_obj
 
                         if inbound_protocol == "anthropic" and outbound_protocol == "openai":
                             translated_req = translate_request_a2o(body_obj_s, k.max_tokens_default)
@@ -864,7 +1636,10 @@ class ProxyHandler:
 
                     try:
                         async for upstream_resp in client.stream(
-                            request.method, upstream_path, headers=headers, content=final_body,
+                            request.method,
+                            upstream_path,
+                            headers=headers,
+                            content=final_body,
                         ):
                             # Any 4xx/5xx is a failure: do NOT forward as SSE
                             # (the body is a JSON error envelope, not a stream,
@@ -873,7 +1648,9 @@ class ProxyHandler:
                                 # 优化点2：用 classify_failure 统一处理状态码分流
                                 _st = upstream_resp.status_code
                                 _up_headers = dict(upstream_resp.headers)
-                                classify_failure(k, _st, _up_headers)
+                                # T07: 使用返回值决定是否换 key。True=可重试（换下
+                                # 一个 key）；False=请求侧错误（直接返回客户端）。
+                                _retryable = classify_failure(k, _st, _up_headers)
                                 # Drain error body for logging / circuit breaker
                                 try:
                                     err_body = await upstream_resp.aread()
@@ -883,10 +1660,17 @@ class ProxyHandler:
                                 _lg.info(
                                     f"[{id(request):x}] streaming: key_id={k.key_id} "
                                     f"upstream status={_st} key_state={k.status} "
-                                    f"err={err_txt!r}"
+                                    f"retryable={_retryable} err={err_txt!r}"
                                 )
-                                # All error classes retry next key (different
-                                # key may be valid / under quota)
+                                if not _retryable:
+                                    # 请求侧错误（如 400/404/422）：不换 key，直接返回错误。
+                                    return web.Response(
+                                        status=_st,
+                                        body=err_body,
+                                        content_type="application/json",
+                                        headers={"Content-Type": "application/json"},
+                                    )
+                                # 可重试类错误：换下一个 key 重试
                                 break
 
                             # Success! Cancel keepalive and forward stream
@@ -904,7 +1688,7 @@ class ProxyHandler:
                             )
 
                             # Create stream translator if needed
-                            stream_translator = None
+                            stream_translator: Any = None
                             if need_translation:
                                 if inbound_protocol == "responses":
                                     # Chat Completions SSE (or Anthropic SSE) -> Responses SSE
@@ -936,8 +1720,7 @@ class ProxyHandler:
                                         chunk_count += 1
                             except (ConnectionResetError, ConnectionError, OSError):
                                 _lg.warning(
-                                    f"[{id(request):x}] streaming: key_id={k.key_id} "
-                                    f"client disconnected during stream"
+                                    f"[{id(request):x}] streaming: key_id={k.key_id} client disconnected during stream"
                                 )
 
                             if stream_translator and not stream_translator.done:
@@ -946,16 +1729,14 @@ class ProxyHandler:
                                     f"upstream stream ended without finish "
                                     f"([DONE] / finish_reason missing); "
                                     f"synthesizing closing events. "
-                                    f"state={stream_translator.state}"
+                                    f"terminal_reason=upstream_truncated "
+                                    f"state={getattr(stream_translator, 'state', 'n/a')}"
                                 )
-                                closing = stream_translator.finish_safely()
+                                closing = await finish_translator(stream_translator)
                                 for ev in closing:
                                     await resp.write(ev)
 
-                            _lg.info(
-                                f"[{id(request):x}] streaming: key_id={k.key_id} "
-                                f"completed ({chunk_count} chunks)"
-                            )
+                            _lg.info(f"[{id(request):x}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)")
                             mark_success(k)
 
                             # 流式响应的 token 用量：尝试从 stream_translator 提取
@@ -971,18 +1752,33 @@ class ProxyHandler:
 
                             # Sticky session: remember which key served this conversation
                             if session_key:
-                                self._set_sticky(session_key, k.key_id)
+                                self._set_sticky(
+                                    session_key,
+                                    k.key_id,
+                                    required_caps,
+                                )
+                                # T35 / R-P1-61 判据⑤：ResponseStore 持久化 binding。
+                                asyncio.create_task(
+                                    self._persist_sticky_binding(
+                                        session_key,
+                                        k.key_id,
+                                        required_caps,
+                                    )
+                                )
 
                             if self.store:
                                 latency_ms = int((time.time() - _stream_start) * 1000)
                                 _token_id = request.get("token_id", 0)
                                 asyncio.create_task(
                                     self._log_and_deduct(
-                                        self.store, client_ip=request.remote,
+                                        self.store,
+                                        client_ip=request.remote or "",
                                         model_name=requested_model or "",
-                                        key_id=k.key_id, status=200,
+                                        key_id=k.key_id,
+                                        status=200,
                                         latency_ms=latency_ms,
-                                        tokens_in=_stream_tokens_in, tokens_out=_stream_tokens_out,
+                                        tokens_in=_stream_tokens_in,
+                                        tokens_out=_stream_tokens_out,
                                         inbound_protocol=inbound_protocol,
                                         outbound_protocol=outbound_protocol,
                                         translated=need_translation,
@@ -991,18 +1787,12 @@ class ProxyHandler:
                                 )
                             return resp
                     except (ConnectionResetError, ConnectionError, OSError):
-                        _lg.warning(
-                            f"[{id(request):x}] streaming: key_id={k.key_id} "
-                            f"client disconnected"
-                        )
+                        _lg.warning(f"[{id(request):x}] streaming: key_id={k.key_id} client disconnected")
                         return resp
                     except Exception as e:
                         mark_network_failure(k)
                         exc_type_str = type(e).__name__
-                        _lg.error(
-                            f"[{id(request):x}] streaming: key_id={k.key_id} "
-                            f"exception: {exc_type_str}: {e}"
-                        )
+                        _lg.error(f"[{id(request):x}] streaming: key_id={k.key_id} exception: {exc_type_str}: {e}")
                         # Track exception type for circuit breaker
                         if first_exc_type is None:
                             first_exc_type = exc_type_str
@@ -1051,18 +1841,27 @@ class ProxyHandler:
         return resp
 
     async def _log_and_deduct(
-        self, store, *,
-        client_ip: str = "", model_name: str = "",
-        key_id: int | None = None, status: int = 0, latency_ms: int = 0,
-        tokens_in: int = 0, tokens_out: int = 0,
-        inbound_protocol: str = "", outbound_protocol: str = "",
-        translated: bool = False, token_id: int = 0,
+        self,
+        store,
+        *,
+        client_ip: str = "",
+        model_name: str = "",
+        key_id: int | None = None,
+        status: int = 0,
+        latency_ms: int = 0,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        inbound_protocol: str = "",
+        outbound_protocol: str = "",
+        translated: bool = False,
+        token_id: int = 0,
     ) -> None:
         """记录请求日志 + 扣减令牌配额 + 计算成本（异步调用）。"""
         # 计算成本
         cost = 0.0
         try:
             from ..store.pricing import calculate_cost
+
             cost = await calculate_cost(store, model_name, tokens_in, tokens_out)
         except Exception:
             pass
@@ -1071,12 +1870,18 @@ class ProxyHandler:
         try:
             await log_request(
                 store,
-                client_ip=client_ip, model_name=model_name,
-                key_id=key_id, status=status, latency_ms=latency_ms,
-                tokens_in=tokens_in, tokens_out=tokens_out,
+                client_ip=client_ip,
+                model_name=model_name,
+                key_id=key_id,
+                status=status,
+                latency_ms=latency_ms,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
                 inbound_protocol=inbound_protocol,
                 outbound_protocol=outbound_protocol,
-                translated=translated, token_id=token_id, cost=cost,
+                translated=translated,
+                token_id=token_id,
+                cost=cost,
             )
         except Exception:
             _lg.exception("log_request failed")
@@ -1085,6 +1890,7 @@ class ProxyHandler:
         if token_id > 0 and (tokens_in > 0 or tokens_out > 0):
             try:
                 from ..store.access_tokens import deduct_token_quota
+
                 total_tokens = tokens_in + tokens_out
                 await deduct_token_quota(store, token_id, total_tokens)
             except Exception:
@@ -1099,6 +1905,7 @@ class ProxyHandler:
         model names so downstream clients can invoke a whole group.
         """
         from datetime import datetime, timezone
+
         now = int(datetime.now(timezone.utc).timestamp())
         seen: set[str] = set()
         data: list[dict] = []
@@ -1116,3 +1923,31 @@ class ProxyHandler:
                 seen.add(gname)
                 data.append({"id": gname, "object": "model", "created": now, "owned_by": "zhongzhuan"})
         return web.json_response({"object": "list", "data": data})
+
+
+class _V3UpstreamResult:
+    """Minimal status+body pair returned by :meth:`_run_v3_nonstream`.
+
+    Both the early-error branch (``_http_json``) and the real ``httpx.Response``
+    expose ``status_code`` + ``body`` so the caller needs no type dispatch.
+    """
+
+    __slots__ = ("status_code", "body")
+
+    def __init__(self, status_code: int, body: bytes) -> None:
+        self.status_code = int(status_code)
+        self.body = body if isinstance(body, bytes) else str(body).encode("utf-8")
+
+
+def _http_json(status: int, payload: Any) -> _V3UpstreamResult:
+    """Build an early-error result with ``status_code`` + ``body``.
+
+    ``payload`` may be bytes, str or a JSON-serialisable object.
+    """
+    if isinstance(payload, bytes):
+        body = payload
+    elif isinstance(payload, str):
+        body = payload.encode("utf-8")
+    else:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return _V3UpstreamResult(status, body)

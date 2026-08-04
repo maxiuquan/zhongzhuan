@@ -1,11 +1,18 @@
 """Group CRUD API."""
+
 from __future__ import annotations
 
 from aiohttp import web
 
 from ..store.groups import (
-    GroupData, GroupMemberData,
-    create_group, list_groups, get_group, update_group, set_group_members, delete_group,
+    GroupData,
+    GroupMemberData,
+    create_group,
+    list_groups,
+    get_group,
+    update_group,
+    set_group_members,
+    delete_group,
 )
 from .notify import notify_proxy_reload
 
@@ -18,19 +25,26 @@ def register_routes(app: web.Application, ctx) -> None:
     async def create(request):
         data = await request.json()
         g = GroupData(
-            name=data["name"], strategy=data["strategy"],
+            name=data["name"],
+            strategy=data["strategy"],
             fallback_enabled=bool(data.get("fallback_enabled", True)),
         )
         g = await create_group(ctx.store, g)
         members = data.get("members", [])
         if members:
-            await set_group_members(ctx.store, g.id, [
-                GroupMemberData(
-                    group_id=g.id, model_id=m["model_id"],
-                    weight=m.get("weight", 1), ord=m.get("ord", i),
-                )
-                for i, m in enumerate(members)
-            ])
+            await set_group_members(
+                ctx.store,
+                g.id,
+                [
+                    GroupMemberData(
+                        group_id=g.id,
+                        model_id=m["model_id"],
+                        weight=m.get("weight", 1),
+                        ord=m.get("ord", i),
+                    )
+                    for i, m in enumerate(members)
+                ],
+            )
         await notify_proxy_reload()
         return web.json_response(await get_group(ctx.store, g.name), status=201)
 
@@ -38,7 +52,8 @@ def register_routes(app: web.Application, ctx) -> None:
         group_id = int(request.match_info["id"])
         data = await request.json()
         g = GroupData(
-            name=data["name"], strategy=data["strategy"],
+            name=data["name"],
+            strategy=data["strategy"],
             fallback_enabled=bool(data.get("fallback_enabled", True)),
         )
         await update_group(ctx.store, group_id, g)
@@ -46,13 +61,19 @@ def register_routes(app: web.Application, ctx) -> None:
         # None = leave members untouched; [] = clear all members.
         members = data.get("members")
         if members is not None:
-            await set_group_members(ctx.store, group_id, [
-                GroupMemberData(
-                    group_id=group_id, model_id=m["model_id"],
-                    weight=m.get("weight", 1), ord=m.get("ord", i),
-                )
-                for i, m in enumerate(members)
-            ])
+            await set_group_members(
+                ctx.store,
+                group_id,
+                [
+                    GroupMemberData(
+                        group_id=group_id,
+                        model_id=m["model_id"],
+                        weight=m.get("weight", 1),
+                        ord=m.get("ord", i),
+                    )
+                    for i, m in enumerate(members)
+                ],
+            )
         await notify_proxy_reload()
         return web.json_response({"ok": True})
 

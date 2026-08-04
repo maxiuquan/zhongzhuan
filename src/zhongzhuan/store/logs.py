@@ -1,4 +1,5 @@
 """Request logs + stats (async)."""
+
 from __future__ import annotations
 
 import uuid
@@ -29,7 +30,24 @@ async def log_request(
     await s.execute(
         """INSERT INTO request_logs(ts, client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, request_id, inbound_protocol, outbound_protocol, translated, token_id, cost)
            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (Store.now(), client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, rid, inbound_protocol, outbound_protocol, int(translated), token_id, cost),
+        (
+            Store.now(),
+            client_ip,
+            model_name,
+            resolved_model_id,
+            key_id,
+            status,
+            latency_ms,
+            tokens_in,
+            tokens_out,
+            error,
+            rid,
+            inbound_protocol,
+            outbound_protocol,
+            int(translated),
+            token_id,
+            cost,
+        ),
     )
 
 
@@ -54,10 +72,18 @@ async def list_logs(
     return {
         "data": [
             {
-                "id": r[0], "ts": r[1], "client_ip": r[2], "model_name": r[3],
-                "resolved_model_id": r[4], "key_id": r[5], "status": r[6],
-                "latency_ms": r[7], "tokens_in": r[8], "tokens_out": r[9],
-                "error": r[10], "request_id": r[11],
+                "id": r[0],
+                "ts": r[1],
+                "client_ip": r[2],
+                "model_name": r[3],
+                "resolved_model_id": r[4],
+                "key_id": r[5],
+                "status": r[6],
+                "latency_ms": r[7],
+                "tokens_in": r[8],
+                "tokens_out": r[9],
+                "error": r[10],
+                "request_id": r[11],
                 "inbound_protocol": r[12] if len(r) > 12 else "",
                 "outbound_protocol": r[13] if len(r) > 13 else "",
                 "translated": bool(r[14]) if len(r) > 14 else False,
@@ -73,7 +99,9 @@ async def get_stats(s: Store, range_hours: int = 1) -> dict:
     since = Store.now() - range_hours * 3600
     total_row = await s.fetchone("SELECT COUNT(*) FROM request_logs WHERE ts>=?", (since,))
     total = total_row[0] if total_row else 0
-    success_row = await s.fetchone("SELECT COUNT(*) FROM request_logs WHERE ts>=? AND status>=200 AND status<300", (since,))
+    success_row = await s.fetchone(
+        "SELECT COUNT(*) FROM request_logs WHERE ts>=? AND status>=200 AND status<300", (since,)
+    )
     success = success_row[0] if success_row else 0
     errors = await s.fetchall(
         "SELECT status, COUNT(*) as cnt FROM request_logs WHERE ts>=? AND status>=400 GROUP BY status ORDER BY cnt DESC LIMIT 5",
@@ -81,12 +109,14 @@ async def get_stats(s: Store, range_hours: int = 1) -> dict:
     )
 
     avg_row = await s.fetchone(
-        "SELECT AVG(latency_ms) FROM request_logs WHERE ts>=?", (since,),
+        "SELECT AVG(latency_ms) FROM request_logs WHERE ts>=?",
+        (since,),
     )
     avg_latency = avg_row[0] or 0 if avg_row else 0
 
     active_row = await s.fetchone(
-        "SELECT COUNT(DISTINCT key_id) FROM request_logs WHERE ts>=?", (since,),
+        "SELECT COUNT(DISTINCT key_id) FROM request_logs WHERE ts>=?",
+        (since,),
     )
     active_keys = active_row[0] if active_row else 0
 
@@ -100,9 +130,16 @@ async def get_stats(s: Store, range_hours: int = 1) -> dict:
     }
 
 
-async def cleanup_old_logs(s: Store, retention_days: int = 14) -> None:
-    cutoff = Store.now() - retention_days * 86400
-    await s.execute("DELETE FROM request_logs WHERE ts<?", (cutoff,))
+async def cleanup_old_logs(s: Store, retention_days: int = 14) -> int:
+    """Delete ``request_logs`` rows older than *retention_days* (T06).
+
+    Delegates to :func:`zhongzhuan.store.retention.cleanup_old_logs` so the
+    TTL logic and the scheduler live in one place.  Returns the number of rows
+    deleted.
+    """
+    from .retention import cleanup_old_logs as _cleanup
+
+    return await _cleanup(s, retention_days)
 
 
 async def get_usage_stats(s: Store, days: int = 7) -> dict:
@@ -125,17 +162,20 @@ async def get_usage_stats(s: Store, days: int = 7) -> dict:
         (since,),
     )
     import datetime
+
     daily = []
     for r in daily_rows:
         day_ts = r[0] if r[0] else since
         date_str = datetime.datetime.utcfromtimestamp(day_ts).strftime("%Y-%m-%d")
-        daily.append({
-            "date": date_str,
-            "requests": r[1] or 0,
-            "tokens_in": r[2] or 0,
-            "tokens_out": r[3] or 0,
-            "cost": round(r[4] or 0, 4),
-        })
+        daily.append(
+            {
+                "date": date_str,
+                "requests": r[1] or 0,
+                "tokens_in": r[2] or 0,
+                "tokens_out": r[3] or 0,
+                "cost": round(r[4] or 0, 4),
+            }
+        )
 
     # 按模型聚合
     model_rows = await s.fetchall(

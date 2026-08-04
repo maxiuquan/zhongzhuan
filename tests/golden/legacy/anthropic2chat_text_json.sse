@@ -1,0 +1,1 @@
+{"id": "chatcmpl-fixture0001", "type": "message", "role": "assistant", "model": "x", "content": [{"type": "text", "text": "Hello, world!"}], "stop_reason": "end_turn", "stop_sequence": null, "usage": {"input_tokens": 11, "output_tokens": 4}}

@@ -8,14 +8,16 @@
 
 通过校验后，将 token_id 注入 request["token_id"] 供 handler 后续扣减配额。
 """
+
 from __future__ import annotations
 
-import json
 import os
 
 from aiohttp import web
+from aiohttp.typedefs import Middleware
 
 from ..store.access_tokens import get_token_by_value
+from .context import read_request_body
 
 
 def proxy_auth_enabled() -> bool:
@@ -23,7 +25,7 @@ def proxy_auth_enabled() -> bool:
     return os.getenv("ZHONGZHUAN_PROXY_AUTH", "").lower() == "true"
 
 
-def make_proxy_auth_middleware(store) -> web.middleware:
+def make_proxy_auth_middleware(store) -> Middleware:
     """Create middleware that validates access tokens for /v1/* endpoints."""
 
     @web.middleware
@@ -60,13 +62,10 @@ def make_proxy_auth_middleware(store) -> web.middleware:
 
         # 从 body 提取请求的模型名（用于白名单校验）
         requested_model = ""
-        try:
-            body = await request.read()
-            if body:
-                obj = json.loads(body)
-                requested_model = (obj.get("model") or "").strip()
-        except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
-            pass
+        _, body_obj = await read_request_body(request)
+        if body_obj is not None:
+            candidate = body_obj.get("model")
+            requested_model = candidate.strip() if isinstance(candidate, str) else ""
 
         # 配额校验
         ok, reason = at.check_quota(requested_model)

@@ -1,11 +1,15 @@
 """Windows service control via sc.exe (Windows) or no-op (Linux)."""
+
 from __future__ import annotations
 
 import subprocess
 import sys
+from typing import Any
 
 if sys.platform == "win32":
     import winreg
+else:
+    winreg: Any = None
 
 
 def _sc(*args: str) -> tuple[int, str, str]:
@@ -24,7 +28,9 @@ def install(svc_name: str, display_name: str, auto_start: bool = True) -> None:
         bin_path = f'"{exe}" -m zhongzhuan --service'
 
     start_type = "auto" if auto_start else "demand"
-    code, out, err = _sc("create", svc_name, f"binPath={bin_path}", f"start={start_type}", f"DisplayName={display_name}")
+    code, out, err = _sc(
+        "create", svc_name, f"binPath={bin_path}", f"start={start_type}", f"DisplayName={display_name}"
+    )
     if code != 0:
         raise RuntimeError(f"sc create failed: {err}")
     # Set failure actions: restart on failure
@@ -80,7 +86,8 @@ def register_user_autostart(exe_path: str, svc_name: str) -> None:
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0, winreg.KEY_SET_VALUE,
+            0,
+            winreg.KEY_SET_VALUE,
         )
         winreg.SetValueEx(key, svc_name, 0, winreg.REG_SZ, exe_path)
         winreg.CloseKey(key)
@@ -96,7 +103,8 @@ def unregister_user_autostart(svc_name: str) -> None:
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0, winreg.KEY_SET_VALUE,
+            0,
+            winreg.KEY_SET_VALUE,
         )
         winreg.DeleteValue(key, svc_name)
         winreg.CloseKey(key)
