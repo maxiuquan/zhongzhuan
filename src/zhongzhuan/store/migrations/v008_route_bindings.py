@@ -51,7 +51,7 @@ MYSQL_DDL: tuple[str, ...] = (
     """CREATE TABLE IF NOT EXISTS route_bindings (
         session_key    VARCHAR(128) PRIMARY KEY,
         key_id         BIGINT NOT NULL DEFAULT 0,
-        capabilities   TEXT NOT NULL DEFAULT '[]',
+        capabilities   TEXT NOT NULL,
         workspace_id   VARCHAR(64) NOT NULL DEFAULT '',
         created_at     BIGINT NOT NULL DEFAULT 0,
         updated_at     BIGINT NOT NULL DEFAULT 0,

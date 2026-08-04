@@ -59,6 +59,20 @@ def test_mysql_index_ddl_uses_supported_syntax():
                 )
 
 
+def test_mysql_lob_columns_do_not_declare_defaults():
+    """MySQL/TiDB rejects defaults on TEXT, BLOB, and JSON columns."""
+    lob_types = (" TEXT ", " BLOB ", " JSON ")
+    for migration in MIGRATIONS:
+        statements = migration.mysql_sql + migration.mysql_baseline_sql
+        for sql in statements:
+            for line in sql.upper().splitlines():
+                normalized = f" {' '.join(line.split())} "
+                if any(lob_type in normalized for lob_type in lob_types):
+                    assert " DEFAULT " not in normalized, (
+                        f"v{migration.version:03d} contains unsupported MySQL LOB default: {line.strip()}"
+                    )
+
+
 def test_migrations_apply_in_order(tmp_db):
     """v001, v003, v004 apply in order; schema_migrations records all."""
     db, ex = _executor(tmp_db)

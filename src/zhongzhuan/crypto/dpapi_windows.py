@@ -49,7 +49,7 @@ def dpapi_unprotect(ciphertext: bytes) -> bytes:
         pbData=ctypes.cast(ctypes.c_char_p(ciphertext), ctypes.POINTER(ctypes.c_byte)),
     )
     out_blob = DATA_BLOB()
-    if not ctypes.windll.crypt32.CryptUnprotectData(
+    if not _ctypes_windll.crypt32.CryptUnprotectData(
         ctypes.byref(in_blob),
         None,
         None,
