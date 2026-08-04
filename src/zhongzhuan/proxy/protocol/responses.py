@@ -223,7 +223,10 @@ def chatcompletions_to_responses(resp: Any, model: str = "") -> Any:
         "object": "response",
         "created_at": resp.get("created", int(time.time())),
         "status": "completed",
-        "model": resp.get("model", model),
+        # The client asked for ``model``; the upstream may rewrite it
+        # (alias -> real id).  The Responses object must reflect the model the
+        # CLIENT requested, falling back to the upstream's when unset.
+        "model": model or resp.get("model", ""),
         "output": output,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),

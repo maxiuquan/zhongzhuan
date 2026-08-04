@@ -460,6 +460,16 @@ class ProxyHandler:
                 resp_obj = {}
             if isinstance(resp_obj, dict):
                 resp_obj["id"] = response_id
+                # The translated body is a plain Chat->Responses conversion; it
+                # carries no chain/background state.  Echo the official fields
+                # the client sent so the returned object round-trips with a
+                # later retrieve() (T37 criterion ②).
+                if previous_response_id:
+                    resp_obj["previous_response_id"] = previous_response_id
+                if body_obj.get("background"):
+                    resp_obj["background"] = True
+                if "store" not in resp_obj:
+                    resp_obj["store"] = bool(body_obj.get("store", True))
                 if store_enabled and rs is not None:
                     usage = resp_obj.get("usage") if isinstance(resp_obj.get("usage"), dict) else {}
                     output = resp_obj.get("output") if isinstance(resp_obj.get("output"), list) else []

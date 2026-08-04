@@ -1,6 +1,6 @@
 name: CI
 
-# T36 (R-P2-13)：9 项 required check，全部为独立 job。
+# T36/T37 (R-P2-13)：11 项 required check，全部为独立 job。
 #
 # GitHub 的 branch protection 无法在 YAML 文件内声明 "required"，只能靠
 # repo settings 里把下列 job 全部勾选为 required。新增 job 后请在
@@ -17,8 +17,8 @@ name: CI
 #   8. golden          旧协议字节级 golden 基线（T08）
 #   9. backend-matrix  SQLite 全跑 + MySQL(TiDB 兼容) service container
 #  10. lifecycle       Windows/Linux 进程级启停 + /healthz
-#
-# T37（OpenAI SDK contract tests）预留 job 位：`sdk-contract`，由 T37 补。
+#  11. sdk-contract    OpenAI SDK 合约测试（Python 直连真实 ProxyServer.app()
+#                      + MockUpstream；TS 直连本地 mock server；零真实网络）
 
 on:
   push:
@@ -252,15 +252,29 @@ jobs:
         run: python -m pytest tests/test_lifecycle.py -q -m "lifecycle"
 
   # ------------------------------------------------------------------ #
-  # T37：OpenAI SDK contract tests（R-P1-49）——由 T37 补充此 job 位。
-  #   sdk-contract:
-  #     runs-on: ubuntu-latest
-  #     steps:
-  #       - uses: actions/checkout@v4
-  #       - uses: actions/setup-python@v5
-  #         with: { python-version: "3.12" }
-  #       - uses: actions/setup-node@v4
-  #         with: { node-version: "20" }
-  #       - name: Python + TypeScript SDK contract tests
-  #         run: ...
+  # T37：OpenAI SDK contract tests（R-P1-49）。Python + TypeScript 双侧都走
+  # 官方 SDK 打本地 localhost（零真实网络）：Python 侧请求真实
+  # ``ProxyServer.app()``（六条 Responses 路由 + MockUpstream 回放，mock回放
+  # 标注），TS 侧直连本地 mock server（openai-node 4.104.0 未暴露 compact，
+  # 该缺口在 README 诚实标注，SDK bump 时自动暴露）。
+  # ------------------------------------------------------------------ #
+  sdk-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: Install Python deps (test extra 已含 openai)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[test]
+      - name: Python SDK contract tests
+        run: python -m pytest tests/contract/python -q
+      - name: TypeScript SDK contract tests
+        working-directory: tests/contract/typescript
+        run: |
+          npm ci --ignore-scripts
+          npm test
   # ------------------------------------------------------------------ #
