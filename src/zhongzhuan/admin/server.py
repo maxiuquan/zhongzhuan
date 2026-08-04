@@ -73,4 +73,47 @@ class AdminServer:
 
         # UI
         mount_ui(app, self)
+
+        # T33 (R-P2-07/08)：admin 控制面也暴露分层健康检查（复用 observability.health）。
+        app.router.add_get("/healthz/live", self._health_liveness)
+        app.router.add_get("/healthz/ready", self._health_readiness)
+        app.router.add_get("/healthz/deps", self._health_dependencies)
         return app
+
+    # ------------------------------------------------------------------
+    # T33 分层健康检查（admin 侧：迁移完成 + store 就绪）
+    # ------------------------------------------------------------------
+
+    async def _health_liveness(self, _request: web.Request) -> web.Response:
+        from ..observability.health import build_liveness, sanitize_health_payload
+        return web.json_response(sanitize_health_payload(build_liveness()))
+
+    async def _health_readiness(self, _request: web.Request) -> web.Response:
+        from ..observability.health import (
+            build_readiness,
+            migration_status,
+            sanitize_health_payload,
+        )
+        migration_ok, migration_detail = await migration_status(self.store)
+        payload, status = build_readiness(
+            migration_ok=migration_ok,
+            migration_detail=migration_detail,
+            routes_ok=True,
+            routes_detail="admin control plane",
+            worker_ok=True,
+            worker_detail="admin has no async worker",
+        )
+        return web.json_response(sanitize_health_payload(payload), status=status)
+
+    async def _health_dependencies(self, _request: web.Request) -> web.Response:
+        from ..observability.health import (
+            build_dependency_status,
+            dependency_item,
+            migration_status,
+            sanitize_health_payload,
+        )
+        mig_ok, mig_detail = await migration_status(self.store)
+        deps = [dependency_item("store", mig_ok, mig_detail)]
+        return web.json_response(
+            sanitize_health_payload(build_dependency_status(deps)),
+        )

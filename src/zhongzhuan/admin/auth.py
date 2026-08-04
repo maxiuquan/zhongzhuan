@@ -31,6 +31,20 @@ _TOKEN_EXPIRY = 86400  # 24 hours
 # ---- R-P2-03: login rate limiting state (keyed by client IP) ----
 _LOGIN_FAILURES: dict[str, list[float]] = {}
 
+#: 可注入时钟（T33：限速测试零真实等待）。默认 ``time.monotonic``；
+#: 测试通过 :func:`set_login_clock` 换成假时钟。
+_MONOTONIC_CLOCK = time.monotonic
+
+
+def set_login_clock(clock) -> None:
+    """Test hook: 替换限速用的单调时钟（假时钟推进窗口即可测「窗口过期后恢复」）。"""
+    global _MONOTONIC_CLOCK
+    _MONOTONIC_CLOCK = clock if clock is not None else time.monotonic
+
+
+def _now() -> float:
+    return _MONOTONIC_CLOCK()
+
 # ---- R-P2-03: CSRF double-submit cookie ----
 _CSRF_COOKIE = "zhongzhuan_csrf"
 _CSRF_HEADER = "X-CSRF-Token"
@@ -197,7 +211,7 @@ def _rate_limit_window() -> int:
 
 def _check_login_rate(request: web.Request) -> bool:
     key = _login_key(request)
-    now = time.monotonic()
+    now = _now()
     window = _rate_limit_window()
     recent = [t for t in _LOGIN_FAILURES.get(key, []) if now - t < window]
     return len(recent) < _rate_limit_max()
@@ -205,7 +219,7 @@ def _check_login_rate(request: web.Request) -> bool:
 
 def _record_login_failure(request: web.Request) -> None:
     key = _login_key(request)
-    now = time.monotonic()
+    now = _now()
     window = _rate_limit_window()
     recent = [t for t in _LOGIN_FAILURES.get(key, []) if now - t < window]
     _LOGIN_FAILURES[key] = recent + [now]
