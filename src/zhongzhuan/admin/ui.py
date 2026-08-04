@@ -247,7 +247,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
               <input id="fbPenalty" type="range" min="0.01" max="1.0" step="0.01" value="0.1" oninput="document.getElementById('fbPenaltyVal').textContent=this.value" style="padding:0">
             </div>
             <button class="btn primary" onclick="saveFallbackConfig()">保存配置</button>
-            <button class="btn" onclick="refreshFallback()">刷新兜底模型</button>
+            <button class="btn" id="refreshFallbackBtn" onclick="refreshFallback()">刷新兜底模型</button>
           </div>
           <div id="fbInfo" style="margin-top:12px;color:var(--text-muted);font-size:12px"></div>
         </div>
@@ -540,10 +540,25 @@ async function loadModels() {
 }
 
 async function refreshFallback() {
-  const r = await api("/api/fallback/refresh", {method:"POST"});
-  if (r !== null) {
+  const btn = document.getElementById("refreshFallbackBtn");
+  const info = document.getElementById("fbInfo");
+  if (btn.disabled) return;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "刷新中...";
+  info.textContent = "正在从 OpenCode Free 拉取并同步兜底模型，请稍候...";
+  try {
+    const r = await api("/api/fallback/refresh", {method:"POST"});
+    if (r === null) {
+      info.innerHTML = '<span style="color:var(--danger)">刷新失败，请查看服务日志或稍后重试。</span>';
+      return;
+    }
+    await Promise.all([loadModels(), loadFallbackStatus()]);
+    info.innerHTML += ' | <span style="color:var(--success)">刚刚同步 <strong>' + r.synced + "</strong> 个模型</span>";
     alert("已同步 " + r.synced + " 个 OpenCode Free 兜底模型:\\n" + (r.models||[]).join(", "));
-    loadModels(); loadFallbackStatus();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
   }
 }
 

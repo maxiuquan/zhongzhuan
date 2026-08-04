@@ -191,5 +191,10 @@ async def test_ui_serves(store):
                 assert resp.status == 200
                 text = await resp.text()
                 assert "Zhongzhuan" in text
+                assert 'id="refreshFallbackBtn"' in text
+                assert 'btn.textContent = "刷新中..."' in text
+                assert "btn.disabled = true" in text
+                assert "btn.disabled = false" in text
+                assert "刚刚同步" in text
     finally:
         await runner.cleanup()
