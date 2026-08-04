@@ -15,8 +15,12 @@ from ..store.logs import log_request
 from ..upstream import UpstreamClient
 from ..config.timeouts import DEFAULT_TIMEOUT_POLICY, TimeoutPolicy
 from ..observability.metrics import record_v3_fallback
+from ..responses_v3.background import BackgroundWorker
 from ..responses_v3.capability import CapabilityRouter, StaticRouteRegistry
+from ..responses_v3.chain import build_upstream_input, chain_error_response
+from ..responses_v3.pipeline import PipelineConfig, ResponsePipeline
 from ..responses_v3.request_sanitizer import RequestSanitizer, capability_values
+from ..responses_v3.upstream_chunk_adapter import UpstreamSSEChunkAdapter
 from .context import RequestContextBuilder
 from .ratelimit import KeyHealth, STATE_HEALTHY
 from .retry import (
@@ -38,6 +42,7 @@ from .protocol.responses import (
     ResponsesStreamTranslator,
     CompositeStreamTranslator,
 )
+from .protocol.responses_models import TerminalReason
 from .protocol.translator_base import finish_translator
 
 from loguru import logger as _lg
@@ -172,6 +177,20 @@ class ProxyHandler:
         # 后台任务引用（优化点4+5：sticky 清理 + 健康状态快照）
         self._bg_tasks: list[asyncio.Task] = []
         self._bg_running = False
+        #: P0-6: the v3 ``background=true`` worker, owned by this handler's
+        #: background-task lifecycle.  ``None`` until ``start_background_tasks``
+        #: finds a store-backed v3 setup (a store-less proxy never has one).
+        self._v3_worker: BackgroundWorker | None = None
+        #: AC-7.4: lazily built once from ``responses_bridge.timeout.*``.
+        self._v3_pipeline_cfg: PipelineConfig | None = None
+        # R-P1-35: let ``POST /v1/responses/{id}/cancel`` reach the worker that
+        # is actually running the job.  A *provider* is handed over instead of
+        # the worker itself because the worker above is built lazily on first
+        # use -- binding the value now would bind ``None`` for the life of the
+        # process and a cancel would silently degrade to "set a flag and hope".
+        binder = getattr(self._v3, "set_worker_provider", None)
+        if binder is not None:
+            binder(self._v3_background_worker)
 
     def _set_groups(self, groups: list[dict]) -> None:
         """Rebuild the group routing map from a list of group dicts."""
@@ -342,53 +361,92 @@ class ProxyHandler:
         except Exception:
             _lg.exception(f"[v3] persist terminal {status} for {response_id} failed (workspace={workspace_id!r})")
 
-    async def _dispatch_v3_create(
+    async def _prepare_v3_create(
         self,
         request: web.Request,
         ctx,
         candidates: list[KeyHealth],
-    ) -> web.Response:
-        """Execute one real v3 create against an upstream (T26)."""
+        *,
+        persist_skeleton: bool = True,
+    ) -> tuple["_V3CreateContext | None", web.Response | None]:
+        """Phase A of a v3 create: every decision that is still allowed to fail.
+
+        The non-stream, stream and background create paths share this verbatim,
+        which is what keeps them from drifting apart.  The step order is the
+        one §9.7 declares non-commutative:
+
+        ``resolve_chain`` → ``sanitize`` → ``build_upstream_input`` injection
+        → capability route → skeleton persist → outbound body.
+
+        The injection (P0-5) **must** precede the protocol translation done by
+        :meth:`_prepare_v3_upstream_call`, because the translator reads
+        ``body["input"]``; injecting one step later silently drops the parent
+        turns.  The chain guard **must** precede every network call, so a
+        broken ``previous_response_id`` costs zero upstream requests.
+
+        Args:
+            persist_skeleton: When ``False``, skip step A5.  The background
+                path passes ``False`` because ``BackgroundWorker.enqueue``
+                writes the ``queued`` row, its ``response.queued`` event and
+                the job row as one unit — two writers for one ``response_id``
+                is a UNIQUE-constraint violation, and "whoever runs the job
+                owns the row" is the rule that keeps recovery unambiguous.
+
+        Returns ``(context, None)`` or ``(None, error_response)``.  No network
+        I/O happens here, so an error means the client never saw a byte and a
+        standard JSON error is always still legal (§9.2).
+        """
         body_obj = dict(ctx.body or {})
         workspace_id = self._v3_workspace_id(request)
         response_id = self._new_response_id()
 
-        # R-P0-29: a chain that cannot be resolved is a standard error, never a
-        # silent stateless turn.  The resource layer owns the guard; we only
-        # let it fail fast before any network I/O.
+        # A1. R-P0-29: a chain that cannot be resolved is a standard error,
+        # never a silent stateless turn.  The resource layer owns the guard; we
+        # only let it fail fast before any network I/O.
         previous_response_id = str(body_obj.get("previous_response_id") or "")
+        resolution = None
         if previous_response_id and self._v3 is not None:
             resolution = await self._v3.resolve_chain(
                 previous_response_id,
                 workspace_id=workspace_id,
             )
             if not resolution.ok:
-                from ..responses_v3.chain import chain_error_response
-
                 status, payload = chain_error_response(resolution)
-                return web.json_response(payload, status=status)
+                return None, web.json_response(payload, status=status)
 
-        # Capability route over the *filtered* candidate pool.  A hosted tool
-        # with no executor is a standard 400; a declared-but-down route is 503.
-        # Both must be answered BEFORE any streaming response is prepared
-        # (T26: never a fake 200 over a missing executor).
+        # A2. One lossless fact model per create; capability routing and sticky
+        # binding both read it instead of re-scanning the payload.
         sanitized = self._request_sanitizer.sanitize(body_obj)
+
+        # A3. P0-5: the resolved chain becomes the upstream ``input``.  It is a
+        # *separate* dict from ``body_obj`` on purpose -- what we persist is
+        # this turn's input (the parent turns are already stored under their own
+        # response ids), what we send upstream is the flattened history.
+        upstream_body = dict(body_obj)
+        if resolution is not None:
+            upstream_body["input"] = build_upstream_input(resolution, body_obj.get("input"))
+
+        # A4. Capability route over the *filtered* candidate pool.  A hosted
+        # tool with no executor is a standard 400; a declared-but-down route is
+        # 503.  Both must be answered BEFORE any streaming response is prepared
+        # (T26: never a fake 200 over a missing executor).
         decision = self._capability_router(candidates).route(sanitized, candidates)
         if hasattr(decision, "to_response"):
             # CapabilityError: standard 400 (no executor) or 503 (route down).
             status, payload = decision.to_response()
-            return web.json_response(payload, status=status)
+            return None, web.json_response(payload, status=status)
 
         store_enabled = bool(body_obj.get("store", True))
-        is_stream = bool(body_obj.get("stream", False))
-        now = int(time.time())
 
-        # Persist the skeleton row (store=true only).  The request is redacted
-        # by the resource layer on the write path; here we store the raw
-        # sanitized payload because reasoning text never reached the store in
-        # this path (the sanitizer does not materialise it either).
+        # A5. Persist the skeleton row (store=true only).  The request is
+        # redacted by the resource layer on the write path; here we store the
+        # raw sanitized payload because reasoning text never reached the store
+        # in this path (the sanitizer does not materialise it either).  A store
+        # hiccup degrades the request to store-less, it never fails it.
+        chain_depth = resolution.depth + 1 if resolution is not None and resolution.ok else 0
+
         rs = self._v3_response_store()
-        if store_enabled and rs is not None:
+        if store_enabled and persist_skeleton and rs is not None:
             from ..proxy.protocol.item_registry import parse_input_items, serialize_item
 
             input_items = [serialize_item(it) for it in parse_input_items(body_obj.get("input"))]
@@ -405,87 +463,458 @@ class ProxyHandler:
                     background=bool(body_obj.get("background", False)),
                     request=stored_request,
                 )
-                if input_items:
-                    await rs.save_input_items(response_id, input_items)
-                if previous_response_id:
-                    from ..responses_v3.chain import ChainResolver
-
-                    resolver = ChainResolver(rs)
-                    resolution = await resolver.resolve_chain(previous_response_id, workspace_id)
-                    if resolution.ok:
-                        await rs.save_state_chain(
-                            response_id,
-                            previous_response_id,
-                            resolution.depth + 1,
-                            workspace_id=workspace_id,
-                        )
             except Exception:
                 _lg.exception(f"[v3] skeleton persist failed for {response_id}")
                 rs = None  # do not fatal the request over a store hiccup
 
-        # Build the outbound body from the sanitizer's payload (single fact
-        # source).  The chain resolution is deliberately NOT injected here:
-        # the legacy translators consume the request body as-is; the v3
-        # chain recovery contract is exercised by the resource layer on
-        # retrieve/input_items.
-        final_body = json.dumps(body_obj, ensure_ascii=False).encode()
+        prep = _V3CreateContext(
+            body_obj=body_obj,
+            upstream_body=upstream_body,
+            final_body=json.dumps(upstream_body, ensure_ascii=False).encode(),
+            sanitized=sanitized,
+            decision=decision,
+            response_id=response_id,
+            workspace_id=workspace_id,
+            previous_response_id=previous_response_id,
+            chain_depth=chain_depth,
+            store_enabled=store_enabled,
+            rs=rs,
+        )
+        if persist_skeleton:
+            await self._persist_v3_create_side_records(prep)
+        return prep, None
 
-        # -- Non-stream create: reuse the production request chain ----------
-        if not is_stream:
-            resp, payload_bytes = await self._run_v3_nonstream(
-                request=request,
-                body_obj=body_obj,
-                final_body=final_body,
-                decision=decision,
-                requested_model=ctx.requested_model or "",
-                inbound_protocol="responses",
-                session_key=self._session_key(request, body_obj),
-                required_caps=capability_values(sanitized),
-            )
-            if resp.status_code >= 400:
-                return web.Response(
-                    status=resp.status_code,
-                    body=payload_bytes,
-                    content_type="application/json",
+    async def _persist_v3_create_side_records(self, prep: "_V3CreateContext") -> None:
+        """Write this turn's input items and state-chain row.
+
+        Split out of the skeleton write because the *row* has two possible
+        owners (this handler for sync creates, ``BackgroundWorker.enqueue`` for
+        background ones) while these two side records always belong to the same
+        writer -- the one that knows the resolved chain depth.  They must run
+        **after** the row exists, hence the separate call site.
+
+        A store hiccup degrades the request (no ``/input_items`` listing) but
+        never fails it: the client already has a valid response either way.
+        """
+        rs = prep.rs
+        if not prep.store_enabled or rs is None:
+            return
+        from ..proxy.protocol.item_registry import parse_input_items, serialize_item
+
+        try:
+            input_items = [serialize_item(it) for it in parse_input_items(prep.body_obj.get("input"))]
+            if input_items:
+                await rs.save_input_items(prep.response_id, input_items)
+            if prep.chain_depth > 0:
+                # Reuse the walk done by A1: resolving the same chain twice
+                # doubles the store reads and can only ever agree with itself.
+                await rs.save_state_chain(
+                    prep.response_id,
+                    prep.previous_response_id,
+                    prep.chain_depth,
+                    workspace_id=prep.workspace_id,
                 )
-            # Unify the response id: upstream (native or translated) may return
-            # its own; the stored resource must be retrievable under the id we
-            # minted at the fork.
+        except Exception:
+            _lg.exception(f"[v3] input/chain persist failed for {prep.response_id}")
+
+    async def _dispatch_v3_create(
+        self,
+        request: web.Request,
+        ctx,
+        candidates: list[KeyHealth],
+    ) -> web.Response:
+        """Execute one real non-stream v3 create against an upstream (T26)."""
+        prep, error = await self._prepare_v3_create(request, ctx, candidates)
+        if error is not None:
+            return error
+        assert prep is not None  # narrow for type checkers: error is None
+
+        resp, payload_bytes = await self._run_v3_nonstream(
+            request=request,
+            body_obj=prep.upstream_body,
+            final_body=prep.final_body,
+            decision=prep.decision,
+            requested_model=ctx.requested_model or "",
+            inbound_protocol="responses",
+            session_key=self._session_key(request, prep.body_obj),
+            required_caps=capability_values(prep.sanitized),
+        )
+        if resp.status_code >= 400:
+            return web.Response(
+                status=resp.status_code,
+                body=payload_bytes,
+                content_type="application/json",
+            )
+        # Unify the response id: upstream (native or translated) may return
+        # its own; the stored resource must be retrievable under the id we
+        # minted at the fork.
+        try:
+            resp_obj = json.loads(payload_bytes.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            resp_obj = {}
+        if not isinstance(resp_obj, dict):
+            # An upstream that answered 200 with a non-object body is passed
+            # through untouched rather than laundered into a fabricated
+            # response object (R-P0-32: never invent success shape).
+            return web.Response(status=200, body=payload_bytes, content_type="application/json")
+
+        resp_obj["id"] = prep.response_id
+        # The translated body is a plain Chat->Responses conversion; it
+        # carries no chain/background state.  Echo the official fields
+        # the client sent so the returned object round-trips with a
+        # later retrieve() (T37 criterion ②).
+        if prep.previous_response_id:
+            resp_obj["previous_response_id"] = prep.previous_response_id
+        if prep.body_obj.get("background"):
+            resp_obj["background"] = True
+        if "store" not in resp_obj:
+            resp_obj["store"] = prep.store_enabled
+        if prep.store_enabled and prep.rs is not None:
+            usage = resp_obj.get("usage") if isinstance(resp_obj.get("usage"), dict) else {}
+            output = resp_obj.get("output") if isinstance(resp_obj.get("output"), list) else []
+            await self._persist_v3_terminal(
+                response_id=prep.response_id,
+                workspace_id=prep.workspace_id,
+                status="completed",
+                usage=usage,
+                output=output,
+            )
+        return web.json_response(resp_obj, status=200)
+
+    # ------------------------------------------------------------------
+    # P0-1: the real streaming create.
+    #
+    # Two-phase commit (§9.2) is the whole design:
+    #
+    #   Phase A -- 0 bytes written, any failure is a normal JSON error;
+    #   Phase B -- after ``prepare()`` the status code is locked to 200 and
+    #              the ONLY legal way to end is an SSE terminal event +
+    #              ``[DONE]``, both produced by ``ResponsePipeline`` (§9.1).
+    #
+    # This handler never writes an ``event:`` or ``data:`` line of its own.
+    # That is not a style preference: single ownership is the structural
+    # reason a lifecycle event cannot appear twice (AC-1.4).
+    # ------------------------------------------------------------------
+
+    async def _dispatch_v3_create_stream(
+        self,
+        request: web.Request,
+        ctx,
+        candidates: list[KeyHealth],
+    ) -> web.StreamResponse:
+        """Serve ``POST /v1/responses`` with ``stream=true`` as a real SSE stream."""
+        prep, error = await self._prepare_v3_create(request, ctx, candidates)
+        if error is not None:
+            return error
+        assert prep is not None
+
+        # A6. Key / translation / headers / body -- still no network I/O.
+        call, call_error = await self._prepare_v3_upstream_call(
+            request=request,
+            body_obj=prep.upstream_body,
+            final_body=prep.final_body,
+            decision=prep.decision,
+            requested_model=ctx.requested_model or "",
+            inbound_protocol="responses",
+            stream=True,
+        )
+        if call_error is not None:
+            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+            return web.Response(
+                status=call_error.status_code,
+                body=call_error.body,
+                content_type="application/json",
+            )
+        assert call is not None
+        key = call.key
+
+        # A7. Open the upstream and read its response header.  ``UpstreamClient
+        # .stream`` is an async generator that yields exactly one response
+        # inside ``async with client.stream(...)``, so pulling the first item
+        # by hand is what lets us inspect the status *before* committing to a
+        # 200 -- and ``aclose()`` is what later exits that context manager.
+        upstream_gen = call.client.stream(
+            call.method,
+            call.path,
+            headers=call.headers,
+            content=call.body,
+        )
+        try:
+            upstream_resp = await upstream_gen.__anext__()
+        except StopAsyncIteration:
+            await self._aclose_quietly(upstream_gen)
+            mark_network_failure(key)
+            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_CONNECT.value)
+            return web.json_response({"error": "upstream connection failed"}, status=502)
+        except (ConnectionResetError, ConnectionError, OSError) as exc:
+            await self._aclose_quietly(upstream_gen)
+            transport = request.transport
+            if transport is not None and transport.is_closing():
+                # The client hung up while we were connecting: not the key's
+                # fault, so its health is left untouched (R-P1-25).
+                return web.Response(status=499, text="Client Closed Request")
+            _lg.error(f"[v3-stream] key_id={key.key_id} connection error: {type(exc).__name__}: {exc}")
+            mark_network_failure(key)
+            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_CONNECT.value)
+            return web.json_response({"error": "upstream connection failed"}, status=502)
+        except Exception as exc:  # noqa: BLE001 - attribute, never leak a traceback
+            await self._aclose_quietly(upstream_gen)
+            _lg.error(f"[v3-stream] key_id={key.key_id} exception: {type(exc).__name__}: {exc}")
+            mark_network_failure(key)
+            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+            return web.json_response({"error": "upstream request failed"}, status=502)
+
+        upstream_headers = dict(upstream_resp.headers)
+        if upstream_resp.status_code >= 400:
+            # An upstream error before the first byte is a normal HTTP error --
+            # turning it into "200 + response.failed" would blind every SDK's
+            # error path (the rejected alternative in §1.4).
             try:
-                resp_obj = json.loads(payload_bytes.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                resp_obj = {}
-            if isinstance(resp_obj, dict):
-                resp_obj["id"] = response_id
-                # The translated body is a plain Chat->Responses conversion; it
-                # carries no chain/background state.  Echo the official fields
-                # the client sent so the returned object round-trips with a
-                # later retrieve() (T37 criterion ②).
-                if previous_response_id:
-                    resp_obj["previous_response_id"] = previous_response_id
-                if body_obj.get("background"):
-                    resp_obj["background"] = True
-                if "store" not in resp_obj:
-                    resp_obj["store"] = bool(body_obj.get("store", True))
-                if store_enabled and rs is not None:
-                    usage = resp_obj.get("usage") if isinstance(resp_obj.get("usage"), dict) else {}
-                    output = resp_obj.get("output") if isinstance(resp_obj.get("output"), list) else []
-                    await self._persist_v3_terminal(
-                        response_id=response_id,
-                        workspace_id=workspace_id,
-                        status="completed",
-                        usage=usage,
-                        output=output,
-                    )
-                return web.json_response(resp_obj, status=200)
+                error_body = await upstream_resp.aread()
+            except Exception:  # noqa: BLE001 - the status is the useful part
+                error_body = b""
+            await self._aclose_quietly(upstream_gen)
+            if classify_failure(key, upstream_resp.status_code, upstream_headers):
+                # Retryable upstream states must not park the key: the next
+                # request gets to try it again (same rule as the non-stream path).
+                mark_success(key)
+            _lg.info(
+                f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} "
+                f"body={error_body[:300]!r}"
+            )
+            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+            return web.Response(
+                status=upstream_resp.status_code,
+                body=error_body,
+                content_type="application/json",
+            )
 
-        # -- Defensive fallback: streamed create stays on the resource
-        # skeleton until the T26 stream pass lands (the fork above already
-        # routes stream=True here through ``_dispatch_v3``; this branch exists
-        # so a direct call with ``stream=True`` cannot fabricate a stream).
-        return await self._dispatch_v3(request, ctx)
+        mark_success(key)
+        learn_rate_limits(key, upstream_headers, upstream_resp.status_code)
+        session_key = self._session_key(request, prep.body_obj)
+        if session_key:
+            required_caps = capability_values(prep.sanitized)
+            self._set_sticky(session_key, key.key_id, required_caps)
+            asyncio.create_task(self._persist_sticky_binding(session_key, key.key_id, required_caps))
 
-    async def _run_v3_nonstream(
+        # A8. ---- Phase A is over: from here the status code is 200. ----
+        resp = web.StreamResponse(status=200)
+        resp.headers["Content-Type"] = "text/event-stream; charset=utf-8"
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["X-Accel-Buffering"] = "no"
+        resp.headers["Connection"] = "keep-alive"
+        await resp.prepare(request)
+
+        adapter = UpstreamSSEChunkAdapter.for_protocol(
+            call.outbound_protocol,
+            native=not call.need_translation,
+        )
+        pipeline = ResponsePipeline(
+            prep.response_id,
+            workspace_id=prep.workspace_id,
+            store=prep.rs if prep.store_enabled else None,
+        )
+        cancelled = asyncio.Event()
+        client_gone = False
+
+        # §9.6: hold the generator so ``aclose()`` can be awaited.  Iterating
+        # ``pipeline.run(...)`` anonymously leaves the cleanup to the garbage
+        # collector, which means the producer tasks and the httpx connection
+        # are released at an unpredictable time -- i.e. leaked under load.
+        frames = pipeline.run(
+            adapter.iter_chunks(upstream_resp.aiter_bytes()),
+            client_cancelled=cancelled,
+            key_health=key,  # read-only: a disconnect is not a key failure
+            config=self._v3_pipeline_config(),  # AC-7.4
+        )
+        try:
+            async for frame in frames:
+                try:
+                    await resp.write(frame)
+                except (ConnectionResetError, ConnectionError, OSError):
+                    # The client left.  That is not an error and above all not
+                    # the key's fault -- no ``mark_network_failure`` (R-P1-25).
+                    client_gone = True
+                    cancelled.set()
+                    break
+        finally:
+            await self._aclose_quietly(frames)
+            await self._aclose_quietly(upstream_gen)
+
+        if client_gone:
+            pipeline.stats.client_disconnects += 1
+            await self._persist_v3_stream_terminal(
+                prep,
+                "incomplete",
+                TerminalReason.CANCELLED_BY_CLIENT.value,
+                output=pipeline.output_items(),
+            )
+            return resp
+
+        status = pipeline.state if pipeline.state in ("completed", "failed", "incomplete") else "incomplete"
+        await self._persist_v3_stream_terminal(
+            prep,
+            status,
+            pipeline.stats.terminal_reason or TerminalReason.NORMAL_FINISH.value,
+            output=pipeline.output_items(),
+        )
+        try:
+            await resp.write_eof()
+        except (ConnectionResetError, ConnectionError, OSError):
+            pass
+        return resp
+
+    async def _dispatch_v3_create_background(
+        self,
+        request: web.Request,
+        ctx,
+        candidates: list[KeyHealth],
+    ) -> web.Response:
+        """Serve ``POST /v1/responses`` with ``background=true`` (P0-6).
+
+        The response is enqueued and returned as ``202 queued`` without a single
+        upstream byte, which is what makes R-P1-34 ① ("an id in under a second")
+        a property of the code rather than a hope.  Execution happens later in
+        :class:`~zhongzhuan.responses_v3.background.BackgroundWorker`.
+        """
+        body_obj = dict(ctx.body or {})
+        if body_obj.get("stream"):
+            # U2 / GA v1: a detached job has no socket to stream over, and
+            # pretending otherwise (opening an SSE stream that ends at the
+            # first heartbeat) is worse than a clear rejection.
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "background=true cannot be combined with stream=true",
+                        "type": "invalid_request_error",
+                        "param": "stream",
+                        "code": "unsupported_parameter",
+                    }
+                },
+                status=400,
+            )
+
+        worker = self._v3_background_worker()
+        if worker is None:
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "background responses are not available on this deployment",
+                        "type": "invalid_request_error",
+                        "code": "background_unavailable",
+                    }
+                },
+                status=503,
+            )
+
+        # Phase A of a create still applies: a broken chain or a missing tool
+        # executor must be rejected now, not discovered by a worker minutes
+        # later with nobody listening.  The skeleton row is NOT written here --
+        # ``worker.enqueue`` owns it (see ``persist_skeleton``).
+        prep, error = await self._prepare_v3_create(
+            request,
+            ctx,
+            candidates,
+            persist_skeleton=False,
+        )
+        if error is not None:
+            return error
+        assert prep is not None
+
+        try:
+            record = await worker.enqueue(
+                response_id=prep.response_id,
+                workspace_id=prep.workspace_id,
+                model=str(prep.body_obj.get("model", "") or ""),
+                request=prep.upstream_body,
+                previous_response_id=prep.previous_response_id,
+            )
+        except Exception:
+            _lg.exception(f"[v3] background enqueue failed for {prep.response_id}")
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "failed to enqueue background response",
+                        "type": "server_error",
+                        "code": "internal_server_error",
+                    }
+                },
+                status=500,
+            )
+
+        # The row exists now, so this turn's input items / chain row can be
+        # attached to it (the worker only writes the row, event and job).
+        await self._persist_v3_create_side_records(prep)
+
+        from ..responses_v3.schema import to_response_object
+
+        payload = to_response_object(record) if record is not None else {"id": prep.response_id, "status": "queued"}
+        return web.json_response(payload, status=202)
+
+    def _v3_pipeline_config(self) -> PipelineConfig:
+        """AC-7.4 + P0-2: the effective pipeline policy, from the unified config.
+
+        Carries both the timeout ceilings and ``strict_terminal``.  The latter
+        matters because :class:`PipelineConfig` defaults it to ``False`` for
+        backwards compatibility (R-P1-22), which would let a truncated upstream
+        be reported as ``response.completed``.  GA states its own policy in
+        ``responses_bridge.strict_terminal`` (default ``True``), so the wire
+        never whitewashes a terminal state — 铁律 2.
+
+        An **absent** ``responses_bridge`` section must not weaken the
+        contract.  ``PipelineConfig.from_config(None)`` legitimately yields the
+        library defaults, and the library default of ``strict_terminal`` is
+        ``False`` — so falling back to it would mean "the operator wrote no
+        config, therefore truncated streams may be reported as
+        ``response.completed``".  Missing configuration is exactly the case
+        where the safe reading has to win, so the fallback is a default
+        :class:`ResponsesBridgeConfig` (GA policy: strict) rather than no
+        config at all.  Explicitly configured values still win over it.
+
+        Built once and cached — the values cannot change without a restart,
+        and rebuilding it per request would put a dataclass construction on
+        the hot path for no benefit.
+        """
+        if self._v3_pipeline_cfg is None:
+            from ..config.config import ResponsesBridgeConfig
+
+            bridge = getattr(self._feature_flags, "bridge_config", None)
+            if bridge is None:
+                bridge = ResponsesBridgeConfig()
+            self._v3_pipeline_cfg = PipelineConfig.from_config(bridge)
+        return self._v3_pipeline_cfg
+
+    @staticmethod
+    async def _aclose_quietly(agen: Any) -> None:
+        """``aclose()`` an async generator without ever raising at teardown."""
+        closer = getattr(agen, "aclose", None)
+        if closer is None:
+            return
+        try:
+            await closer()
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - teardown
+            pass
+
+    async def _persist_v3_stream_terminal(
+        self,
+        prep: "_V3CreateContext",
+        status: str,
+        terminal_reason: str,
+        *,
+        output: list[Any] | None = None,
+    ) -> None:
+        """Move the streamed response's row to its terminal state (store=true)."""
+        if not prep.store_enabled or prep.rs is None:
+            return
+        await self._persist_v3_terminal(
+            response_id=prep.response_id,
+            workspace_id=prep.workspace_id,
+            status=status,
+            output=output or [],
+            terminal_reason=terminal_reason,
+        )
+
+    async def _prepare_v3_upstream_call(
         self,
         *,
         request: web.Request,
@@ -494,15 +923,24 @@ class ProxyHandler:
         decision,
         requested_model: str,
         inbound_protocol: str,
-        session_key: str,
-        required_caps: frozenset[str],
-    ) -> tuple[Any, bytes]:
-        """Execute one non-stream create against the production upstream chain.
+        stream: bool,
+    ) -> tuple["_V3UpstreamCall | None", "_V3UpstreamResult | None"]:
+        """Resolve everything needed to *issue* one v3 upstream request.
 
-        Reuses the scheduler pick (``decision.key``), health accounting, retry
-        classification and the existing Responses -> Chat/Anthropic translators.
-        Returns ``(httpx.Response, payload_bytes)`` so the caller can inspect
-        the status and unify the response id before sending to the client.
+        This is the two-phase-commit boundary of the streaming path (Q1): every
+        decision that can still fail -- rate window, client construction,
+        request translation, auth headers, path override -- happens here, i.e.
+        **before** the first SSE byte is written.  Once this returns a call the
+        stream handler may safely ``prepare()`` a ``200`` response, because the
+        only remaining failure modes are mid-stream ones the pipeline already
+        renders as terminal events.
+
+        It performs no network I/O and mutates nothing but the key's request
+        counter, so the non-stream and stream paths can share it verbatim.
+
+        Returns:
+            ``(call, None)`` on success, or ``(None, error)`` where ``error``
+            carries the status + JSON body to return to the client.
         """
         key = decision.key
         # The capability router already picked a candidate; honour its
@@ -512,12 +950,12 @@ class ProxyHandler:
             upstream_path = "/v1/responses" if getattr(decision, "is_native", False) else "/v1/chat/completions"
 
         if key.window is not None and not key.window.allow(1):
-            return _http_json(429, {"error": "all keys exhausted"}), b""
+            return None, _http_json(429, {"error": "all keys exhausted"})
         key.record_request()
 
         client = await self._ensure_client(key.upstream_base)
         if client is None:
-            return _http_json(503, {"error": "no enabled keys"}), b""
+            return None, _http_json(503, {"error": "no enabled keys"})
 
         outbound_protocol = key.upstream_protocol
         need_translation = inbound_protocol != outbound_protocol
@@ -546,7 +984,7 @@ class ProxyHandler:
                 cc = convert_responses_request_to_chatcompletions(body_obj)
             except Exception as exc:
                 _lg.exception(f"[v3] translate request failed: {exc}")
-                return _http_json(500, {"error": "request translation failed"}), b""
+                return None, _http_json(500, {"error": "request translation failed"})
             if outbound_protocol == "anthropic":
                 translated_req = translate_request_o2a(cc, key.anthropic_version)
                 upstream_path = "/v1/messages"
@@ -554,7 +992,12 @@ class ProxyHandler:
                 translated_req = cc
                 upstream_path = "/v1/chat/completions"
             if isinstance(translated_req, dict):
-                translated_req.pop("stream", None)
+                # The outbound stream flag is ours to set: a v3 stream must ask
+                # the upstream to stream, a v3 non-stream must not.
+                if stream:
+                    translated_req["stream"] = True
+                else:
+                    translated_req.pop("stream", None)
                 if key.upstream_model:
                     translated_req["model"] = key.upstream_model
             final_body = json.dumps(translated_req, ensure_ascii=False).encode()
@@ -568,18 +1011,83 @@ class ProxyHandler:
                 headers.pop("anthropic-version", None)
             headers["Content-Length"] = str(len(final_body))
         else:
-            # NATIVE passthrough: only auth + model mapping are touched.
+            # NATIVE passthrough: only auth, model mapping and the stream flag
+            # are touched.
+            native_body = dict(body_obj)
+            mutated = False
             if requested_model and key.upstream_model and requested_model != key.upstream_model:
-                body_obj = dict(body_obj)
-                body_obj["model"] = key.upstream_model
-                final_body = json.dumps(body_obj, ensure_ascii=False).encode()
+                native_body["model"] = key.upstream_model
+                mutated = True
+            if bool(native_body.get("stream", False)) != stream:
+                native_body["stream"] = stream
+                mutated = True
+            if mutated:
+                final_body = json.dumps(native_body, ensure_ascii=False).encode()
             headers["Authorization"] = f"Bearer {key.api_key}"
             headers.pop("x-api-key", None)
             headers.pop("anthropic-version", None)
             headers["Content-Length"] = str(len(final_body))
 
+        if stream:
+            # Never let a transport-level content codec sit between the
+            # upstream and the SSE framer.
+            headers["Accept-Encoding"] = "identity"
+
         if key.upstream_path_override:
             upstream_path = key.upstream_path_override
+
+        return (
+            _V3UpstreamCall(
+                key=key,
+                client=client,
+                method=request.method,
+                path=upstream_path,
+                headers=headers,
+                body=final_body,
+                outbound_protocol=outbound_protocol,
+                need_translation=need_translation,
+            ),
+            None,
+        )
+
+    async def _run_v3_nonstream(
+        self,
+        *,
+        request: web.Request,
+        body_obj: dict,
+        final_body: bytes,
+        decision,
+        requested_model: str,
+        inbound_protocol: str,
+        session_key: str,
+        required_caps: frozenset[str],
+    ) -> tuple[Any, bytes]:
+        """Execute one non-stream create against the production upstream chain.
+
+        Reuses the scheduler pick (``decision.key``), health accounting, retry
+        classification and the existing Responses -> Chat/Anthropic translators.
+        Returns ``(httpx.Response, payload_bytes)`` so the caller can inspect
+        the status and unify the response id before sending to the client.
+        """
+        call, error = await self._prepare_v3_upstream_call(
+            request=request,
+            body_obj=body_obj,
+            final_body=final_body,
+            decision=decision,
+            requested_model=requested_model,
+            inbound_protocol=inbound_protocol,
+            stream=False,
+        )
+        if error is not None:
+            return error, b""
+        assert call is not None  # narrow for type checkers: error is None
+        key = call.key
+        client = call.client
+        headers = call.headers
+        final_body = call.body
+        upstream_path = call.path
+        outbound_protocol = call.outbound_protocol
+        need_translation = call.need_translation
 
         try:
             resp = await client.request(
@@ -959,6 +1467,98 @@ class ProxyHandler:
 
     # ---- 后台任务：sticky 清理 + 健康状态持久化（优化点4+5）----
 
+    def _v3_background_worker(self) -> BackgroundWorker | None:
+        """The process-wide v3 background worker, or ``None`` if unavailable.
+
+        A worker needs a store (leases, jobs and the event log all live there)
+        and a v3 handler; a store-less or v2-only deployment simply has no
+        background support and says so with a 503 instead of accepting jobs it
+        can never run.
+        """
+        if self._v3_worker is not None:
+            return self._v3_worker
+        if self._v3 is None:
+            return None
+        rs = self._v3_response_store()
+        if rs is None:
+            return None
+        self._v3_worker = BackgroundWorker(rs)
+        return self._v3_worker
+
+    def _v3_background_upstream_factory(self, task_id: str) -> Any:
+        """Build the execution source for one background job (P0-6).
+
+        §9.8: this returns a **zero-argument callable**, never a started async
+        generator.  ``BackgroundWorker._stream`` does ``source = upstream() if
+        callable(upstream) else upstream`` precisely so a recovered attempt can
+        obtain a *fresh* stream -- an async generator that already ran cannot
+        be re-entered, and reusing one would make recovery a silent no-op.
+
+        The stream it opens is the same one the live path uses: same key
+        selection, same translation, same adapter vocabulary.  Only the
+        consumer differs (budget ledger + event log instead of a socket).
+        """
+
+        async def _open() -> Any:
+            worker = self._v3_background_worker()
+            if worker is None:
+                raise RuntimeError("background worker is unavailable")
+            job = await worker.jobs.get_job_any_tenant(task_id) or {}
+            response_id = str(job.get("response_id") or task_id)
+            workspace_id = str(job.get("workspace_id") or "")
+            record = await worker.store.get_response(response_id, workspace_id=workspace_id)
+            if record is None:
+                raise RuntimeError(f"background job {task_id} has no response row")
+
+            body_obj = dict(record.request or {})
+            # A detached job always streams from the upstream: it is the only
+            # shape that lets the budget ledger charge per chunk and the cancel
+            # flag be honoured mid-answer.
+            body_obj["stream"] = True
+            body_obj.pop("background", None)
+
+            candidates = self._filter_v3_candidates(
+                self._resolve_candidates(str(body_obj.get("model", "") or "")),
+                None,
+            )
+            if not candidates:
+                raise RuntimeError("no enabled keys for background job")
+            sanitized = self._request_sanitizer.sanitize(body_obj)
+            decision = self._capability_router(candidates).route(sanitized, candidates)
+            if hasattr(decision, "to_response"):
+                status, payload = decision.to_response()
+                raise RuntimeError(f"capability route refused background job: {status} {payload}")
+
+            call, error = await self._prepare_v3_upstream_call(
+                request=_BackgroundRequest(),
+                body_obj=body_obj,
+                final_body=json.dumps(body_obj, ensure_ascii=False).encode(),
+                decision=decision,
+                requested_model=str(body_obj.get("model", "") or ""),
+                inbound_protocol="responses",
+                stream=True,
+            )
+            if error is not None:
+                raise RuntimeError(f"background upstream unavailable: {error.status_code}")
+            assert call is not None
+
+            adapter = UpstreamSSEChunkAdapter.for_protocol(
+                call.outbound_protocol,
+                native=not call.need_translation,
+            )
+            async for upstream_resp in call.client.stream(
+                call.method,
+                call.path,
+                headers=call.headers,
+                content=call.body,
+            ):
+                if upstream_resp.status_code >= 400:
+                    raise RuntimeError(f"background upstream status {upstream_resp.status_code}")
+                async for chunk in adapter.iter_chunks(upstream_resp.aiter_bytes()):
+                    yield chunk
+
+        return _open
+
     async def start_background_tasks(self) -> None:
         """启动后台周期任务。应在 aiohttp app.on_startup 时调用。"""
         if self._bg_running:
@@ -967,11 +1567,27 @@ class ProxyHandler:
         self._bg_tasks.append(asyncio.create_task(self._sticky_cleanup_loop()))
         if self.store is not None:
             self._bg_tasks.append(asyncio.create_task(self._health_snapshot_loop()))
+        # P0-6: the v3 background worker is part of this handler's lifecycle,
+        # so a process that serves requests is by construction a process that
+        # drains the background queue.
+        worker = self._v3_background_worker()
+        if worker is not None:
+            self._bg_tasks.append(
+                asyncio.create_task(
+                    worker.start(upstream_factory=self._v3_background_upstream_factory)
+                )
+            )
+            _lg.info("[v3] background worker started")
         _lg.info(f"started {len(self._bg_tasks)} background tasks")
 
     async def stop_background_tasks(self) -> None:
         """停止后台任务。应在 aiohttp app.on_cleanup 时调用。"""
         self._bg_running = False
+        if self._v3_worker is not None:
+            # Ask the poll loop to leave after the current job before the task
+            # is cancelled: a cancel mid-``run_job`` would drop the lease
+            # without a terminal state and leave the job for recovery.
+            self._v3_worker.stop()
         for t in self._bg_tasks:
             t.cancel()
         for t in self._bg_tasks:
@@ -1079,8 +1695,15 @@ class ProxyHandler:
         # Chat / Anthropic traffic is never touched and a disabled flag makes
         # the *next* Responses request go straight back to v2.
         # ------------------------------------------------------------------
-        if inbound_protocol == "responses" and self._v3 is not None:
-            v3_ok = bool(self._feature_flags is None or self._feature_flags.v3_enabled(ctx))
+        if inbound_protocol == "responses":
+            # T04 / AC-8.5: stamp which implementation serves this request.
+            # Evaluated ONCE (R-P0-22) and written to the context before any
+            # dispatch, so every downstream branch — including the fallbacks
+            # below — carries an honest label instead of a guess.
+            v3_ok = bool(
+                self._v3 is not None and (self._feature_flags is None or self._feature_flags.v3_enabled(ctx))
+            )
+            ctx.responses_implementation = "v3" if v3_ok else "v2_emergency"
             if v3_ok:
                 # Only CREATE consumes an upstream candidate.  Store-backed
                 # retrieve/delete/cancel/input_items and the honest compact
@@ -1098,23 +1721,35 @@ class ProxyHandler:
                     # Rollout excluded every otherwise-eligible key — fall back
                     # to legacy and expose the exact operational reason.
                     record_v3_fallback(reason="all_keys_excluded")
+                    ctx.responses_implementation = "v2_emergency"
                 elif v3_candidates:
-                    # T26: create now executes against a REAL upstream through
+                    # T26/P0-1: create executes against a REAL upstream through
                     # the production chain (capability routing -> scheduler ->
-                    # translator -> terminal persistence).  Only store-backed
-                    # resource endpoints and the honest compact 501 go through
-                    # the resource skeleton.
-                    if not (body_obj and body_obj.get("stream")):
-                        return await self._dispatch_v3_create(
+                    # translator -> SSE pipeline -> terminal persistence).  Only
+                    # store-backed resource endpoints and the honest compact 501
+                    # go through the resource skeleton.
+                    #
+                    # The three create shapes are decided here, once, and each
+                    # owns a whole function -- ``stream=true`` returns a
+                    # ``web.StreamResponse`` and cannot share a body with the
+                    # ``web.Response`` paths without losing the Phase A/B line.
+                    if body_obj and body_obj.get("background"):
+                        return await self._dispatch_v3_create_background(
                             request,
                             ctx,
                             v3_candidates,
                         )
-                    # Streaming create still uses the resource skeleton for now
-                    # (full SSE lifecycle is the T26 stream pass); the skeleton
-                    # returns in_progress so the client receives a valid
-                    # response object without a fabricated stream.
-                    return await self._dispatch_v3(request, ctx)
+                    if body_obj and body_obj.get("stream"):
+                        return await self._dispatch_v3_create_stream(
+                            request,
+                            ctx,
+                            v3_candidates,
+                        )
+                    return await self._dispatch_v3_create(
+                        request,
+                        ctx,
+                        v3_candidates,
+                    )
 
         # Legacy: Responses API (Codex): only POST is supported. GET
         # /v1/responses/{id} (retrieve) / DELETE are not implemented — return
@@ -1923,6 +2558,127 @@ class ProxyHandler:
                 seen.add(gname)
                 data.append({"id": gname, "object": "model", "created": now, "owned_by": "zhongzhuan"})
         return web.json_response({"object": "list", "data": data})
+
+
+class _BackgroundRequest:
+    """A request-shaped stand-in for the detached background execution path.
+
+    :meth:`ProxyHandler._prepare_v3_upstream_call` reads exactly two things off
+    the inbound request -- the HTTP method and the headers worth forwarding --
+    and a background job has neither: its client disconnected the moment the
+    ``202`` was returned.  Passing this tiny object instead of fabricating a
+    ``web.Request`` keeps that dependency visible and prevents a future edit
+    from quietly forwarding a dead client's ``Authorization`` header upstream.
+    """
+
+    __slots__ = ("method", "headers")
+
+    def __init__(self, method: str = "POST") -> None:
+        self.method = method
+        self.headers: dict[str, str] = {}
+
+
+class _V3CreateContext:
+    """Phase A's result: one create's facts, resolved and ready to execute.
+
+    Produced by :meth:`ProxyHandler._prepare_v3_create` and consumed by the
+    three create paths (non-stream / stream / background).  Holding it as a
+    value object is what lets the streaming path prove its two-phase commit:
+    either the context exists -- and everything that could still fail has
+    already succeeded -- or a JSON error was returned instead of it.
+
+    ``body_obj`` is the client's request as sent; ``upstream_body`` is the same
+    request with the resolved chain injected into ``input`` (P0-5).  They are
+    deliberately distinct: one is what we persist, the other is what we send.
+    """
+
+    __slots__ = (
+        "body_obj",
+        "upstream_body",
+        "final_body",
+        "sanitized",
+        "decision",
+        "response_id",
+        "workspace_id",
+        "previous_response_id",
+        "chain_depth",
+        "store_enabled",
+        "rs",
+    )
+
+    def __init__(
+        self,
+        *,
+        body_obj: dict[str, Any],
+        upstream_body: dict[str, Any],
+        final_body: bytes,
+        sanitized: Any,
+        decision: Any,
+        response_id: str,
+        workspace_id: str,
+        previous_response_id: str,
+        store_enabled: bool,
+        rs: Any,
+        chain_depth: int = 0,
+    ) -> None:
+        self.body_obj = body_obj
+        self.upstream_body = upstream_body
+        self.final_body = final_body
+        self.sanitized = sanitized
+        self.decision = decision
+        self.response_id = response_id
+        self.workspace_id = workspace_id
+        self.previous_response_id = previous_response_id
+        #: Depth of THIS turn in the state chain (0 = it starts one).  Carried
+        #: so the background path can write the chain row after ``enqueue``
+        #: without resolving the same chain a second time.
+        self.chain_depth = chain_depth
+        self.store_enabled = store_enabled
+        self.rs = rs
+
+
+class _V3UpstreamCall:
+    """Everything needed to issue one v3 upstream request, already resolved.
+
+    Produced by :meth:`ProxyHandler._prepare_v3_upstream_call` so the stream
+    and non-stream paths share one -- and only one -- implementation of key
+    selection, request translation, auth headers and path resolution.  Holding
+    it as a value object is what makes the streaming path's two-phase commit
+    possible: the object either exists (nothing left that can fail before the
+    first byte) or an error result was returned instead.
+    """
+
+    __slots__ = (
+        "key",
+        "client",
+        "method",
+        "path",
+        "headers",
+        "body",
+        "outbound_protocol",
+        "need_translation",
+    )
+
+    def __init__(
+        self,
+        *,
+        key: KeyHealth,
+        client: UpstreamClient,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes,
+        outbound_protocol: str,
+        need_translation: bool,
+    ) -> None:
+        self.key = key
+        self.client = client
+        self.method = method
+        self.path = path
+        self.headers = headers
+        self.body = body
+        self.outbound_protocol = outbound_protocol
+        self.need_translation = need_translation
 
 
 class _V3UpstreamResult:

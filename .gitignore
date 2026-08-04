@@ -39,3 +39,4 @@ src/config.yaml
 /mod/
 .workbuddy/
 .git_corrupt_backup/
+.git.corrupt-*/

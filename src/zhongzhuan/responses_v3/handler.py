@@ -16,7 +16,7 @@ one (optionally tenant-narrowed) instance of the R-P0-29 guards.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from ..proxy.protocol.responses_models import ResponsesEndpoint
 from ..proxy.protocol.responses_routes import (
@@ -33,12 +33,43 @@ from .schema import to_error_object
 class ResponsesV3Handler:
     """Dispatch ``/v1/responses*`` requests to the resource handlers."""
 
-    def __init__(self, store: ResponseStore, *, chain: ChainResolver | None = None) -> None:
+    def __init__(
+        self,
+        store: ResponseStore,
+        *,
+        chain: ChainResolver | None = None,
+        worker_provider: Callable[[], Any] | None = None,
+    ) -> None:
         self._store = store
         #: T22: state-chain recovery + cycle guard (R-P0-29 / R-P1-31).  A
         #: tenant-narrowed resolver can be injected; the default uses the
         #: documented 64 / 2000 / 200k ceilings.
         self._chain = chain or ChainResolver(store)
+        #: R-P1-35: how ``cancel`` reaches the in-process background worker.
+        #: A *provider* rather than the worker itself, because this handler is
+        #: constructed while the app is being built and the worker is created
+        #: lazily on first use -- capturing the worker here would capture
+        #: ``None`` forever.
+        self._worker_provider = worker_provider
+
+    def set_worker_provider(self, provider: Callable[[], Any] | None) -> None:
+        """Late-bind the background worker lookup (see ``__init__``)."""
+        self._worker_provider = provider
+
+    async def _cancel_background_job(self, task_id: str) -> None:
+        """Close the upstream of ``task_id`` if this process is running it.
+
+        The durable half of the cancel (the ``background_jobs`` flag) is done
+        by :func:`endpoints.cancel` regardless; this is only the "stop burning
+        money right now" half, so a worker that does not exist -- or does not
+        own this job -- is a no-op, not an error.
+        """
+        if self._worker_provider is None:
+            return
+        worker = self._worker_provider()
+        if worker is None:
+            return
+        await worker.cancel(task_id)
 
     async def resolve_chain(
         self,
@@ -88,7 +119,12 @@ class ResponsesV3Handler:
         if ep is ResponsesEndpoint.DELETE:
             return await endpoints.delete(self._store, workspace_id=workspace_id, response_id=rid)
         if ep is ResponsesEndpoint.CANCEL:
-            return await endpoints.cancel(self._store, workspace_id=workspace_id, response_id=rid)
+            return await endpoints.cancel(
+                self._store,
+                workspace_id=workspace_id,
+                response_id=rid,
+                on_cancel=self._cancel_background_job,
+            )
         if ep is ResponsesEndpoint.COMPACT:
             return await endpoints.compact(self._store, workspace_id=workspace_id, body=body)
         if ep is ResponsesEndpoint.INPUT_ITEMS:

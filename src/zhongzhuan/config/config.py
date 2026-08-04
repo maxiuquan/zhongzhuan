@@ -175,12 +175,37 @@ class ResponsesRolloutConfig:
 
 
 @dataclass
+class ResponsesTimeoutConfig:
+    """Responses v3 流水线的四层超时（P0-7 / 铁律 5 / AC-7.4）。
+
+    这里的默认值就是铁律 5 的**硬上限**本身：首 token 300s、读空闲 300s、
+    总时长 900s。配置只能把它们收得更严，放宽会在
+    :meth:`~zhongzhuan.responses_v3.pipeline.PipelineConfig.__post_init__`
+    里被钳制回上限（AC-7.2/7.3）——「配错了就按最严的来」，
+    而不是抛异常把整个进程拖垮。
+    """
+
+    first_token_seconds: float = 300.0
+    read_idle_seconds: float = 300.0
+    total_seconds: float = 900.0
+    connect_seconds: float = 15.0
+
+
+@dataclass
 class ResponsesBridgeConfig:
     """Responses v3 bridge 总开关与灰度配置。"""
 
     version: str = "v3"
     enabled: bool = True
+    #: P0-2 / 铁律 2: a stream that died without a completion signal must be
+    #: reported as ``incomplete``/``failed``, never whitewashed into
+    #: ``response.completed``.  GA ships strict; the flag exists only so an
+    #: operator can buy back the pre-GA compatibility behaviour during an
+    #: incident without a redeploy.  ``PipelineConfig`` keeps the *library*
+    #: default permissive (R-P1-22), so this is where GA states its policy.
+    strict_terminal: bool = True
     rollout: ResponsesRolloutConfig = field(default_factory=ResponsesRolloutConfig)
+    timeout: ResponsesTimeoutConfig = field(default_factory=ResponsesTimeoutConfig)
 
 
 @dataclass
@@ -278,10 +303,17 @@ def _schema_to_config(s: StrictConfig) -> Config:
         responses_bridge=ResponsesBridgeConfig(
             version=s.responses_bridge.version,
             enabled=s.responses_bridge.enabled,
+            strict_terminal=s.responses_bridge.strict_terminal,
             rollout=ResponsesRolloutConfig(
                 groups=dict(s.responses_bridge.rollout.groups),
                 models=dict(s.responses_bridge.rollout.models),
                 keys=dict(s.responses_bridge.rollout.keys),
+            ),
+            timeout=ResponsesTimeoutConfig(
+                first_token_seconds=float(s.responses_bridge.timeout.first_token_seconds),
+                read_idle_seconds=float(s.responses_bridge.timeout.read_idle_seconds),
+                total_seconds=float(s.responses_bridge.timeout.total_seconds),
+                connect_seconds=float(s.responses_bridge.timeout.connect_seconds),
             ),
         ),
     )

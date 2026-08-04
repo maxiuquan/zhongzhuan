@@ -48,7 +48,7 @@ from ..proxy.protocol.responses_models import (
     make_function_call_item_id,
     make_message_item_id,
 )
-from ..proxy.protocol.tool_accumulator import ToolCallCollection
+from ..proxy.protocol.tool_accumulator import ToolCallAccumulator, ToolCallCollection
 from ..store.response_store import ResponseStore
 
 
@@ -85,12 +85,65 @@ class PipelineConfig:
 
     heartbeat_seconds: float = 15.0
     strict_terminal: bool = False
-    first_token_seconds: float = 600.0
-    read_idle_seconds: float = 600.0
-    total_seconds: float = 1800.0
+    #: P0-7 / 铁律 5: the shipped defaults are the hard ceilings of the law --
+    #: 300s to the first token, 300s of read idle, 900s wall clock.  They were
+    #: 600/600/1800, which silently doubled 铁律 5 for every caller that did
+    #: not pass an explicit config.
+    first_token_seconds: float = 300.0
+    read_idle_seconds: float = 300.0
+    total_seconds: float = 900.0
     connect_seconds: float = 15.0
     #: Criterion ⑤ (R-P1-27): heartbeat arrival gap must never exceed this.
     max_heartbeat_gap_seconds: float = 16.0
+
+    def __post_init__(self) -> None:
+        """AC-7.2 / AC-7.3: clamp configured values back inside 铁律 5.
+
+        Clamping (rather than raising) is deliberate: a mistyped timeout in
+        YAML must not turn into a proxy that refuses to boot.  The law is a
+        *ceiling* on patience, so the safe direction is always "be stricter".
+        ``frozen=True`` forces ``object.__setattr__``.
+        """
+        object.__setattr__(self, "first_token_seconds", min(300.0, float(self.first_token_seconds)))
+        object.__setattr__(self, "read_idle_seconds", min(300.0, float(self.read_idle_seconds)))
+        object.__setattr__(self, "total_seconds", min(900.0, float(self.total_seconds)))
+
+    @classmethod
+    def from_config(cls, cfg: Any, **overrides: Any) -> "PipelineConfig":
+        """AC-7.4: build from the ``responses_bridge`` section.
+
+        Two levels are read, because the settings live at two levels:
+        ``strict_terminal`` on the bridge itself and the four timeouts under
+        ``bridge.timeout``.  Whichever object the caller happens to hold (root
+        ``Config``, the bridge, or the bare ``timeout`` section) is resolved
+        down to both, so no call site needs to know the nesting.
+
+        Args:
+            cfg: Root ``Config``, the ``responses_bridge`` section, or the
+                ``timeout`` section.  ``None`` / a config without the section
+                yields the shipped defaults instead of an ``AttributeError``.
+            **overrides: Explicit values that win over the config (used by the
+                background worker, which does not share the client-facing
+                heartbeat cadence).
+
+        Returns:
+            A :class:`PipelineConfig` whose timeouts are already clamped.
+        """
+        bridge = getattr(cfg, "responses_bridge", None) or cfg
+        timeout = getattr(bridge, "timeout", None) or bridge
+
+        values: dict[str, Any] = {}
+        for name in ("first_token_seconds", "read_idle_seconds", "total_seconds", "connect_seconds"):
+            raw = getattr(timeout, name, None)
+            if raw is not None:
+                values[name] = float(raw)
+        # P0-2 / 铁律 2: read from the bridge level, and never coerce with
+        # float() -- this one is a bool.
+        strict = getattr(bridge, "strict_terminal", None)
+        if strict is not None:
+            values["strict_terminal"] = bool(strict)
+        values.update(overrides)
+        return cls(**values)
 
 
 @dataclass
@@ -130,6 +183,18 @@ def _is_timeout_reason(reason: TerminalReason) -> bool:
     return reason in TIMEOUT_REASONS
 
 
+def _tool_item_id(acc: ToolCallAccumulator) -> str:
+    """The stable Responses ``item.id`` of a tool call (P0-4).
+
+    :class:`ToolCallCollection` fixes ``item_id`` at creation time from
+    ``response_id + output_index``.  The ``call_id`` fallback only fires for
+    accumulators built outside the collection (direct construction in unit
+    tests); it preserves the historical ``fc_{call_id}`` shape rather than
+    emitting an empty id.
+    """
+    return acc.item_id or make_function_call_item_id(acc.call_id)
+
+
 # ---------------------------------------------------------------------------
 # 3. The pipeline
 # ---------------------------------------------------------------------------
@@ -156,8 +221,21 @@ class ResponsePipeline:
         self.stats = PipelineStats()
         self._tools = ToolCallCollection(response_id=response_id)
         self._open_message: dict[str, Any] | None = None
+        #: The assistant message as it was streamed, kept so the terminal row
+        #: can be persisted with a real ``output`` array (a retrieve() after a
+        #: stream must not answer ``completed`` with an empty body).  Only the
+        #: text is retained -- deltas already went out and live in the event log.
+        self._message_item: dict[str, Any] | None = None
+        self._message_text: list[str] = []
         self._output_index = 0
         self._done = False
+        #: P0-2: set when the upstream sent an *explicit* completion signal.
+        #: EOF alone is not a completion signal, and having produced chunks is
+        #: not a truncation signal -- only this flag separates the two.
+        self._saw_provider_finish = False
+        #: U1 / 铁律 2: set when any tool call's arguments failed to validate.
+        #: Forces a strict terminal even in compatibility mode.
+        self._had_invalid_tool_args = False
 
     async def _emit(self, event_type: str, data: dict[str, Any]) -> bytes:
         frame = _sse(event_type, data)
@@ -200,6 +278,7 @@ class ResponsePipeline:
                 self._output_index += 1
                 item_id = make_message_item_id(self.response_id, idx)
                 self._open_message = {"id": item_id, "output_index": idx}
+                self._message_item = dict(self._open_message)
                 frames.append(
                     await self._emit(
                         "response.output_item.added",
@@ -220,6 +299,7 @@ class ResponsePipeline:
                     },
                 )
             )
+            self._message_text.append(delta)
             self.state = "streaming"
 
         elif kind == "tool_call":
@@ -243,7 +323,7 @@ class ResponsePipeline:
                             "type": "response.output_item.added",
                             "output_index": idx,
                             "item": {
-                                "id": make_function_call_item_id(acc.call_id),
+                                "id": _tool_item_id(acc),
                                 "type": "function_call",
                                 "status": "in_progress",
                                 "call_id": acc.call_id,
@@ -269,11 +349,14 @@ class ResponsePipeline:
 
         elif kind == "tool_call_done":
             call_id = str(chunk.get("call_id") or "")
-            done_acc = self._tools.get(call_id=call_id)
+            # Resolve by source index as well: an upstream that never sent an
+            # ``id`` has a *synthetic* call id the adapter cannot know, and the
+            # index is the only stable join key in that case (§5.3).
+            done_acc = self._tools.get(call_id=call_id, source_index=chunk.get("source_index"))
             if done_acc is not None:
                 done_acc.append_arguments(str(chunk.get("arguments") or ""))
                 valid = done_acc.validate_arguments()
-                item_id = make_function_call_item_id(done_acc.call_id)
+                item_id = _tool_item_id(done_acc)
                 if valid:
                     frames.append(
                         await self._emit(
@@ -308,7 +391,9 @@ class ResponsePipeline:
                     # Truncated / invalid arguments: close the item safely but
                     # NEVER emit arguments.done (R-P1-22) -- a client that
                     # JSON.parses the partial fragment would execute a mangled
-                    # tool call.
+                    # tool call.  U1: remember it so the terminal event cannot
+                    # be whitewashed into `completed` by compatibility mode.
+                    self._had_invalid_tool_args = True
                     frames.append(
                         await self._emit(
                             "response.output_item.done",
@@ -328,8 +413,12 @@ class ResponsePipeline:
                     )
                     done_acc.mark_item_done()
 
-        # "finish" is a no-op marker: the natural-end handler sees it and
-        # reports a graceful completion instead of a truncation.
+        elif kind == "finish":
+            # P0-2: the ONLY positive evidence that the upstream chose to stop.
+            # It emits no frame of its own -- the natural-end handler reads the
+            # flag and reports a graceful completion instead of a truncation.
+            self._saw_provider_finish = True
+
         return frames
 
     async def _close_open_items(self, *, incomplete: bool) -> list[bytes]:
@@ -372,7 +461,7 @@ class ResponsePipeline:
                             "type": "response.output_item.done",
                             "output_index": acc.output_index,
                             "item": {
-                                "id": make_function_call_item_id(acc.call_id),
+                                "id": _tool_item_id(acc),
                                 "type": "function_call",
                                 "status": "incomplete" if incomplete else "completed",
                                 "call_id": acc.call_id,
@@ -386,6 +475,63 @@ class ResponsePipeline:
         return frames
 
     # -- terminal helpers ---------------------------------------------------
+
+    def output_items(self) -> list[dict[str, Any]]:
+        """The response's ``output`` array, in the order the items were opened.
+
+        The caller persists this on the terminal row so a ``retrieve()`` after
+        a stream returns the same items the client just watched arrive.  It is
+        reconstructed from the pipeline's own state -- the message text it
+        emitted and the tool accumulators it owns -- so it can never disagree
+        with the frames that were sent (the item ids are literally the same
+        objects, P0-4).
+
+        A tool call whose arguments never validated is reported ``incomplete``
+        here for exactly the reason it never got a ``arguments.done`` frame
+        (铁律 2): a stored call that looks complete would be replayed as one.
+        """
+        items: list[tuple[int, dict[str, Any]]] = []
+        if self._message_item is not None:
+            items.append(
+                (
+                    int(self._message_item["output_index"]),
+                    {
+                        "id": self._message_item["id"],
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed" if self.state == "completed" else "incomplete",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "".join(self._message_text),
+                                "annotations": [],
+                            }
+                        ],
+                    },
+                )
+            )
+        for acc in self._tools.list_all():
+            if not acc.item_added:
+                continue
+            items.append(
+                (
+                    int(acc.output_index),
+                    {
+                        "id": _tool_item_id(acc),
+                        "type": "function_call",
+                        # ``arguments_done`` is the record of what actually
+                        # happened during the stream, not a fresh re-parse:
+                        # re-validating here could disagree with the frames
+                        # already sent (and would mutate the accumulator).
+                        "status": "completed" if acc.arguments_done else "incomplete",
+                        "call_id": acc.call_id,
+                        "name": acc.name,
+                        "arguments": acc.arguments,
+                    },
+                )
+            )
+        items.sort(key=lambda pair: pair[0])
+        return [item for _index, item in items]
 
     async def _terminal_frames(
         self,
@@ -568,8 +714,17 @@ class ResponsePipeline:
                     terminal_reason = TerminalReason.UPSTREAM_TRUNCATED if produced else TerminalReason.UPSTREAM_CONNECT
                     break
                 elif kind == "upstream_end":
-                    if produced:
-                        terminal_reason = TerminalReason.UPSTREAM_TRUNCATED
+                    # P0-2: the criterion for a clean EOF is that the upstream
+                    # gave an explicit finish signal -- NOT that chunks were
+                    # produced.  "Produced chunks then EOF" is the single most
+                    # common *successful* completion, and the old criterion
+                    # mislabelled every one of them as a truncation.
+                    if not self._saw_provider_finish:
+                        terminal_reason = (
+                            TerminalReason.UPSTREAM_TRUNCATED
+                            if produced
+                            else TerminalReason.UPSTREAM_CONNECT
+                        )
                     break
         finally:
             self._done = True
@@ -582,7 +737,18 @@ class ResponsePipeline:
                     pass
             await _close_upstream(source)
 
-        if terminal_reason is not None:
+        # U1 / 铁律 2: compatibility mode may whitewash a *transport* truncation
+        # into `response.completed`, but it must never whitewash a tool call
+        # whose arguments the provider declared final and which did not parse.
+        # A client that treats such a response as successful executes a mangled
+        # tool call -- strictly worse than a visible failure.
+        if self._had_invalid_tool_args:
+            for frame in await self._terminal_frames(
+                reason=terminal_reason or TerminalReason.INVALID_TOOL_ARGUMENTS,
+                strict=True,
+            ):
+                yield frame
+        elif terminal_reason is not None:
             for frame in await self._terminal_frames(
                 reason=terminal_reason,
                 strict=cfg.strict_terminal,

@@ -13,14 +13,17 @@ input items are reasoning-redacted first (铁律 1 / R-P1-40).
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from ..proxy.protocol.item_registry import parse_input_items, serialize_item
 from ..store.response_store import ResponseStore
 from .chain import ChainResolver, chain_error_response
 from .schema import to_error_object, to_input_items_list, to_response_object
+
+LOGGER = logging.getLogger("zhongzhuan.responses_v3.endpoints")
 
 DEFAULT_PAGE_LIMIT = 20
 MAX_PAGE_LIMIT = 100
@@ -142,7 +145,40 @@ async def cancel(
     *,
     workspace_id: str,
     response_id: str,
+    on_cancel: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[int, dict[str, Any]]:
+    """R-P1-35: stop the work, not just the row.
+
+    Cancellation has three effects and all three are required.  Marking the
+    ``responses`` row ``cancelled`` on its own is decorative: a background
+    worker that claims the job a moment later overwrites the row with
+    ``in_progress`` and keeps paying the upstream for tokens nobody will read.
+
+    1. ``jobs.request_cancel`` raises the durable, cross-process flag the
+       worker polls at every round boundary.  It is written **first** on
+       purpose -- a worker that claims the job between step 1 and step 2 must
+       already see the flag, whereas the reverse order leaves a window in
+       which the job is revived and the flag arrives too late to matter.
+    2. ``set_cancelled`` moves the client-visible row, so the 200 this returns
+       is the truth as of now.
+    3. ``on_cancel`` closes the upstream *in this process* when the job
+       happens to be running here.  Steps 1-2 stop the job at its next
+       boundary; only step 3 stops the money burning immediately.
+
+    ``on_cancel`` is injected rather than imported so this module keeps no
+    dependency on the worker: the endpoint layer must stay usable by a
+    deployment that runs its workers elsewhere.
+
+    Args:
+        rs: The response store (also the owner of the job store).
+        workspace_id: Tenant boundary; a foreign id must read as absent.
+        response_id: The response to cancel.  ``task_id == response_id`` for
+            background jobs, which is why no separate task id is needed.
+        on_cancel: Optional in-process hook, called with the task id.
+
+    Returns:
+        ``(200, response_object)``, or a 404 error object.
+    """
     rec = await rs.get_response(response_id, workspace_id=workspace_id)
     if rec is None:
         return to_error_object(
@@ -150,7 +186,16 @@ async def cancel(
             code="not_found",
             status=404,
         )
+    await _request_job_cancel(rs, response_id)
     await rs.set_cancelled(response_id, workspace_id=workspace_id)
+    if on_cancel is not None:
+        try:
+            await on_cancel(response_id)
+        except Exception as exc:  # noqa: BLE001 - the durable half already won
+            # The flag and the row are already written, so the job *will*
+            # stop.  Failing the request now would tell the client the cancel
+            # did not happen when in fact it did.
+            LOGGER.warning("in-process cancel hook failed for %s: %r", response_id, exc)
     rec = await rs.get_response(response_id, workspace_id=workspace_id)
     if rec is None:
         return to_error_object(
@@ -159,6 +204,24 @@ async def cancel(
             status=404,
         )
     return 200, to_response_object(rec, stored=True)
+
+
+async def _request_job_cancel(rs: ResponseStore, task_id: str) -> None:
+    """Raise the durable cancel flag, tolerating a store without jobs.
+
+    Not every :class:`ResponseStore`-shaped object a caller injects owns a
+    ``background_jobs`` table (test doubles, in-memory stubs).  A cancel must
+    still succeed for the non-background case, which is the overwhelming
+    majority -- so a missing job row is not an error, it just means there was
+    no detached work to stop.
+    """
+    jobs = getattr(rs, "jobs", None)
+    if jobs is None:
+        return
+    try:
+        await jobs.request_cancel(task_id)
+    except Exception as exc:  # noqa: BLE001 - never fail a cancel on this
+        LOGGER.warning("could not raise the job cancel flag for %s: %r", task_id, exc)
 
 
 async def compact(

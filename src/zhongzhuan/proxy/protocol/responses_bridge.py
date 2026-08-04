@@ -424,8 +424,21 @@ class ResponsesTurnBridge:
             frames.extend(self._emit_tool_args_delta(acc, args))
         return frames
 
+    def _tool_item_id(self, acc) -> str:
+        """The stable Responses ``item.id`` of a tool call (P0-4).
+
+        :class:`ToolCallCollection` fixes ``acc.item_id`` at creation time from
+        ``response_id + output_index``.  The ``make_function_call_item_id``
+        (``fc_{call_id}``) fallback only fires for accumulators built outside
+        the collection (direct construction in unit tests); it preserves the
+        historical shape rather than emitting an empty id.  Using ``acc.item_id``
+        is what keeps ``output_item.added`` and ``output_item.done`` identical
+        even when ``call_id`` binds late (P0-4 / AC-4.1).
+        """
+        return acc.item_id or make_function_call_item_id(acc.call_id)
+
     def _open_tool_call(self, acc) -> list[bytes]:
-        item_id = make_function_call_item_id(acc.call_id)
+        item_id = self._tool_item_id(acc)
         frames = self._emitter.open_item(
             OutputItem(
                 id=item_id,
@@ -438,7 +451,7 @@ class ResponsesTurnBridge:
         return frames
 
     def _emit_tool_args_delta(self, acc, args: str) -> list[bytes]:
-        item_id = make_function_call_item_id(acc.call_id)
+        item_id = self._tool_item_id(acc)
         return self._emitter.delta(
             "response.function_call_arguments.delta",
             {
@@ -451,32 +464,58 @@ class ResponsesTurnBridge:
     def _close_tool_call(self, acc) -> list[bytes]:
         if self._tool_done.get(acc.output_index):
             return []
-        self._tool_done[acc.output_index] = True
-        item_id = make_function_call_item_id(acc.call_id)
+        item_id = self._tool_item_id(acc)
         frames: list[bytes] = []
-        frames.extend(
-            self._emitter.delta(
-                "response.function_call_arguments.done",
-                {
-                    "item_id": item_id,
-                    "output_index": acc.output_index,
-                    "arguments": acc.arguments or "{}",
-                },
+
+        # 铁律 2: never emit a runnable function call for truncated / invalid
+        # arguments.  Only a call whose arguments parse AND whose top level is a
+        # JSON object may emit ``function_call_arguments.done`` + be closed as
+        # ``completed``.  Anything else (empty / truncated / non-object) is left
+        # incomplete: the client must never JSON.parse a partial fragment and
+        # execute it as ``{}``.
+        if acc.validate_arguments(require_object=True):
+            self._tool_done[acc.output_index] = True
+            frames.extend(
+                self._emitter.delta(
+                    "response.function_call_arguments.done",
+                    {
+                        "item_id": item_id,
+                        "output_index": acc.output_index,
+                        "arguments": acc.arguments,
+                    },
+                )
             )
-        )
-        frames.extend(
-            self._emitter.close_item(
-                OutputItem(
-                    id=item_id,
-                    output_index=acc.output_index,
-                    item_type=ItemType.FUNCTION_CALL,
-                    call_id=acc.call_id,
-                    name=acc.name,
-                    extra={"arguments": acc.arguments or "{}"},
-                ),
-                status="completed",
+            frames.extend(
+                self._emitter.close_item(
+                    OutputItem(
+                        id=item_id,
+                        output_index=acc.output_index,
+                        item_type=ItemType.FUNCTION_CALL,
+                        call_id=acc.call_id,
+                        name=acc.name,
+                        extra={"arguments": acc.arguments},
+                    ),
+                    status="completed",
+                )
             )
-        )
+        else:
+            # Truncated / invalid arguments: close the item safely as incomplete
+            # and NEVER emit ``arguments.done`` (R-P1-22).  Idempotent via the
+            # same ``_tool_done`` guard so `_close_all` / finish cannot double-close.
+            self._tool_done[acc.output_index] = True
+            frames.extend(
+                self._emitter.close_item(
+                    OutputItem(
+                        id=item_id,
+                        output_index=acc.output_index,
+                        item_type=ItemType.FUNCTION_CALL,
+                        call_id=acc.call_id,
+                        name=acc.name,
+                        extra={"arguments": acc.arguments},
+                    ),
+                    status="incomplete",
+                )
+            )
         return frames
 
     # -- close / terminal -------------------------------------------------
