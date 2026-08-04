@@ -338,6 +338,178 @@ async def test_stream_anthropic_upstream_normalises_to_responses_events(astore):
 
 
 # ---------------------------------------------------------------------------
+# 证明 1: v3 生产 SSE 路径（stream=true 走真实 HTTP 生产路径）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stream_true_enters_v3_production_sse_path(astore):
+    """证明 1: stream=true 真实进入 v3 HTTP SSE 生产路径。
+
+    经真实 ``POST /v1/responses`` 驱动 aiohttp handler（不是对 pipeline 的单元
+    测试），断言响应头 ``text/event-stream``、首帧 ``response.created``、末帧
+    ``[DONE]``。v3 生产路径只使用 ``ResponsePipeline``，绝不触达 legacy bridge。
+    """
+    up = MockUpstream()
+    up.set_behavior(UpstreamBehavior(stream_payload=openai_text_stream(pieces=("real", "sse"))))
+    await up.start()
+    port, runner, upstream, token = await _start_proxy(up.url, astore)
+    try:
+        status, ctype, raw = await _stream(port, {"model": "gpt-4o", "input": "hi", "stream": True}, token)
+
+        # 真实 SSE 生产路径：HTTP 头 + 首帧 + 末帧。
+        assert status == 200, raw
+        assert ctype.startswith("text/event-stream"), ctype
+        types = _event_types(raw)
+        assert types[0] == "response.created", types
+        assert "response.in_progress" in types
+        assert raw.rstrip().endswith(b"data: [DONE]"), raw[-200:]
+
+        # 首帧 response.created 携带统一的 id。
+        assert _response_id(raw).startswith("resp_")
+    finally:
+        await runner.cleanup()
+        await upstream.close()
+        await up.stop()
+
+
+# ---------------------------------------------------------------------------
+# 证明 2: previous_response_id 恢复链写进上游 payload
+# ---------------------------------------------------------------------------
+
+
+async def _seed_parent_turn(astore, *, workspace_id: str, response_id: str, text: str) -> None:
+    """Seed a completed parent turn with a tool exchange.
+
+    The parent carries: an ancestor user message, a tool call (function_call
+    with legal arguments), a tool output (function_call_output), and a reasoning
+    item so the test proves it is excluded from the replay.
+    """
+    rs = ResponseStore(astore)
+    await rs.create_response(
+        response_id=response_id,
+        workspace_id=workspace_id,
+        model="gpt-4o",
+        status="completed",
+        request={
+            "model": "gpt-4o",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+            ],
+        },
+    )
+    await rs.update_status(
+        response_id,
+        "completed",
+        workspace_id=workspace_id,
+        output=[
+            # Reasoning must be excluded from the upstream replay (铁律 1).
+            {
+                "id": f"rs_{response_id}",
+                "type": "reasoning",
+                "status": "completed",
+                "summary": [{"type": "summary_text", "text": "SECRET-COT-PARENT"}],
+            },
+            {
+                "id": f"msg_{response_id}",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "let me check the weather"}],
+            },
+            {
+                "id": f"fc_{response_id}",
+                "type": "function_call",
+                "call_id": f"call_{response_id}",
+                "name": "get_weather",
+                "arguments": '{"city": "Beijing"}',
+                "status": "completed",
+            },
+            {
+                "id": f"fo_{response_id}",
+                "type": "function_call_output",
+                "call_id": f"call_{response_id}",
+                "output": '{"temp": 25}',
+            },
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_previous_response_id_restore_chain_reaches_upstream(astore):
+    """证明 2: previous_response_id 恢复链写进上游实际收到的 payload。
+
+    捕获 mock 上游**实际收到**的 body，断言其 ``input``（responsive 链经
+    ChainResolver / build_upstream_input 展平后的 history）包含祖先消息、工具
+    调用（function_call + 合法 arguments）、工具输出（function_call_output），
+    且**排除 reasoning**。
+    """
+    up = MockUpstream()
+    up.set_behavior(UpstreamBehavior(stream_payload=openai_text_stream(pieces=("ok",))))
+    await up.start()
+    port, runner, upstream, token = await _start_proxy(up.url, astore)
+    try:
+        ws = await _workspace(astore, token)
+        parent_id = "resp_parent_0001"
+        await _seed_parent_turn(astore, workspace_id=ws, response_id=parent_id, text="What's the weather?")
+
+        status, ctype, raw = await _stream(
+            port,
+            {
+                "model": "gpt-4o",
+                "input": "and tomorrow?",
+                "stream": True,
+                "previous_response_id": parent_id,
+            },
+            token,
+        )
+        assert status == 200, raw
+        assert ctype.startswith("text/event-stream")
+        assert raw.rstrip().endswith(b"data: [DONE]")
+
+        # 捕获上游**实际收到**的请求体（Chat Completions 翻译后的 messages）。
+        assert up.request_count >= 1
+        req_body = up.requests[0].json()
+        assert req_body is not None
+        messages = req_body.get("messages") or []
+        blob = json.dumps(messages, ensure_ascii=False)
+
+        # 祖先消息（user turn）被恢复进上游 payload。
+        assert any(m.get("role") == "user" and "What's the weather?" in json.dumps(m) for m in messages)
+        assert "What's the weather?" in blob
+        # 当前 turn 的输入也应在。
+        assert "and tomorrow?" in blob
+
+        # 工具调用 + 工具输出被恢复（经 Chat 转换后成为 assistant tool_calls + tool 消息）。
+        assert any(
+            m.get("role") == "assistant" and any(tc.get("function", {}).get("name") == "get_weather" for tc in (m.get("tool_calls") or []))
+            for m in messages
+        )
+        assert any(
+            m.get("role") == "tool"
+            and m.get("tool_call_id") == f"call_{parent_id}"
+            and "25" in json.dumps(m.get("content"))
+            for m in messages
+        )
+        # 合法 arguments 被完整保留（Chat 转换后 arguments 是 JSON 字符串，
+        # 直接对 blob 做子串匹配会因转义失败，改为结构化断言）。
+        tool_calls_flat = [
+            tc.get("function", {}).get("arguments", "")
+            for m in messages
+            for tc in (m.get("tool_calls") or [])
+        ]
+        assert any(json.loads(a) == {"city": "Beijing"} for a in tool_calls_flat if a)
+
+        # 排除 reasoning：铁律 1 —— reasoning 文本绝不进入上游 payload。
+        assert "SECRET-COT-PARENT" not in blob
+        assert "reasoning" not in blob
+        assert not any("summary" in str(m).lower() and "SECRET" in blob for m in messages)
+    finally:
+        await runner.cleanup()
+        await upstream.close()
+        await up.stop()
+
+
+# ---------------------------------------------------------------------------
 # AC-3.5: tool arguments (P0-3 / 铁律 2)
 # ---------------------------------------------------------------------------
 
