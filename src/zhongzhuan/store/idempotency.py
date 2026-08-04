@@ -201,8 +201,8 @@ class IdempotencyStore:
         ts = int(time.time()) if now is None else int(now)
         expires_at = ts + int(ttl_seconds) if ttl_seconds > 0 else 0
         await self._store.execute(
-            "INSERT OR REPLACE INTO idempotency_records "
-            "(workspace_id, idempotency_key, request_digest, response_id, "
+            f"{self._store.upsert_into('idempotency_records')}"
+            " (workspace_id, idempotency_key, request_digest, response_id, "
             " status_code, state, created_at, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (workspace_id, key, request_digest, response_id, int(status_code), state, ts, expires_at),

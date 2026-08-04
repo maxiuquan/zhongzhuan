@@ -12,6 +12,8 @@ from .migrations import MIGRATIONS
 class TiDBStore(Store):
     """Async TiDB store using aiomysql connection pool."""
 
+    dialect = "mysql"
+
     def __init__(self, pool: aiomysql.Pool) -> None:
         self._pool = pool
 

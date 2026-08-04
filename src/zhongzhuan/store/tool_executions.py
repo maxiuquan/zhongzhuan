@@ -145,8 +145,8 @@ class ToolExecutionStore:
         execution_id = execution_id_for(response_id, tool_seq)
         created_at = await self._created_at(execution_id, default=now)
         await self._store.execute(
-            "INSERT OR REPLACE INTO tool_executions "
-            "(execution_id, response_id, workspace_id, call_id, tool_name, "
+            f"{self._store.upsert_into('tool_executions')}"
+            " (execution_id, response_id, workspace_id, call_id, tool_name, "
             " idempotency_key, status, approval, result_digest, "
             " created_at, updated_at, expires_at, tool_seq, tool_type, capability) "
             "VALUES (?, ?, ?, '', '', ?, ?, ?, '', ?, ?, ?, ?, ?, ?)",

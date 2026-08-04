@@ -10,6 +10,17 @@ from abc import ABC, abstractmethod
 class Store(ABC):
     """Cross-platform async storage interface."""
 
+    #: Dialect for SQL that differs between backends (``sqlite`` vs ``mysql``).
+    dialect: str = "sqlite"
+
+    def upsert_into(self, table: str) -> str:
+        """Return a full ``<UPSERT> INTO <table>`` statement prefix.
+
+        SQLite uses ``INSERT OR REPLACE INTO``; MySQL / TiDB use ``REPLACE INTO``.
+        Both replace the conflicting row (same upsert semantics).
+        """
+        return f"INSERT OR REPLACE INTO {table}" if self.dialect == "sqlite" else f"REPLACE INTO {table}"
+
     @abstractmethod
     async def execute(self, sql: str, params: tuple | None = None) -> int:
         """Execute a write statement. Returns lastrowid."""

@@ -180,9 +180,9 @@ class ResponseStore:
     ) -> None:
         for seq, item in enumerate(items):
             await self._store.execute(
-                """INSERT OR REPLACE INTO response_input_items
-                   (response_id, seq, item_type, role, payload)
-                   VALUES (?, ?, ?, ?, ?)""",
+                f"{self._store.upsert_into('response_input_items')}"
+                " (response_id, seq, item_type, role, payload)"
+                " VALUES (?, ?, ?, ?, ?)",
                 (
                     response_id,
                     seq,
@@ -199,9 +199,9 @@ class ResponseStore:
     ) -> None:
         for idx, item in enumerate(items):
             await self._store.execute(
-                """INSERT OR REPLACE INTO response_output_items
-                   (response_id, seq, output_index, item_type, role, payload)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                f"{self._store.upsert_into('response_output_items')}"
+                " (response_id, seq, output_index, item_type, role, payload)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     response_id,
                     idx,
@@ -261,8 +261,8 @@ class ResponseStore:
         workspace_id: str = "",
     ) -> None:
         await self._store.execute(
-            "INSERT OR REPLACE INTO response_state_chain "
-            "(response_id, workspace_id, previous_response_id, depth) VALUES (?, ?, ?, ?)",
+            f"{self._store.upsert_into('response_state_chain')}"
+            " (response_id, workspace_id, previous_response_id, depth) VALUES (?, ?, ?, ?)",
             (response_id, workspace_id, previous_response_id, depth),
         )
 
@@ -361,8 +361,8 @@ class ResponseStore:
         expires_at: int = 0,
     ) -> None:
         await self._store.execute(
-            "INSERT OR REPLACE INTO idempotency_records "
-            "(workspace_id, idempotency_key, request_digest, response_id, "
+            f"{self._store.upsert_into('idempotency_records')}"
+            " (workspace_id, idempotency_key, request_digest, response_id, "
             " status_code, state, created_at, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -411,7 +411,7 @@ class ResponseStore:
         now = int(time.time())
         caps = sorted(str(c) for c in (capabilities or ()))
         await self._store.execute(
-            "INSERT OR REPLACE INTO route_bindings ("
+            f"{self._store.upsert_into('route_bindings')} ("
             " session_key, key_id, capabilities, workspace_id,"
             " created_at, updated_at, expires_at,"
             " failover_count, last_failover_reason"
