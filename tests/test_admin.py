@@ -10,6 +10,9 @@ import pytest
 from aiohttp import ClientSession, web
 
 from zhongzhuan.admin import AdminServer
+from zhongzhuan.admin import api_service
+from zhongzhuan.store.logs import get_usage_stats
+from zhongzhuan.store.store import Store
 
 
 def _free_port() -> int:
@@ -104,6 +107,65 @@ async def test_stats_empty(store):
                 assert body["success_rate"] == 1.0
     finally:
         await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_usage_stats_groups_rows_into_utc_days(store, monkeypatch):
+    now = 2_000_000_000
+    monkeypatch.setattr(Store, "now", staticmethod(lambda: now))
+    day = 86400
+    rows = [
+        (now - day + 10, "model-a", 200, 10, "r1", 10, 20, 0.1),
+        (now - day + 20, "model-a", 200, 10, "r2", 30, 40, 0.2),
+        (now + 10, "model-b", 200, 10, "r3", 50, 60, 0.3),
+    ]
+    for ts, model, status, latency, rid, tokens_in, tokens_out, cost in rows:
+        await store.execute(
+            "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id, "
+            "tokens_in, tokens_out, cost) VALUES(?,?,?,?,?,?,?,?)",
+            (ts, model, status, latency, rid, tokens_in, tokens_out, cost),
+        )
+
+    result = await get_usage_stats(store, days=7)
+
+    assert len(result["daily"]) == 2
+    assert [item["requests"] for item in result["daily"]] == [2, 1]
+    assert result["totals"] == {"requests": 3, "tokens_in": 90, "tokens_out": 120, "cost": 0.6}
+
+
+def test_usage_stats_mysql_day_bucket_is_integer():
+    class RecordingStore:
+        dialect = "mysql"
+
+        def __init__(self):
+            self.queries = []
+
+        async def fetchall(self, sql, params=None):
+            self.queries.append(sql)
+            return []
+
+        async def fetchone(self, sql, params=None):
+            return (0, 0, 0, 0)
+
+    async def run():
+        store = RecordingStore()
+        await get_usage_stats(store, days=7)
+        return store
+
+    import asyncio
+
+    store = asyncio.run(run())
+    assert "CAST(FLOOR(ts / 86400) * 86400 AS SIGNED)" in store.queries[0]
+
+
+def test_service_status_does_not_call_sc_on_linux(monkeypatch):
+    monkeypatch.setattr(api_service.sys, "platform", "linux")
+    monkeypatch.setattr(api_service, "_sc", lambda *_args: pytest.fail("sc.exe must not run on Linux"))
+
+    assert api_service._service_status("Zhongzhuan") == {
+        "status": "running",
+        "control_supported": False,
+    }
 
 
 @pytest.mark.asyncio

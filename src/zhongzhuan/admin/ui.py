@@ -1116,9 +1116,11 @@ async function loadSvcStatus() {
     const badge = document.getElementById("svcStatus");
     const btn = document.getElementById("svcBtn");
     const side = document.getElementById("sideSvcStatus");
+    btn.disabled = false;
     if (s.status === "running") {
       badge.className = "status-pill running"; badge.innerHTML = '<span class="dot"></span>运行中';
-      btn.textContent = "停止";
+      btn.textContent = s.control_supported === false ? "当前进程" : "停止";
+      btn.disabled = s.control_supported === false;
       side.innerHTML = '<span class="health-dot good"></span><span style="color:var(--success)">服务运行中</span>';
     } else if (s.status === "stopped") {
       badge.className = "status-pill stopped"; badge.innerHTML = '<span class="dot"></span>已停止';

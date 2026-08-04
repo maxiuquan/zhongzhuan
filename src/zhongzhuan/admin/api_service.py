@@ -26,20 +26,35 @@ def _check_admin() -> tuple[int, dict] | None:
     return None
 
 
+def _service_status(svc_name: str) -> dict:
+    """Return service status without invoking Windows tools on other platforms.
+
+    On Linux/macOS the admin HTTP handler is hosted by the running relay
+    process itself, so a successful request is sufficient proof that the
+    service is running. Service lifecycle controls remain Windows-only.
+    """
+    if sys.platform != "win32":
+        return {"status": "running", "control_supported": False}
+
+    code, out, _ = _sc("query", svc_name)
+    if code != 0:
+        return {"status": "not_installed", "control_supported": True}
+    if "RUNNING" in out:
+        status = "running"
+    elif "STOPPED" in out:
+        status = "stopped"
+    else:
+        status = "unknown"
+    return {"status": status, "control_supported": True}
+
+
 def register_routes(app: web.Application, ctx) -> None:
     svc_name = "Zhongzhuan"
     if ctx.config and hasattr(ctx.config, "windows_service"):
         svc_name = ctx.config.windows_service.service_name
 
     async def status(_request):
-        code, out, _ = _sc("query", svc_name)
-        if code != 0:
-            return web.json_response({"status": "not_installed"})
-        if "RUNNING" in out:
-            return web.json_response({"status": "running"})
-        if "STOPPED" in out:
-            return web.json_response({"status": "stopped"})
-        return web.json_response({"status": "unknown"})
+        return web.json_response(_service_status(svc_name))
 
     async def start(_request):
         if err := _check_admin():

@@ -154,11 +154,17 @@ async def get_usage_stats(s: Store, days: int = 7) -> dict:
     """
     since = Store.now() - days * 86400
 
-    # 按天聚合（使用 ts/86400 转为天，避免 strftime 在 TiDB 上的差异）
+    # 按天聚合。显式取整，避免普通除法在 TiDB 返回 Decimal，且确保同一天
+    # 的时间戳确实落在同一个 UTC 日桶中。
+    day_bucket = (
+        "CAST(FLOOR(ts / 86400) * 86400 AS SIGNED)"
+        if s.dialect == "mysql"
+        else "CAST(ts / 86400 AS INTEGER) * 86400"
+    )
     daily_rows = await s.fetchall(
-        "SELECT (ts/86400)*86400 AS day, COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(cost) "
+        f"SELECT {day_bucket} AS day, COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(cost) "
         "FROM request_logs WHERE ts>=? AND status>=200 AND status<300 "
-        "GROUP BY day ORDER BY day",
+        f"GROUP BY {day_bucket} ORDER BY {day_bucket}",
         (since,),
     )
     import datetime
@@ -166,7 +172,7 @@ async def get_usage_stats(s: Store, days: int = 7) -> dict:
     daily = []
     for r in daily_rows:
         day_ts = r[0] if r[0] else since
-        date_str = datetime.datetime.utcfromtimestamp(day_ts).strftime("%Y-%m-%d")
+        date_str = datetime.datetime.fromtimestamp(day_ts, datetime.UTC).strftime("%Y-%m-%d")
         daily.append(
             {
                 "date": date_str,
