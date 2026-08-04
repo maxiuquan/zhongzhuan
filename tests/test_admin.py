@@ -133,29 +133,38 @@ async def test_usage_stats_groups_rows_into_utc_days(store, monkeypatch):
     assert result["totals"] == {"requests": 3, "tokens_in": 90, "tokens_out": 120, "cost": 0.6}
 
 
-def test_usage_stats_mysql_day_bucket_is_integer():
+def test_usage_stats_mysql_day_bucket_and_decimal_results_are_json_safe():
+    from decimal import Decimal
+
     class RecordingStore:
         dialect = "mysql"
 
         def __init__(self):
             self.queries = []
+            self.fetchall_calls = 0
 
         async def fetchall(self, sql, params=None):
             self.queries.append(sql)
-            return []
+            self.fetchall_calls += 1
+            if self.fetchall_calls == 1:
+                return [(Decimal("1999900800"), 2, Decimal("40"), Decimal("60"), Decimal("0.3"))]
+            return [("model-a", 2, Decimal("40"), Decimal("60"), Decimal("0.3"))]
 
         async def fetchone(self, sql, params=None):
-            return (0, 0, 0, 0)
+            return (2, Decimal("40"), Decimal("60"), Decimal("0.3"))
 
     async def run():
         store = RecordingStore()
-        await get_usage_stats(store, days=7)
-        return store
+        result = await get_usage_stats(store, days=7)
+        return store, result
 
     import asyncio
+    import json
 
-    store = asyncio.run(run())
+    store, result = asyncio.run(run())
     assert "CAST(FLOOR(ts / 86400) * 86400 AS SIGNED)" in store.queries[0]
+    assert result["totals"] == {"requests": 2, "tokens_in": 40, "tokens_out": 60, "cost": 0.3}
+    json.dumps(result)
 
 
 def test_service_status_does_not_call_sc_on_linux(monkeypatch):

@@ -171,15 +171,15 @@ async def get_usage_stats(s: Store, days: int = 7) -> dict:
 
     daily = []
     for r in daily_rows:
-        day_ts = r[0] if r[0] else since
+        day_ts = int(r[0] if r[0] else since)
         date_str = datetime.datetime.fromtimestamp(day_ts, datetime.UTC).strftime("%Y-%m-%d")
         daily.append(
             {
                 "date": date_str,
-                "requests": r[1] or 0,
-                "tokens_in": r[2] or 0,
-                "tokens_out": r[3] or 0,
-                "cost": round(r[4] or 0, 4),
+                "requests": int(r[1] or 0),
+                "tokens_in": int(r[2] or 0),
+                "tokens_out": int(r[3] or 0),
+                "cost": round(float(r[4] or 0), 4),
             }
         )
 
@@ -193,10 +193,10 @@ async def get_usage_stats(s: Store, days: int = 7) -> dict:
     by_model = [
         {
             "model_name": r[0] or "unknown",
-            "requests": r[1] or 0,
-            "tokens_in": r[2] or 0,
-            "tokens_out": r[3] or 0,
-            "cost": round(r[4] or 0, 4),
+            "requests": int(r[1] or 0),
+            "tokens_in": int(r[2] or 0),
+            "tokens_out": int(r[3] or 0),
+            "cost": round(float(r[4] or 0), 4),
         }
         for r in model_rows
     ]
@@ -208,10 +208,10 @@ async def get_usage_stats(s: Store, days: int = 7) -> dict:
         (since,),
     )
     totals = {
-        "requests": total_row[0] if total_row else 0,
-        "tokens_in": total_row[1] if total_row else 0,
-        "tokens_out": total_row[2] if total_row else 0,
-        "cost": round(total_row[3] if total_row else 0, 4),
+        "requests": int(total_row[0] if total_row else 0),
+        "tokens_in": int((total_row[1] if total_row else 0) or 0),
+        "tokens_out": int((total_row[2] if total_row else 0) or 0),
+        "cost": round(float((total_row[3] if total_row else 0) or 0), 4),
     }
 
     return {"daily": daily, "by_model": by_model, "totals": totals, "days": days}
