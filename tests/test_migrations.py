@@ -655,3 +655,83 @@ def test_v003_hashes_legacy_tokens(tmp_db):
         assert digest  # hashed
     finally:
         _run(db2.close())
+
+
+class _MySqlDialectExecutor(SqliteMigrationExecutor):
+    """SqliteMigrationExecutor pretending to be the MySQL dialect.
+
+    SQLite and MySQL/TiDB share the relevant UNIQUE semantics here: a UNIQUE
+    index tolerates multiple NULLs but not multiple empty strings.  Driving the
+    v003 hook through this executor reproduces the ER_DUP_ENTRY (1062) failure
+    seen on TiDB when the hook cleared legacy tokens to ''.
+    """
+
+    dialect = "mysql"
+
+
+def test_v003_mysql_dialect_clears_legacy_tokens_to_null(tmp_db):
+    """v003 hook must clear legacy tokens to NULL on MySQL/TiDB, not ''.
+
+    Regression for the production TiDB failure: clearing the second legacy
+    plaintext token to '' collided with the first '' under the UNIQUE index
+    (MySQL allows multiple NULLs, not multiple empty strings), aborting the
+    migration at startup with ER_DUP_ENTRY.
+
+    The table is built in the *post-ALTER* state -- all v003 columns present,
+    ``token`` nullable but still UNIQUE -- matching TiDB after MYSQL_ALTERS
+    ran but before the hook succeeded.
+    """
+    from zhongzhuan.store.migrations.v003_token_hash import MIGRATION as V003
+
+    db = _run(aiosqlite.connect(tmp_db))
+    _run(db.execute(
+        """
+        CREATE TABLE access_tokens (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            token           TEXT UNIQUE,          -- v001 UNIQUE, now nullable
+            token_prefix    TEXT NOT NULL DEFAULT '',
+            token_hash      TEXT NOT NULL DEFAULT '',
+            label           TEXT NOT NULL DEFAULT '',
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            quota_tokens    INTEGER NOT NULL DEFAULT -1,
+            used_tokens     INTEGER NOT NULL DEFAULT 0,
+            model_whitelist TEXT NOT NULL DEFAULT '',
+            expires_at      INTEGER NOT NULL DEFAULT 0,
+            created_at      INTEGER NOT NULL,
+            rotation_of     INTEGER NOT NULL DEFAULT 0,
+            last_used_at    INTEGER NOT NULL DEFAULT 0,
+            created_by      TEXT NOT NULL DEFAULT '',
+            revoked_at      INTEGER NOT NULL DEFAULT 0,
+            revoked_by      TEXT NOT NULL DEFAULT ''
+        )
+        """
+    ))
+    _run(db.execute(
+        "INSERT INTO access_tokens (token, label, enabled, created_at) VALUES (?, ?, 1, ?)",
+        ("zz-legacy-one", "legacy1", 1),
+    ))
+    _run(db.execute(
+        "INSERT INTO access_tokens (token, label, enabled, created_at) VALUES (?, ?, 1, ?)",
+        ("zz-legacy-two", "legacy2", 2),
+    ))
+    _run(db.commit())
+
+    mysql_ex = _MySqlDialectExecutor(db)
+    try:
+        # Only the hook is under test; skip the MySQL ALTER statements.
+        _run(V003.hook(mysql_ex))
+
+        async def _rows():
+            cur = await db.execute(
+                "SELECT token, token_prefix, token_hash FROM access_tokens ORDER BY id"
+            )
+            return await cur.fetchall()
+
+        rows = _run(_rows())
+        assert len(rows) == 2
+        for token, prefix, digest in rows:
+            assert token is None  # cleared to NULL, not '' (UNIQUE-safe)
+            assert prefix.startswith("zz-")
+            assert digest  # hashed
+    finally:
+        _run(db.close())

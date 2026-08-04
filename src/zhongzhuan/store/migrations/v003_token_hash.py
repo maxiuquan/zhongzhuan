@@ -98,6 +98,14 @@ async def _hash_legacy_tokens(ex: MigrationExecutor) -> None:
     # ``execute(sql, params)`` -- the migration executor qualifies.
     key = await resolve_hmac_key(ex)
 
+    # How to blank the plaintext ``token`` column afterwards.
+    #
+    # SQLite rebuilds the table without the UNIQUE constraint, so '' is fine.
+    # MySQL / TiDB keep the UNIQUE index (it tolerates multiple NULLs, but NOT
+    # multiple empty strings) -- clearing to '' would trip ER_DUP_ENTRY on the
+    # second legacy row.  NULL is the correct sentinel there (T04 / R-P0-05).
+    clear_token: str | None = None if getattr(ex, "dialect", "") == "mysql" else ""
+
     rows = await ex.fetchall(
         "SELECT id, token FROM access_tokens WHERE token IS NOT NULL AND token != '' AND token_hash = ''"
     )
@@ -107,11 +115,14 @@ async def _hash_legacy_tokens(ex: MigrationExecutor) -> None:
         prefix = token_prefix_of(plaintext)
         digest = hash_token(plaintext, key) if key else ""
         await ex.execute(
-            "UPDATE access_tokens SET token_prefix=?, token_hash=?, token='' WHERE id=?",
-            (prefix, digest, row_id),
+            "UPDATE access_tokens SET token_prefix=?, token_hash=?, token=? WHERE id=?",
+            (prefix, digest, clear_token, row_id),
         )
     # Final safety: clear any remaining plaintext so it never survives on disk.
-    await ex.execute("UPDATE access_tokens SET token='' WHERE token IS NOT NULL AND token != '' AND token_hash != ''")
+    await ex.execute(
+        "UPDATE access_tokens SET token=? WHERE token IS NOT NULL AND token != '' AND token_hash != ''",
+        (clear_token,),
+    )
 
 
 MIGRATION = Migration(
