@@ -21,13 +21,18 @@
 语义（实测每个测试跑满 250 个 examples，≥ 判据要求的 200）。
 外层 draw 出该边界下随机化的事件流内容，内层 draw 出随机切割点集合（任意
 字节间隙断开），然后断言两种解析方式产生**完全相等**的 ``SseFrame`` 序列。
+
+``suppress_health_check=[HealthCheck.too_slow]``：全 Unicode 字符集策略 +
+250 examples 在慢机器（如 VPS）上会触发 hypothesis 的 ``Input generation is
+slow`` 健康检查（ZZ-OPS-20260805-01 §3.2：环境 flaky 而非代码缺陷），故显式
+抑制。
 """
 
 from __future__ import annotations
 
 import json
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 from zhongzhuan.proxy.protocol.sse_parser import SSEParser, SseFrame
 
@@ -97,7 +102,7 @@ _UTF8_TEXT = st.text(
 # ---------------------------------------------------------------------------
 
 
-@settings(max_examples=250)
+@settings(max_examples=250, suppress_health_check=[HealthCheck.too_slow])
 @given(st.data())
 def test_utf8_multibyte_boundary_fragmentation(data):
     """跨多字节字符边界任意切分：解析出的 data 与原文逐字一致、无 U+FFFD。"""
@@ -113,7 +118,7 @@ def test_utf8_multibyte_boundary_fragmentation(data):
 # ---------------------------------------------------------------------------
 
 
-@settings(max_examples=250)
+@settings(max_examples=250, suppress_health_check=[HealthCheck.too_slow])
 @given(st.data())
 def test_json_escape_boundary_fragmentation(data):
     """JSON 字符串含 ``\\n``/``\\t``/引号/反斜杠等转义，任意切分后原样保留。"""
@@ -145,7 +150,7 @@ def test_json_escape_boundary_fragmentation(data):
 # ---------------------------------------------------------------------------
 
 
-@settings(max_examples=250)
+@settings(max_examples=250, suppress_health_check=[HealthCheck.too_slow])
 @given(st.data())
 def test_crlf_lf_mixed_fragmentation(data):
     """同一流里混合 CRLF 与 LF 行终止符；切点落在 CR/LF 中间也不改变语义。"""
@@ -175,7 +180,7 @@ def test_crlf_lf_mixed_fragmentation(data):
 # ---------------------------------------------------------------------------
 
 
-@settings(max_examples=250)
+@settings(max_examples=250, suppress_health_check=[HealthCheck.too_slow])
 @given(st.data())
 def test_multi_event_chunking_fragmentation(data):
     """流含多个事件：一 chunk 可吞多事件，一事件可被拆成多 chunk。"""
@@ -201,7 +206,7 @@ def test_multi_event_chunking_fragmentation(data):
 # ---------------------------------------------------------------------------
 
 
-@settings(max_examples=250)
+@settings(max_examples=250, suppress_health_check=[HealthCheck.too_slow])
 @given(st.data())
 def test_tool_arguments_byte_by_byte_fragmentation(data):
     """OpenAI 风格 tool_calls delta 流：arguments 每字节切分后语义不变。"""
