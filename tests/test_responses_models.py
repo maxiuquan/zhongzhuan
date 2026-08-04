@@ -161,7 +161,13 @@ def test_ten_circuit_breaker_terminal_reasons_are_complete():
 
 
 def test_terminal_reason_full_value_set():
-    """Full enum: 1 normal + 10 circuit breaker + 5 other + 3 timeout."""
+    """Full enum: 1 normal + 10 circuit breaker + 6 other + 3 timeout.
+
+    ``invalid_tool_arguments`` was added by P0-2/U1: a tool call the provider
+    declared final whose arguments did not parse must reach a *strict* terminal
+    (failed/incomplete) even in compatibility mode, so it needs a terminal
+    reason of its own rather than being folded into ``upstream_truncated``.
+    """
     assert enum_values(TerminalReason) == {
         "normal_finish",
         # ten circuit breakers
@@ -177,6 +183,7 @@ def test_terminal_reason_full_value_set():
         "background_budget_exhausted",
         # non circuit-breaker terminations
         "upstream_truncated",
+        "invalid_tool_arguments",
         "capability_route_unavailable",
         "client_disconnected",
         "upstream_error",
@@ -186,7 +193,7 @@ def test_terminal_reason_full_value_set():
         "first_token_timeout",
         "read_idle_timeout",
     }
-    assert len(list(TerminalReason)) == 19
+    assert len(list(TerminalReason)) == 20
 
 
 def test_four_timeout_reasons_are_mutually_distinct():

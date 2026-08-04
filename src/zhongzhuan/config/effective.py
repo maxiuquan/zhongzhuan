@@ -235,16 +235,47 @@ def _timeout_values(cfg: Any) -> list[tuple[str, Any]]:
     return [(f.name, getattr(policy, f.name)) for f in dataclasses.fields(policy) if f.init]
 
 
+def _v3_switch_lines(cfg: Any) -> list[str]:
+    """Render the Responses v3 switch section (T04 / P0-8).
+
+    Kept out of :func:`effective_config_snapshot` on purpose: the snapshot
+    describes the config's *shape* (one entry per dataclass leaf) and other
+    callers rely on that key set.  The switch verdict is a derived value —
+    it folds the ``ZHONGZHUAN_RESPONSES_BRIDGE_V3`` hard override on top of
+    ``responses_bridge.enabled`` — so it belongs in the rendered audit only.
+
+    Never raises: a missing/foreign config section yields no section rather
+    than breaking the whole effective-config dump.
+    """
+    try:
+        from ..proxy.feature_flags import ResponsesFeatureFlags
+
+        flags = ResponsesFeatureFlags(getattr(cfg, "responses_bridge", None))
+        enabled, source = flags.effective_switch()
+        version = flags.effective_version()
+    except Exception:  # pragma: no cover - defensive: audit must never break
+        return []
+    return [
+        f"responses_v3.enabled = {enabled!r} [{source}]",
+        f"responses_v3.effective_version = {version!r} [{source}]",
+    ]
+
+
 def format_effective_config(
     cfg: Any,
     sources: Mapping[str, str] | None = None,
 ) -> list[str]:
-    """Render one audit line per field: ``path = value [source]`` (redacted)."""
+    """Render one audit line per field: ``path = value [source]`` (redacted).
+
+    The Responses v3 switch section is appended last so an operator reading
+    the dump can see which implementation the box will serve (T04 / P0-8).
+    """
     snapshot = effective_config_snapshot(cfg, sources)
     lines: list[str] = []
     for path in sorted(snapshot):
         entry = snapshot[path]
         lines.append(f"{path} = {entry['value']!r} [{entry['source']}]")
+    lines.extend(_v3_switch_lines(cfg))
     return lines
 
 

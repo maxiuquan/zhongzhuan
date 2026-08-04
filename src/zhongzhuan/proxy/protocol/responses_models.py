@@ -281,6 +281,11 @@ class TerminalReason(str, Enum):
     BACKGROUND_BUDGET_EXHAUSTED = "background_budget_exhausted"
     # -- non circuit-breaker terminations --
     UPSTREAM_TRUNCATED = "upstream_truncated"
+    #: P0-2 / U1: a tool call whose arguments never validated.  This reason is
+    #: never whitewashed by compatibility mode -- shipping a half-parsed tool
+    #: call to a client that ``JSON.parse``s it is worse than a hard failure
+    #: (铁律 2 "tool complete or nothing").
+    INVALID_TOOL_ARGUMENTS = "invalid_tool_arguments"
     CAPABILITY_ROUTE_UNAVAILABLE = "capability_route_unavailable"
     CLIENT_DISCONNECTED = "client_disconnected"
     UPSTREAM_ERROR = "upstream_error"
@@ -536,8 +541,26 @@ def make_reasoning_item_id(response_id: str, output_index: int) -> str:
 
 
 def make_function_call_item_id(call_id: str) -> str:
-    """``fc_{call_id}`` (§10.1)."""
+    """``fc_{call_id}`` (§10.1).
+
+    DEPRECATED for streaming projection: ``call_id`` binds *late* (§5.3), so an
+    item id derived from it changes shape between the first fragment and the
+    ``done`` event.  Streaming call sites must use
+    :func:`make_function_call_item_id_stable` instead (P0-4).  Kept for the
+    non-streaming turn accumulator, where the call id is already final.
+    """
     return "fc_{0}".format(call_id)
+
+
+def make_function_call_item_id_stable(response_id: str, output_index: int) -> str:
+    """``fc_{response_id}_{output_index}`` -- fixed at first fragment (P0-4).
+
+    Unlike :func:`make_function_call_item_id`, both inputs are known when the
+    accumulator is created and neither can be rewritten by a late-arriving
+    ``call_id``, so the id an SSE client sees in ``output_item.added`` is
+    byte-identical to the one in ``output_item.done`` (AC-4.1 / AC-4.2).
+    """
+    return "fc_{0}_{1}".format(response_id, output_index)
 
 
 def make_synthetic_call_id(response_id: str, source_index: int) -> str:
@@ -613,6 +636,7 @@ __all__ = [
     "make_message_item_id",
     "make_reasoning_item_id",
     "make_function_call_item_id",
+    "make_function_call_item_id_stable",
     "make_synthetic_call_id",
     "coerce_enum",
     "enum_values",

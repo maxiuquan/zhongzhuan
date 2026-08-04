@@ -35,14 +35,22 @@ ledger so a tighter envelope is reported as a background-specific failure while
 the generic ceilings keep their own reasons.  Without a separate counter the
 two would be indistinguishable and R-P1-38 could not be satisfied.
 
-HONEST STUB
------------
-* The executed "loop" is driven by an **injected** ``upstream`` iterable, not
-  by a real provider stream.  The real upstream translation + tool loop is
-  T28; this module deliberately never imports the provider layer, so wiring
-  T28 in means replacing the source of the chunks and nothing else.
-* Step 3 of the circuit breaker (side-effect rollback) is still the T23 stub:
-  transactional tool rollback / idempotency replay is T26.
+Chunk source (T28, now wired)
+-----------------------------
+The executed "loop" is driven by an **injected** ``upstream`` iterable rather
+than by a provider client this module constructs itself; that inversion is
+what lets GA hand over a real translated stream (``ProxyHandler``'s
+``_v3_background_upstream_factory`` feeds
+:class:`~.upstream_chunk_adapter.UpstreamSSEChunkAdapter` output straight in)
+while the tests hand over a synthetic one.  Because both speak the same
+vocabulary -- see :meth:`BackgroundWorker._charge_chunk` -- the worker cannot
+tell them apart, which is precisely why a background response and a live
+stream emit the same events (架构 D4).
+
+Known remaining stub
+--------------------
+Step 3 of the circuit breaker (side-effect rollback) is still the T23 stub:
+transactional tool rollback / idempotency replay is T26.
 """
 
 from __future__ import annotations
@@ -56,7 +64,14 @@ from typing import Any, AsyncIterable, Callable
 
 from ..proxy.protocol.responses_emitter import ResponsesEventEmitter
 from ..proxy.protocol.responses_errors import to_incomplete_details
-from ..proxy.protocol.responses_models import ResponseStatus, TerminalReason
+from ..proxy.protocol.responses_models import (
+    ResponseStatus,
+    TerminalReason,
+    canonical_json,
+    make_function_call_item_id_stable,
+    make_message_item_id,
+)
+from ..proxy.protocol.tool_accumulator import ToolCallAccumulator, ToolCallCollection
 from ..store.background_jobs import TERMINAL_STATUSES
 from ..store.response_store import ResponseRecord, ResponseStore
 from .budget import BACKGROUND_BUDGET, BudgetLedger, CircuitBreaker, ExecutionBudget
@@ -79,6 +94,32 @@ _TERMINAL_EVENT: dict[str, str] = {
     "cancelled": "response.cancelled",
     "expired": "response.incomplete",
 }
+
+
+def _arguments_text(value: Any) -> str:
+    """Normalise a tool-arguments fragment to the JSON *text* the wire carries.
+
+    The adapter already hands over fragments as strings (it forwards them
+    verbatim, never parsing them).  The budget vocabulary passes a whole dict
+    instead, which is serialised canonically here so that two identical calls
+    stay byte-identical -- that equality is exactly what the no-progress loop
+    breaker compares (R-P0-28 / §9.4).
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return canonical_json(value)
+
+
+def _optional_index(value: Any) -> int | None:
+    """Coerce an upstream tool index to ``int``; ``None`` when absent/unusable."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -105,6 +146,83 @@ class _JobRun:
     cancelled: bool = False
     bg_tool_calls: int = 0
     open_item_ids: list[str] = field(default_factory=list)
+    #: Assistant text fragments, in arrival order (D4: the background run must
+    #: be able to reconstruct the same ``output`` array a live stream would).
+    text_parts: list[str] = field(default_factory=list)
+    #: Output index of the single assistant message item; ``-1`` until the
+    #: first non-empty text delta opens it.
+    message_output_index: int = -1
+    #: Whether ``response.output_item.done`` was already written for it.
+    message_done: bool = False
+    #: Monotonic Responses ``output_index`` allocator, shared by the message
+    #: and every tool call, exactly like :class:`ResponsePipeline`'s.
+    next_index: int = 0
+    #: P0-2 bookkeeping: whether the upstream positively signalled ``finish``.
+    saw_finish: bool = False
+    #: The *same* accumulator type the live pipeline uses, so a background run
+    #: and a live stream produce identical items ids, identical ordering and
+    #: identical validation outcomes (架构 D4).  Built in ``__post_init__``
+    #: because it needs ``response_id``, which is an init field.
+    tools: ToolCallCollection = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.tools = ToolCallCollection(response_id=self.response_id)
+
+    def allocate_output_index(self) -> int:
+        """Reserve the next global ``output_index`` for a freshly opened item."""
+        index = self.next_index
+        self.next_index += 1
+        return index
+
+    def message_item(self, *, status: str) -> dict[str, Any]:
+        """The assistant message item as it must appear in ``output``."""
+        return {
+            "id": make_message_item_id(self.response_id, max(self.message_output_index, 0)),
+            "type": "message",
+            "role": "assistant",
+            "status": "completed" if status == "completed" else "incomplete",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "".join(self.text_parts),
+                    "annotations": [],
+                }
+            ],
+        }
+
+    def tool_item(self, acc: ToolCallAccumulator) -> dict[str, Any]:
+        """One accumulated tool call as it must appear in ``output``."""
+        return {
+            "id": acc.item_id or make_function_call_item_id_stable(
+                self.response_id, acc.output_index
+            ),
+            "type": "function_call",
+            # ``arguments_done`` records what actually happened during the run
+            # rather than re-parsing here: a fresh validation could disagree
+            # with the events already written to the log.
+            "status": "completed" if acc.arguments_done else "incomplete",
+            "call_id": acc.call_id,
+            "name": acc.name,
+            "arguments": acc.arguments,
+        }
+
+    def output_items(self, *, status: str) -> list[dict[str, Any]]:
+        """Rebuild the ``output`` array from what this run actually produced.
+
+        Mirrors :meth:`ResponsePipeline.output_items` field for field -- same
+        item ids, same ordering by ``output_index``, same "an unvalidated tool
+        call is ``incomplete``" rule -- so a background response and a
+        live-streamed one deserialize identically (架构 D4 / 铁律 2).
+        """
+        items: list[tuple[int, dict[str, Any]]] = []
+        if self.message_output_index >= 0:
+            items.append((self.message_output_index, self.message_item(status=status)))
+        for acc in self.tools.list_all():
+            if not acc.item_added:
+                continue
+            items.append((acc.output_index, self.tool_item(acc)))
+        items.sort(key=lambda pair: pair[0])
+        return [item for _index, item in items]
 
     async def cancel_upstream(self) -> None:
         """Close the injected upstream, whatever shape it has."""
@@ -128,7 +246,15 @@ class _JobRun:
         self.stopped = True
 
     def open_items(self) -> list[Any]:
-        """No structured items are opened by the T24 skeleton (see HONEST STUB)."""
+        """Deliberately empty -- see :meth:`BackgroundWorker._close_open_items`.
+
+        :meth:`CircuitBreaker.trip` step 4 closes open items through the
+        *emitter* only, so those terminators would never reach the event log
+        and a catch-up reader would replay a stream whose items are never
+        closed.  The worker therefore closes them itself, durably, before it
+        trips; reporting them here as well would emit a second
+        ``output_item.done`` for the same item and break 铁律 3.
+        """
         return []
 
 
@@ -264,6 +390,21 @@ class BackgroundWorker:
         self._runs[task_id] = run
         ledger = BudgetLedger(effective, started_at=self._clock())
         emitter = ResponsesEventEmitter(response_id=response_id)
+
+        # R-P1-35: a job cancelled while it sat in the queue must never be
+        # revived.  ``_execute`` writes ``in_progress`` as its first act, so
+        # checking only at the round boundaries inside ``_stream`` would flip a
+        # ``cancelled`` row back to ``in_progress`` and open an upstream
+        # connection whose tokens are billed and then thrown away.  The check
+        # therefore happens *before* any state is written, and before the
+        # heartbeat task exists -- there is nothing yet to keep alive.
+        if await self._jobs.is_cancel_requested(task_id):
+            run.cancelled = True
+            try:
+                return await self._finish_cancelled(run, emitter)
+            finally:
+                self._runs.pop(task_id, None)
+
         heartbeat = asyncio.create_task(self._heartbeat(task_id))
 
         try:
@@ -383,42 +524,33 @@ class BackgroundWorker:
         emitter: ResponsesEventEmitter,
         index: int,
     ) -> TerminalReason | None:
-        """Charge one upstream chunk against the budget and persist its event.
+        """Charge one upstream chunk against the budget and persist its events.
 
-        HONEST STUB: the chunk vocabulary below is the *test* vocabulary, not
-        a provider wire format.  T28 replaces this with the real translator;
-        the budget calls it makes are the contract that survives.
+        Two chunk vocabularies reach this method and both are first class:
+
+        * the **unified pipeline vocabulary** produced by
+          :class:`~.upstream_chunk_adapter.UpstreamSSEChunkAdapter` --
+          ``text`` / ``tool_call`` / ``tool_call_done`` / ``finish`` -- which
+          is what a real provider stream looks like once normalised.  It is
+          the same vocabulary :class:`ResponsePipeline` consumes, which is
+          precisely what makes a background run and a live stream produce the
+          same events (架构 D4);
+        * the **loop vocabulary** -- ``tool_round`` / ``tool_result`` -- which
+          carries the agentic-loop accounting the wire adapter has no notion
+          of and only the executor can supply.
+
+        Anything else is an unrecognised control chunk: it is charged nothing
+        and, above all, it does **not** fall through to the text branch.  A
+        control chunk rendered as an empty ``response.output_text.delta`` is
+        indistinguishable from corruption to a catch-up reader (P0-6).
         """
         if not isinstance(chunk, dict):
-            return await self._charge_text(run, str(chunk), 1, ledger, emitter, index)
+            return await self._charge_text(run, str(chunk), 1, ledger, emitter)
 
         kind = str(chunk.get("type") or "")
 
         if kind == "tool_round":
-            reason = ledger.charge_round()
-            if reason is not None:
-                return reason
-            return None
-
-        if kind == "tool_call":
-            name = str(chunk.get("name") or "")
-            reason = ledger.charge_tool_call(name, chunk.get("arguments", ""))
-            if reason is not None:
-                return reason
-            run.bg_tool_calls += 1
-            if run.bg_tool_calls > self.max_background_calls:
-                return TerminalReason.BACKGROUND_BUDGET_EXHAUSTED
-            await self._emit(
-                run,
-                emitter,
-                "response.function_call.persisted",
-                {
-                    "type": "response.function_call.persisted",
-                    "output_index": index,
-                    "name": name,
-                },
-            )
-            return None
+            return ledger.charge_round()
 
         if kind == "tool_result":
             return ledger.charge_tool_result(
@@ -426,9 +558,181 @@ class BackgroundWorker:
                 bool(chunk.get("failed")),
             )
 
-        text = str(chunk.get("delta", chunk.get("text", "")) or "")
-        tokens = int(chunk.get("tokens", 1) or 0)
-        return await self._charge_text(run, text, tokens, ledger, emitter, index)
+        if kind == "tool_call":
+            return await self._charge_tool_call(run, chunk, ledger, emitter, index)
+
+        if kind == "tool_call_done":
+            return await self._settle_tool_call(run, chunk, ledger, emitter)
+
+        if kind == "finish":
+            # P0-2: the only positive evidence that the upstream chose to
+            # stop.  It emits no event of its own -- it is recorded so the
+            # terminal handlers can tell a graceful end from a truncation.
+            run.saw_finish = True
+            return None
+
+        if kind in ("text", "output_text.delta") or "delta" in chunk or "text" in chunk:
+            text = str(chunk.get("delta", chunk.get("text", "")) or "")
+            tokens = int(chunk.get("tokens", 1) or 0)
+            return await self._charge_text(run, text, tokens, ledger, emitter)
+
+        return None
+
+    async def _charge_tool_call(
+        self,
+        run: _JobRun,
+        chunk: dict[str, Any],
+        ledger: BudgetLedger,
+        emitter: ResponsesEventEmitter,
+        index: int,
+    ) -> TerminalReason | None:
+        """Accumulate one tool-call fragment, opening its output item once.
+
+        ``source_index`` is the join key (§5.3).  A Chat Completions upstream
+        sends ``id`` on the *first* fragment only, so matching on ``call_id``
+        alone would split one call into N accumulators and charge the ledger N
+        times for a single call.
+
+        A chunk that carries neither ``source_index`` nor ``call_id`` is a
+        *self-contained* call from the loop vocabulary: no ``tool_call_done``
+        will ever follow it, so it is charged and settled right here.  A
+        streamed call is charged exactly once, at its terminator, where the
+        arguments are finally known -- charging a partial fragment would make
+        the loop-breaker signature depend on chunk boundaries.
+        """
+        streamed = ("source_index" in chunk) or bool(chunk.get("call_id"))
+        source_index = _optional_index(chunk.get("source_index"))
+        if source_index is None:
+            source_index = index
+        call_id = str(chunk.get("call_id") or "")
+        name = str(chunk.get("name") or "")
+        fragment = _arguments_text(chunk.get("arguments", ""))
+
+        existing = run.tools.get(call_id=call_id, source_index=source_index)
+        if existing is None:
+            if not streamed:
+                # R-P1-38: the shared ledger is charged *before* the
+                # background envelope so a generic ceiling keeps its own,
+                # more specific reason instead of being reported as a
+                # background-only failure.
+                reason = ledger.charge_tool_call(name, fragment)
+                if reason is not None:
+                    return reason
+            run.bg_tool_calls += 1
+            if run.bg_tool_calls > self.max_background_calls:
+                return TerminalReason.BACKGROUND_BUDGET_EXHAUSTED
+            output_index = run.allocate_output_index()
+        else:
+            output_index = existing.output_index
+
+        acc = run.tools.ensure(
+            output_index=output_index,
+            call_id=call_id,
+            source_index=source_index,
+        )
+        acc.replace_name(name)
+        acc.append_arguments(fragment)
+
+        if not acc.item_added:
+            await self._emit(
+                run,
+                emitter,
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": acc.output_index,
+                    "item": {
+                        "id": acc.item_id,
+                        "type": "function_call",
+                        "status": "in_progress",
+                        "call_id": acc.call_id,
+                        "name": acc.name,
+                        "arguments": "",
+                    },
+                },
+            )
+            acc.item_added = True
+
+        await self._emit(
+            run,
+            emitter,
+            "response.function_call_arguments.delta",
+            {
+                "type": "response.function_call_arguments.delta",
+                "output_index": acc.output_index,
+                "call_id": acc.call_id,
+                "delta": fragment,
+            },
+        )
+
+        if not streamed:
+            await self._close_tool_item(run, acc, emitter)
+        return None
+
+    async def _settle_tool_call(
+        self,
+        run: _JobRun,
+        chunk: dict[str, Any],
+        ledger: BudgetLedger,
+        emitter: ResponsesEventEmitter,
+    ) -> TerminalReason | None:
+        """Handle a ``tool_call_done``: charge the call once, then close it."""
+        acc = run.tools.get(
+            call_id=str(chunk.get("call_id") or ""),
+            source_index=_optional_index(chunk.get("source_index")),
+        )
+        if acc is None or acc.item_done:
+            # A terminator for a call we never saw open, or a duplicate one
+            # (§9.3).  Nothing to charge, nothing to close -- and emphatically
+            # not a text delta.
+            return None
+        acc.append_arguments(_arguments_text(chunk.get("arguments", "")))
+        reason = ledger.charge_tool_call(acc.name, acc.arguments)
+        if reason is not None:
+            return reason
+        await self._close_tool_item(run, acc, emitter)
+        return None
+
+    async def _close_tool_item(
+        self,
+        run: _JobRun,
+        acc: ToolCallAccumulator,
+        emitter: ResponsesEventEmitter,
+    ) -> None:
+        """Emit the terminator pair for one tool call (铁律 2 / R-P1-22).
+
+        ``function_call_arguments.done`` is emitted **only** when the
+        accumulated arguments parse as a JSON object.  A client that
+        ``JSON.parse``\\ s a truncated fragment would execute a mangled tool
+        call, so an invalid call is closed as ``incomplete`` and never
+        announced as done.
+        """
+        if acc.item_done:
+            return
+        valid = acc.validate_arguments()
+        if valid:
+            await self._emit(
+                run,
+                emitter,
+                "response.function_call_arguments.done",
+                {
+                    "type": "response.function_call_arguments.done",
+                    "output_index": acc.output_index,
+                    "call_id": acc.call_id,
+                    "arguments": acc.arguments,
+                },
+            )
+        await self._emit(
+            run,
+            emitter,
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "output_index": acc.output_index,
+                "item": run.tool_item(acc),
+            },
+        )
+        acc.mark_item_done()
 
     async def _charge_text(
         self,
@@ -437,22 +741,94 @@ class BackgroundWorker:
         tokens: int,
         ledger: BudgetLedger,
         emitter: ResponsesEventEmitter,
-        index: int,
     ) -> TerminalReason | None:
+        """Charge output tokens and append one delta to the message item.
+
+        The text is accumulated on the run as well as emitted: ``output`` is
+        rebuilt from :attr:`_JobRun.text_parts` at the terminal, so a delta
+        that is only *sent* would be lost to every later ``retrieve`` (P0-6).
+        """
         reason = ledger.charge_output_tokens(tokens)
         if reason is not None:
             return reason
+        if not text:
+            # An empty delta is not an event: replaying it would show a
+            # catch-up reader a frame the live client never received.
+            return None
+        if run.message_output_index < 0:
+            run.message_output_index = run.allocate_output_index()
+            await self._emit(
+                run,
+                emitter,
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": run.message_output_index,
+                    "item": {
+                        "id": make_message_item_id(run.response_id, run.message_output_index),
+                        "type": "message",
+                        "status": "in_progress",
+                        "role": "assistant",
+                    },
+                },
+            )
+        run.text_parts.append(text)
         await self._emit(
             run,
             emitter,
             "response.output_text.delta",
             {
                 "type": "response.output_text.delta",
-                "output_index": index,
+                "output_index": run.message_output_index,
                 "delta": text,
             },
         )
         return None
+
+    async def _close_open_items(
+        self,
+        run: _JobRun,
+        emitter: ResponsesEventEmitter,
+        *,
+        status: str,
+    ) -> None:
+        """Close every item this run opened, persisting each terminator.
+
+        Every ``output_item.added`` needs its ``.done`` or the stream is
+        malformed.  This is done here rather than left to
+        :meth:`CircuitBreaker.trip` step 4 because the breaker writes through
+        the emitter only: its frames never reach the event log, so a catch-up
+        reader would replay a stream whose items are never closed (R-P1-36).
+        """
+        if run.message_output_index >= 0 and not run.message_done:
+            run.message_done = True
+            await self._emit(
+                run,
+                emitter,
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": run.message_output_index,
+                    "item": run.message_item(status=status),
+                },
+            )
+        for acc in run.tools.list_all():
+            if acc.item_added and not acc.item_done:
+                await self._close_tool_item(run, acc, emitter)
+
+    async def _persist_output(self, run: _JobRun, *, status: str) -> list[dict[str, Any]]:
+        """Write the rebuilt ``output`` array everywhere a reader looks for it.
+
+        Both destinations are mandatory (P0-6): the ``responses.output``
+        column is what :func:`endpoints.retrieve` deserialises, and
+        ``response_output_items`` is what the items endpoint pages over.  The
+        column is written by the caller's ``update_status`` -- which is why
+        this returns the items instead of writing them alone.
+        """
+        items = run.output_items(status=status)
+        if items:
+            await self._store.save_output_items(run.response_id, items)
+        return items
 
     async def _emit(
         self,
@@ -481,6 +857,10 @@ class BackgroundWorker:
         workspace_id: str = "",
     ) -> str:
         """Budget ceiling crossed: six-step teardown -> ``incomplete``."""
+        # Before the breaker, never after: step 5 emits the single terminal
+        # event, and an ``output_item.done`` written behind it would put a
+        # frame after the end of the stream (铁律 3).
+        await self._close_open_items(run, emitter, status="incomplete")
         breaker = CircuitBreaker()
         await breaker.trip(
             reason,
@@ -494,12 +874,17 @@ class BackgroundWorker:
             reason,
             "background job terminated: {0}".format(reason.value),
         )
+        # A truncated answer is still an answer: whatever was generated before
+        # the ceiling is persisted, marked ``incomplete`` item by item, rather
+        # than silently dropped (P0-6 + 铁律 2).
+        items = await self._persist_output(run, status="incomplete")
         await self._store.update_status(
             run.response_id,
             "incomplete",
             workspace_id=run.workspace_id,
             terminal_reason=reason.value,
             incomplete_details=details,
+            output=items,
         )
         await self._persist_terminal(
             run,
@@ -507,6 +892,7 @@ class BackgroundWorker:
             {
                 "terminal_reason": reason.value,
                 "incomplete_details": details,
+                "output": items,
             },
         )
         await self._jobs.mark_terminal(run.task_id, "incomplete")
@@ -518,19 +904,30 @@ class BackgroundWorker:
         emitter: ResponsesEventEmitter,
         ledger: BudgetLedger,
     ) -> str:
+        """P0-6: a ``completed`` background response carries its answer.
+
+        The ``output`` array is rebuilt from what the run actually produced
+        and written to *both* places a reader looks: the ``responses.output``
+        column that ``retrieve`` deserialises and the ``response_output_items``
+        table the items endpoint pages over.  A ``completed`` row with an
+        empty output is not a finished job -- it is a lost one.
+        """
         usage = {"output_tokens": ledger.output_tokens}
+        await self._close_open_items(run, emitter, status="completed")
+        items = await self._persist_output(run, status="completed")
         await self._store.update_status(
             run.response_id,
             "completed",
             workspace_id=run.workspace_id,
             terminal_reason=TerminalReason.NORMAL_FINISH.value,
             usage=usage,
+            output=items,
         )
         emitter.terminate(
             ResponseStatus.COMPLETED,
             terminal_reason=TerminalReason.NORMAL_FINISH.value,
         )
-        await self._persist_terminal(run, "completed", {"usage": usage})
+        await self._persist_terminal(run, "completed", {"usage": usage, "output": items})
         await self._jobs.mark_terminal(run.task_id, "completed")
         return "completed"
 
@@ -539,16 +936,30 @@ class BackgroundWorker:
         run: _JobRun,
         emitter: ResponsesEventEmitter,
     ) -> str:
+        """R-P1-35: a cancelled job keeps the partial answer it paid for.
+
+        The tokens were already generated and already billed, so discarding
+        them would mean the client pays for output it can never read.  Every
+        item is closed as ``incomplete`` first -- a cancelled run is by
+        definition not a finished one.
+        """
         await run.cancel_upstream()
         reason = TerminalReason.CANCELLED_BY_CLIENT.value
+        await self._close_open_items(run, emitter, status="incomplete")
+        items = await self._persist_output(run, status="incomplete")
         await self._store.update_status(
             run.response_id,
             "cancelled",
             workspace_id=run.workspace_id,
             terminal_reason=reason,
+            output=items,
         )
         emitter.terminate(ResponseStatus.CANCELLED, terminal_reason=reason)
-        await self._persist_terminal(run, "cancelled", {"terminal_reason": reason})
+        await self._persist_terminal(
+            run,
+            "cancelled",
+            {"terminal_reason": reason, "output": items},
+        )
         await self._jobs.mark_terminal(run.task_id, "cancelled")
         return "cancelled"
 
@@ -561,19 +972,34 @@ class BackgroundWorker:
         """R-P0-32: an exception is attributed, never laundered into success."""
         await run.cancel_upstream()
         error = {"type": "server_error", "message": "background job failed"}
+        # This path is already handling one failure; a second one raised while
+        # salvaging the partial output must not prevent the row from reaching
+        # ``failed``.  A job stuck ``in_progress`` forever is strictly worse
+        # than a failed job with an empty output.
+        items: list[dict[str, Any]] = []
+        try:
+            await self._close_open_items(run, emitter, status="incomplete")
+            items = await self._persist_output(run, status="incomplete")
+        except Exception as salvage_exc:  # noqa: BLE001 - best effort only
+            LOGGER.warning(
+                "persisting partial output for failed job %s failed: %r",
+                run.task_id,
+                salvage_exc,
+            )
         await self._store.update_status(
             run.response_id,
             "failed",
             workspace_id=run.workspace_id,
             terminal_reason=TerminalReason.UPSTREAM_ERROR.value,
             error=type(exc).__name__,
+            output=items,
         )
         emitter.terminate(
             ResponseStatus.FAILED,
             terminal_reason=TerminalReason.UPSTREAM_ERROR.value,
             error=error,
         )
-        await self._persist_terminal(run, "failed", {"error": error})
+        await self._persist_terminal(run, "failed", {"error": error, "output": items})
         await self._jobs.mark_terminal(run.task_id, "failed")
         return "failed"
 

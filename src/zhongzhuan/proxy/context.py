@@ -72,6 +72,10 @@ class RequestContext:
     # v3 placeholders (filled by T12 router; inert until then).
     endpoint: str | None = None
     v3_enabled: bool = False
+    #: T04 / AC-8.5: ``"v3"`` or ``"v2_emergency"`` — which implementation
+    #: actually served this Responses request.  ``None`` for non-Responses
+    #: traffic, which the switch does not touch at all.
+    responses_implementation: str | None = None
 
 
 class RequestContextBuilder:

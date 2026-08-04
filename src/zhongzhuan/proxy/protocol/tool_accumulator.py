@@ -29,7 +29,11 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from .responses_models import canonical_json, make_synthetic_call_id
+from .responses_models import (
+    canonical_json,
+    make_function_call_item_id_stable,
+    make_synthetic_call_id,
+)
 
 
 @dataclass
@@ -54,10 +58,21 @@ class ToolCallAccumulator:
     #: Accumulation mode for ``name``: append or full-value replace (§5.3).
     name_mode: str = "replace"
 
+    #: P0-4: the Responses ``item.id`` for this call.  Fixed by
+    #: :meth:`ToolCallCollection.ensure` at creation time from
+    #: ``response_id + output_index`` and never rewritten by
+    #: :meth:`bind_call_id`, so ``output_item.added`` and ``output_item.done``
+    #: always carry the same id even when ``call_id`` binds late (AC-4.1).
+    item_id: str = ""
+
     # -- mutation helpers ----------------------------------------------------
 
     def bind_call_id(self, call_id: str) -> None:
-        """Bind (or rebind) the call id.  Late binding is idempotent."""
+        """Bind (or rebind) the call id.  Late binding is idempotent.
+
+        ``item_id`` is deliberately left untouched: the Responses item identity
+        must survive a late ``call_id`` (P0-4 / AC-4.2).
+        """
         if call_id:
             self.call_id = call_id
 
@@ -170,11 +185,20 @@ class ToolCallCollection:
         call_id: str = "",
         source_index: int | None = None,
     ) -> ToolCallAccumulator:
-        """Return the accumulator for a fragment, creating one if needed."""
+        """Return the accumulator for a fragment, creating one if needed.
+
+        A newly created accumulator gets its ``item_id`` fixed here from
+        ``response_id + output_index`` (P0-4).  Re-resolving an existing
+        accumulator only ever binds the ``call_id``; the item identity that has
+        already been published to the client is never rewritten.
+        """
         existing = self.get(call_id=call_id, source_index=source_index)
         if existing is not None:
             if call_id:
                 existing.bind_call_id(call_id)
+                # Re-index under the freshly bound id so later fragments that
+                # carry only the call id resolve to the same accumulator.
+                self.tools_by_call_id[call_id] = existing
             return existing
 
         idx = source_index if source_index is not None else output_index
@@ -182,6 +206,7 @@ class ToolCallCollection:
             source_index=idx,
             output_index=output_index,
             call_id=call_id or self._synthetic(source_index),
+            item_id=make_function_call_item_id_stable(self._response_id, output_index),
         )
         self._index(acc)
         return acc

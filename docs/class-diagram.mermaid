@@ -1,37 +1,205 @@
 classDiagram
-    class KeyHealth {
-        +int key_id
-        +str api_key
-        +str status
-        +bool is_fallback
-        +int rpm_limit
-        +int tpm_limit
-        +int rpd_limit
-        +float cooldown_until
-        +is_available() bool
-        +record_request() void
-        +record_tokens(in, out) void
-    }
-    class FallbackConfig {
-        +bool enabled
-        +str upstream_base
-        +str api_key
-        +str models_url
-        +str model_prefix
-    }
-    class KeyHealthStore {
-        +save(health) void
-        +load(key_id) dict
-        +load_all() list
-    }
+    direction LR
+
     class ProxyHandler {
-        -_sticky dict
-        -_sticky_ttl float
-        -_sticky_cleaner Task
-        +_classify_failure(k, status, headers) bool
-        +_session_key(request, body) str
-        +reload_keys() int
+        -_v3: ResponsesV3Handler
+        -_feature_flags: ResponsesFeatureFlags
+        -_v3_worker: BackgroundWorker
+        -_bg_tasks: list
+        +__call__(request) StreamResponse
+        +start_background_tasks() None
+        +stop_background_tasks() None
+        +_dispatch_v3_create(request, ctx, candidates) Response
+        +_dispatch_v3_create_stream(request, ctx, candidates) StreamResponse
+        +_prepare_v3_upstream_call(request, body_obj, decision, requested_model, inbound_protocol, stream) tuple
+        +_run_v3_nonstream(...) tuple
+        +_v3_background_worker() BackgroundWorker
+        +_v3_background_upstream_factory(task_id) Callable
+        +_persist_v3_terminal(response_id, workspace_id, status, usage, output) None
     }
-    KeyHealth --> FallbackConfig : uses
-    ProxyHandler --> KeyHealth : routes
-    KeyHealthStore --> KeyHealth : persists
+
+    class _V3UpstreamCall {
+        <<dataclass frozen>>
+        +key: KeyHealth
+        +client: AsyncClient
+        +method: str
+        +path: str
+        +headers: dict
+        +body: bytes
+        +outbound_protocol: str
+        +need_translation: bool
+        +is_native_responses: bool
+    }
+
+    class UpstreamSSEChunkAdapter {
+        <<new>>
+        -_parser: SSEParser
+        -_profile: ProviderProfile
+        -_finished: bool
+        +for_protocol(outbound_protocol, native)$ UpstreamSSEChunkAdapter
+        +iter_chunks(byte_stream) AsyncIterator
+        -_frame_to_chunks(event, data) list
+        -_emit_finish(reason) dict
+    }
+
+    class ProviderProfile {
+        <<new>>
+        +name: str
+        +parse_frame(event, data) list
+        +detect_finish(event, data) str
+        +tool_name_mode: str
+    }
+
+    class ResponseEventProjector {
+        <<new>>
+        -_response_id: str
+        -_tools: ToolCallCollection
+        -_open_message: dict
+        -_output_index: int
+        -_saw_provider_finish: bool
+        -_usage: dict
+        +project(chunk) list
+        +close_open_items(incomplete) list
+        +saw_provider_finish: bool
+        +usage: dict
+        +tools: ToolCallCollection
+    }
+
+    class ResponsePipeline {
+        -response_id: str
+        -workspace_id: str
+        -_store: ResponseStore
+        -_config: PipelineConfig
+        -_projector: ResponseEventProjector
+        -_seq: int
+        +state: str
+        +stats: PipelineStats
+        +run(upstream, client_cancelled, key_health, clock, sleep, config) AsyncIterable
+        -_emit(event_type, data) bytes
+        -_translate_chunk(chunk) list
+        -_terminal_frames(reason, strict) list
+        -_completed_frames() list
+    }
+
+    class PipelineConfig {
+        <<dataclass frozen>>
+        +heartbeat_seconds: float = 15.0
+        +strict_terminal: bool = False
+        +first_token_seconds: float = 300.0
+        +read_idle_seconds: float = 300.0
+        +total_seconds: float = 900.0
+        +connect_seconds: float = 15.0
+        +max_heartbeat_gap_seconds: float = 16.0
+        +__post_init__() None
+        +from_config(cfg)$ PipelineConfig
+    }
+
+    class BackgroundWorker {
+        -_store: ResponseStore
+        -_jobs: BackgroundJobStore
+        -_budget: ExecutionBudget
+        -_lease_seconds: int
+        -_runs: dict
+        -_running: bool
+        +enqueue(response_id, workspace_id, model, request, previous_response_id, budget, expires_at) ResponseRecord
+        +run_job(task_id, upstream, now, budget) str
+        +start(poll_interval, upstream_factory, max_iterations) None
+        +stop() None
+        +cancel(task_id) None
+        -_execute(run, upstream, ledger, emitter) TerminalReason
+        -_stream(run, upstream, ledger, emitter) TerminalReason
+        -_charge_chunk(run, chunk, ledger, emitter, index) TerminalReason
+    }
+
+    class BackgroundJobStore {
+        +create_job(task_id, response_id, workspace_id, ...) None
+        +peek_claimable(now) str
+        +claim_job(lease_seconds, now, task_id) str
+        +renew_lease(task_id, lease_seconds, now) bool
+        +request_cancel(task_id, now) None
+        +is_cancel_requested(task_id) bool
+        +mark_terminal(task_id, status, now) None
+        +mark_failed(task_id, reason, now) None
+        +expire_stale(now) list
+    }
+
+    class ToolCallAccumulator {
+        +item_id: str
+        +source_index: int
+        +output_index: int
+        +call_id: str
+        +name: str
+        +arguments: str
+        +item_added: bool
+        +arguments_done: bool
+        +item_done: bool
+        +name_mode: str
+        +bind_call_id(call_id) None
+        +append_name(fragment) None
+        +replace_name(value) None
+        +append_arguments(fragment) None
+        +validate_arguments(require_object) bool
+        +mark_item_done() None
+        +signature() str
+    }
+
+    class ToolCallCollection {
+        -response_id: str
+        -_by_call_id: dict
+        -_by_source: dict
+        +ensure(output_index, call_id, source_index) ToolCallAccumulator
+        +get(call_id, source_index) ToolCallAccumulator
+        +finalize_call_id(acc, call_id) None
+        +completed() list
+        +incomplete() list
+    }
+
+    class ResponsesEventEmitter {
+        -response_id: str
+        -state: EmitterState
+        -_seq: int
+        +start() list
+        +open_item(item) list
+        +close_item(item, status) list
+        +delta(event_type, data) list
+        +terminate(status, terminal_reason, incomplete_details, error) list
+        +heartbeat() list
+    }
+
+    class SSEParser {
+        +feed(data) list
+        +flush() list
+        +finish() list
+    }
+
+    class ResponsesFeatureFlags {
+        +v3_enabled(ctx) bool
+        +v3_key_allowed(key_id) bool
+        +audit_record(source, reason) dict
+    }
+
+    class ChainResolver {
+        +resolve_chain(previous_response_id, workspace_id) ChainResolution
+    }
+
+    ProxyHandler ..> _V3UpstreamCall : creates
+    ProxyHandler ..> UpstreamSSEChunkAdapter : creates
+    ProxyHandler ..> ResponsePipeline : owns per-request
+    ProxyHandler --> BackgroundWorker : starts & injects factory
+    ProxyHandler --> ResponsesFeatureFlags : reads once at fork
+    ProxyHandler ..> ChainResolver : P0-5 inject
+
+    UpstreamSSEChunkAdapter --> SSEParser : delegates framing
+    UpstreamSSEChunkAdapter --> ProviderProfile : strategy
+
+    ResponsePipeline --> ResponseEventProjector : shared
+    BackgroundWorker --> ResponseEventProjector : shared
+    ResponsePipeline --> PipelineConfig
+    ResponseEventProjector --> ToolCallCollection
+    ToolCallCollection "1" o-- "*" ToolCallAccumulator
+    BackgroundWorker --> BackgroundJobStore : lease/heartbeat/cancel
+    BackgroundWorker --> ResponsesEventEmitter : lifecycle state machine
+
+    note for ResponseEventProjector "Q2 决策：live 与 background 共享投影器\n保证直播帧与 catch-up 重放帧逐字节相同"
+    note for UpstreamSSEChunkAdapter "唯一产出 finish chunk 的地方\nP0-2 的真值来源"
+    note for ToolCallAccumulator "P0-4：item_id 构造时固定\n由 response_id + output_index 生成\nbind_call_id() 永不改变它"

@@ -1,13 +1,86 @@
 sequenceDiagram
-    participant M as __main__
-    participant S as Store
-    participant F as Fallback
-    participant P as ProxyServer
-    M->>S: _load_keys_from_store()
-    S-->>M: keys=[]
-    M->>F: should_inject_fallback(keys, cfg)
-    F-->>M: True (no keys + fallback.enabled)
-    M->>F: fetch_opencode_models()
-    F-->>M: [oc-glm-5.2-free, ...]
-    M->>M: KeyHealth(key_id=-1, is_fallback=True, upstream_base=https://opencode.ai, api_key="public")
-    M->>P: ProxyServer(keys=[fallback], models=[oc-*])
+    autonumber
+    participant CL as Client
+    participant H as ProxyHandler
+    participant CR as ChainResolver
+    participant CAP as CapabilityRouter
+    participant RS as ResponseStore
+    participant UC as UpstreamClient(httpx)
+    participant AD as UpstreamSSEChunkAdapter
+    participant PL as ResponsePipeline
+    participant PR as ResponseEventProjector
+    participant EL as EventLog
+
+    CL->>H: POST /v1/responses {stream:true}
+    activate H
+    Note over H: fork handler.py:1082<br/>inbound=responses AND _v3 AND v3_enabled(ctx)<br/>开关只读这一次（AC-8.4 版本粘性）
+    H->>H: _dispatch_v3_create_stream(request, ctx, candidates)
+
+    rect rgb(255, 242, 204)
+    Note over H,UC: Phase A · 已写出 0 字节，可返回 JSON 错误
+    H->>CR: resolve_chain(previous_response_id, workspace_id)
+    CR-->>H: ChainResolution(ok=True, items, depth)
+    Note right of CR: AC-5.4：七类链错误在此返回 400/404<br/>upstream 调用次数 = 0
+    H->>H: sanitize(body_obj)
+    H->>H: body["input"] = build_upstream_input(resolution, current_input)
+    Note right of H: P0-5：必须在协议翻译之前<br/>reasoning-free，不继承父 instructions
+    H->>CAP: route(sanitized, candidates)
+    CAP-->>H: RouteDecision(key, upstream_path, is_native)
+    H->>RS: create_response(in_progress) + save_input_items + save_state_chain
+    RS-->>H: ok（失败仅降级，不 fatal）
+    H->>H: _prepare_v3_upstream_call(stream=True) -> _V3UpstreamCall
+    H->>UC: client.stream(POST, path, headers, body)
+    UC-->>H: response header 200
+    Note right of UC: 连接失败 -> mark_network_failure + 502 JSON<br/>status>=400 -> classify_failure + 透传 JSON<br/>客户端从未见过 SSE
+    end
+
+    rect rgb(213, 232, 212)
+    Note over H,EL: Phase B · 已 prepare()，状态码锁定 200
+    H->>CL: 200 text/event-stream (headers only)
+    H->>AD: for_protocol(outbound_protocol)
+    H->>PL: ResponsePipeline(response_id, store, PipelineConfig.from_config(cfg))
+    H->>PL: run(adapter.iter_chunks(up.aiter_bytes()), client_cancelled=evt)
+    activate PL
+
+    PL->>EL: append_event(response.created, seq=0)
+    PL-->>H: frame: response.created
+    H->>CL: write(frame)
+    PL->>EL: append_event(response.in_progress, seq=1)
+    PL-->>H: frame: response.in_progress
+    H->>CL: write(frame)
+
+    loop 上游每个 SSE 帧
+        UC-->>AD: bytes（任意切分）
+        AD->>AD: SSEParser.feed() -> 完整帧
+        AD-->>PL: {"type":"text","delta":"..."}
+        PL->>PR: project(chunk)
+        PR-->>PL: [(response.output_item.added), (response.output_text.delta)]
+        PL->>EL: append_event x2
+        PL-->>H: frames
+        H->>CL: write(frames)
+    end
+
+    Note over AD: 上游 choices[0].finish_reason = "stop"
+    AD-->>PL: {"type":"finish","reason":"stop"}
+    PL->>PR: project(chunk)
+    PR->>PR: _saw_provider_finish = True （P0-2 真值）
+    PR-->>PL: []（finish 不产事件）
+
+    UC-->>AD: EOF
+    AD-->>PL: StopAsyncIteration
+    PL->>PL: queue.put(("upstream_end", None))
+    PL->>PR: saw_provider_finish?
+    PR-->>PL: True -> terminal_reason = None（不判截断）
+    PL->>PR: close_open_items(incomplete=False)
+    PR-->>PL: [(response.output_item.done)]
+    PL->>EL: append_event(response.output_item.done)
+    PL->>EL: append_event(response.completed)
+    PL-->>H: frames: output_item.done, response.completed, [DONE]
+    H->>CL: write(frames)
+    deactivate PL
+    end
+
+    H->>RS: _persist_v3_terminal(status=completed, usage, output)
+    H-->>CL: 流关闭
+    deactivate H
+    Note over CL: stats.truncated_streams == 0 (AC-2.3)<br/>最后一帧为 data: [DONE] (T3)

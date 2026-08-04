@@ -271,6 +271,29 @@ class ResponsesRolloutSchema(BaseModel):
         return v
 
 
+class ResponsesTimeoutSchema(BaseModel):
+    """Responses v3 流水线四层超时（P0-7 / 铁律 5 / AC-7.4）。
+
+    校验只拦「非正数」这种一定是笔误的值；「比铁律 5 更宽」的值不在这里
+    报错，而是在 ``PipelineConfig.__post_init__`` 钳制回上限——启动期报错
+    会让一个手滑的超时数字变成不可用的服务（AC-7.3，理由见架构 §9.4）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    first_token_seconds: float = 300.0
+    read_idle_seconds: float = 300.0
+    total_seconds: float = 900.0
+    connect_seconds: float = 15.0
+
+    @field_validator("first_token_seconds", "read_idle_seconds", "total_seconds", "connect_seconds")
+    @classmethod
+    def _positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError("responses_bridge.timeout.* must be > 0")
+        return v
+
+
 class ResponsesBridgeSchema(BaseModel):
     """Responses v3 bridge 配置段（D3.1：默认启用；架构 §8.1）。
 
@@ -282,7 +305,11 @@ class ResponsesBridgeSchema(BaseModel):
 
     version: str = "v3"
     enabled: bool = True
+    #: P0-2 / 铁律 2：截断流不得被洗成 ``response.completed``。GA 默认严格，
+    #: 留开关只是为了事故中不改代码即可回到 GA 前的兼容行为。
+    strict_terminal: bool = True
     rollout: ResponsesRolloutSchema = Field(default_factory=ResponsesRolloutSchema)
+    timeout: ResponsesTimeoutSchema = Field(default_factory=ResponsesTimeoutSchema)
 
     @field_validator("version")
     @classmethod

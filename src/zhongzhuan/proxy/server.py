@@ -48,6 +48,9 @@ class ProxyServer:
 
             feature_flags = ResponsesFeatureFlags(responses_bridge)
         self._feature_flags = feature_flags
+        #: T04 / P0-8: the record written by :meth:`_audit_startup`, kept so
+        #: tests and health introspection can read back what was audited.
+        self.startup_audit: dict[str, str] | None = None
 
     def app(self) -> web.Application:
         # CORS 中间件在最外层，Gzip 在内层（对非流式 JSON 响应压缩）
@@ -95,6 +98,10 @@ class ProxyServer:
 
         # 注册后台任务钩子（优化点4+5：sticky 清理 + 健康状态快照）
         async def _on_startup(app: web.Application) -> None:
+            # T04 / P0-8 (AC-8.1): the switch audit is the FIRST thing written
+            # at startup — before any worker can serve traffic — so the log
+            # always opens with "which implementation is in force".
+            self._audit_startup()
             await handler.start_background_tasks()
 
         async def _on_cleanup(app: web.Application) -> None:
@@ -131,6 +138,43 @@ class ProxyServer:
     # ------------------------------------------------------------------
     # T33 分层健康检查（R-P2-07/08）
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # T04 / P0-8: startup switch audit
+    # ------------------------------------------------------------------
+
+    def _audit_startup(self, logger: object = None) -> dict[str, str] | None:
+        """Write the single-line v3 switch audit banner (AC-8.1).
+
+        Emits exactly ONE line carrying the five mandated fields
+        (``operator`` / ``timestamp`` / ``reason`` / ``effective_version`` /
+        ``source``).  The redacted effective-config dump is deliberately NOT
+        triggered here: it renders one line per config leaf (hundreds of
+        lines) and would flood a supervisor's stderr pipe before the proxy
+        binds its port.  The v3 switch section is instead folded into
+        :func:`~zhongzhuan.config.effective.format_effective_config`, so any
+        caller that *chooses* to dump the effective config still sees it.
+
+        Never raises: an unloggable banner must not stop the proxy from
+        serving.  Returns the audit record (also stored on
+        ``self.startup_audit``) or ``None`` when auditing failed.
+        """
+        if logger is None:  # pragma: no cover - trivial default wiring
+            from loguru import logger as _logger
+
+            logger = _logger
+
+        record: dict[str, str] | None = None
+        try:
+            flags = self._feature_flags
+            audit = getattr(flags, "log_audit_record", None)
+            if callable(audit):
+                record = audit(reason="boot", operator="startup", logger=logger)
+                self.startup_audit = record
+        except Exception:  # pragma: no cover - logging must never break startup
+            record = None
+
+        return record
 
     # ------------------------------------------------------------------
     # T22: Responses v3 handler construction (fail-safe for store-less setups)
