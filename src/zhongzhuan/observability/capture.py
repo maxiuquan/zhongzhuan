@@ -31,6 +31,7 @@ capture is opt-in); :class:`DebugCapture` is the full stateful store.
 Top-level imports are standard library only, so ``capture.py`` imports cleanly
 in any environment.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -78,8 +79,10 @@ class CaptureConfig:
 #: character length, never in full.  Key names are matched case-insensitively
 #: against the raw event dict.
 _CONTENT_KEY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?i)(^|_)(text|delta|content|output|arguments|input|prompt|"
-               r"query|reasoning|summary)(_|$)"),
+    re.compile(
+        r"(?i)(^|_)(text|delta|content|output|arguments|input|prompt|"
+        r"query|reasoning|summary)(_|$)"
+    ),
     re.compile(r"(?i)secret|token|api[_-]?key|password|authorization"),
 )
 
@@ -171,10 +174,7 @@ class CaptureEntry:
             response_id=str(data.get("response_id") or ""),
             item_id=str(data.get("item_id") or ""),
             call_id=str(data.get("call_id") or ""),
-            lengths={
-                str(k): int(v)
-                for k, v in dict(data.get("lengths") or {}).items()
-            },
+            lengths={str(k): int(v) for k, v in dict(data.get("lengths") or {}).items()},
         )
 
 
@@ -311,8 +311,7 @@ class DebugCapture:
         now = self._clock()
         out: list[dict[str, Any]] = []
         for entry in self._entries:
-            if (self.config.ttl_seconds > 0
-                    and now - entry.timestamp > self.config.ttl_seconds):
+            if self.config.ttl_seconds > 0 and now - entry.timestamp > self.config.ttl_seconds:
                 continue
             out.append(entry.to_dict())
         return out

@@ -3,6 +3,7 @@
 判据映射见各测试 docstring：并行 3 工具、往返持久化、幂等保留 created_at、
 approval 往返、非法 approval_state 报错、tool_seq=-1 过滤、待审批租户隔离。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -47,7 +48,9 @@ async def test_parallel_three_hosted_tools_persisted(tmp_path):
         assert len(rows) == 3
         assert [r["tool_seq"] for r in rows] == [0, 1, 2]
         assert [r["tool_type"] for r in rows] == [
-            "web_search", "file_search", "code_interpreter",
+            "web_search",
+            "file_search",
+            "code_interpreter",
         ]
         # 能力映射被持久化。
         assert rows[0]["capability"] == Capability.WEB_SEARCH.value
@@ -92,9 +95,20 @@ async def test_record_is_idempotent_keeps_first_created_at(tmp_path):
             " idempotency_key, status, approval, result_digest, "
             " created_at, updated_at, expires_at, tool_seq, tool_type, capability) "
             "VALUES (?, ?, ?, '', '', ?, ?, ?, '', ?, ?, ?, ?, ?, ?)",
-            (execution_id_for("resp_3", 0), "resp_3", "ws", "", "recognized",
-             APPROVAL_NONE, 1000, 1000, 0, 0, "image_generation",
-             Capability.IMAGE_GENERATION.value),
+            (
+                execution_id_for("resp_3", 0),
+                "resp_3",
+                "ws",
+                "",
+                "recognized",
+                APPROVAL_NONE,
+                1000,
+                1000,
+                0,
+                0,
+                "image_generation",
+                Capability.IMAGE_GENERATION.value,
+            ),
         )
         # 同 (response_id, tool_seq) 二次记录 —— 不应抹掉首次时间。
         await store.record(
@@ -143,8 +157,11 @@ async def test_invalid_approval_state_raises_value_error(tmp_path):
         store = ToolExecutionStore(s)
         with pytest.raises(ValueError):
             await store.record(
-                response_id="resp_5", workspace_id="ws", tool_seq=0,
-                tool_type="mcp", capability=Capability.REMOTE_MCP.value,
+                response_id="resp_5",
+                workspace_id="ws",
+                tool_seq=0,
+                tool_type="mcp",
+                capability=Capability.REMOTE_MCP.value,
                 approval_state="not_a_real_state",
             )
         with pytest.raises(ValueError):
@@ -166,8 +183,23 @@ async def test_get_for_response_filters_legacy_function_call_rows(tmp_path):
             " idempotency_key, status, approval, result_digest, "
             " created_at, updated_at, expires_at, tool_seq, tool_type, capability) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (execution_id_for("resp_6", -1), "resp_6", "ws", "call_1", "get_weather",
-             "", "pending", "", "", 1, 1, 0, -1, "", ""),
+            (
+                execution_id_for("resp_6", -1),
+                "resp_6",
+                "ws",
+                "call_1",
+                "get_weather",
+                "",
+                "pending",
+                "",
+                "",
+                1,
+                1,
+                0,
+                -1,
+                "",
+                "",
+            ),
         )
         # 一条本次的 hosted tool 行。
         specs = _specs(["web_search"])

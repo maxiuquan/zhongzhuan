@@ -10,6 +10,7 @@ with redaction + truncation (:func:`~.logfields.sanitize_text`).
 ``capture`` -- optional anonymised debug capture + offline replay
 (:class:`~.capture.DebugCapture`).  Disabled by default.
 """
+
 from .capture import (
     CaptureConfig,
     CaptureEntry,

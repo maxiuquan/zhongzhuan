@@ -35,6 +35,7 @@
 :meth:`~zhongzhuan.responses_v3.mcp_client.McpClient.submit_approval` 消费客户端
 回执落 ``approved`` / ``rejected``。本层不认识事件，也不该认识。
 """
+
 from __future__ import annotations
 
 import time
@@ -55,17 +56,30 @@ APPROVAL_REJECTED: str = "rejected"
 #: :meth:`ToolExecutionStore.set_approval` 接受的全部取值。写死成白名单是为了
 #: 让拼错的状态在**写入时**炸掉，而不是在 T27 查 ``approval='pending'`` 查不到
 #: 时才表现为「审批请求凭空消失」。
-APPROVAL_STATES: frozenset[str] = frozenset({
-    APPROVAL_NONE, APPROVAL_PENDING, APPROVAL_APPROVED, APPROVAL_REJECTED,
-})
+APPROVAL_STATES: frozenset[str] = frozenset(
+    {
+        APPROVAL_NONE,
+        APPROVAL_PENDING,
+        APPROVAL_APPROVED,
+        APPROVAL_REJECTED,
+    }
+)
 
 #: 一条 hosted tool 记录刚被识别、尚未交给任何执行器时的状态。
 STATUS_RECOGNIZED: str = "recognized"
 
 #: 对外返回的字段顺序，与 :meth:`ToolExecutionStore._SELECT` 的列顺序一一对应。
 RECORD_FIELDS: tuple[str, ...] = (
-    "response_id", "workspace_id", "tool_seq", "tool_type", "capability",
-    "status", "approval_state", "idempotency_key", "created_at", "updated_at",
+    "response_id",
+    "workspace_id",
+    "tool_seq",
+    "tool_type",
+    "capability",
+    "status",
+    "approval_state",
+    "idempotency_key",
+    "created_at",
+    "updated_at",
 )
 
 _SELECT_COLUMNS: str = (
@@ -123,7 +137,8 @@ class ToolExecutionStore:
         if approval_state not in APPROVAL_STATES:
             raise ValueError(
                 "unknown approval_state: {0!r} (expected one of {1})".format(
-                    approval_state, sorted(APPROVAL_STATES),
+                    approval_state,
+                    sorted(APPROVAL_STATES),
                 )
             )
         now = int(time.time())
@@ -136,15 +151,26 @@ class ToolExecutionStore:
             " created_at, updated_at, expires_at, tool_seq, tool_type, capability) "
             "VALUES (?, ?, ?, '', '', ?, ?, ?, '', ?, ?, ?, ?, ?, ?)",
             (
-                execution_id, response_id, workspace_id,
-                idempotency_key, status, approval_state,
-                created_at, now, int(expires_at),
-                int(tool_seq), tool_type, capability,
+                execution_id,
+                response_id,
+                workspace_id,
+                idempotency_key,
+                status,
+                approval_state,
+                created_at,
+                now,
+                int(expires_at),
+                int(tool_seq),
+                tool_type,
+                capability,
             ),
         )
 
     async def set_approval(
-        self, response_id: str, tool_seq: int, decision: str,
+        self,
+        response_id: str,
+        tool_seq: int,
+        decision: str,
     ) -> None:
         """把一条记录的审批状态置为 ``approved`` / ``rejected``（往返的后半程）。
 
@@ -154,32 +180,37 @@ class ToolExecutionStore:
         if decision not in APPROVAL_STATES:
             raise ValueError(
                 "unknown approval decision: {0!r} (expected one of {1})".format(
-                    decision, sorted(APPROVAL_STATES),
+                    decision,
+                    sorted(APPROVAL_STATES),
                 )
             )
         await self._store.execute(
-            "UPDATE tool_executions SET approval = ?, updated_at = ? "
-            "WHERE response_id = ? AND tool_seq = ?",
+            "UPDATE tool_executions SET approval = ?, updated_at = ? WHERE response_id = ? AND tool_seq = ?",
             (decision, int(time.time()), response_id, int(tool_seq)),
         )
 
     async def set_status(
-        self, response_id: str, tool_seq: int, status: str,
+        self,
+        response_id: str,
+        tool_seq: int,
+        status: str,
     ) -> None:
         """推进执行状态（``recognized`` -> ``rejected`` / ``dispatched`` / ...）。
 
         状态取值不设白名单：``status`` 的枚举归执行器所有，本层只负责落库。
         """
         await self._store.execute(
-            "UPDATE tool_executions SET status = ?, updated_at = ? "
-            "WHERE response_id = ? AND tool_seq = ?",
+            "UPDATE tool_executions SET status = ?, updated_at = ? WHERE response_id = ? AND tool_seq = ?",
             (status, int(time.time()), response_id, int(tool_seq)),
         )
 
     # -- 读取 ----------------------------------------------------------------
 
     async def get_for_response(
-        self, response_id: str, *, workspace_id: str = "",
+        self,
+        response_id: str,
+        *,
+        workspace_id: str = "",
     ) -> list[dict[str, Any]]:
         """按 ``tool_seq`` 升序返回该 response 的全部 hosted tool 记录。
 
@@ -196,7 +227,9 @@ class ToolExecutionStore:
         return [_row_to_dict(row) for row in rows]
 
     async def get_pending_approvals(
-        self, *, workspace_id: str = "",
+        self,
+        *,
+        workspace_id: str = "",
     ) -> list[dict[str, Any]]:
         """租户内所有 ``approval_state='pending'`` 的记录（T27 的输入）。"""
         rows = await self._store.fetchall(

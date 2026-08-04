@@ -1,8 +1,8 @@
 """Key encryption/decryption: AES-GCM (primary), DPAPI (Windows legacy), dev stub (fallback)."""
+
 from __future__ import annotations
 
 import base64
-import os
 import sys
 from pathlib import Path
 
@@ -61,6 +61,7 @@ def decrypt(ciphertext: bytes) -> bytes:
 
     if ciphertext.startswith(b"WIN:"):
         from .dpapi_windows import dpapi_unprotect
+
         return dpapi_unprotect(ciphertext[4:])
 
     if ciphertext.startswith(b"DEV:"):
@@ -69,6 +70,7 @@ def decrypt(ciphertext: bytes) -> bytes:
     # Legacy: no prefix, try DPAPI (Windows)
     if sys.platform == "win32":
         from .dpapi_windows import dpapi_unprotect
+
         return dpapi_unprotect(ciphertext)
 
     raise RuntimeError("Unknown ciphertext format")

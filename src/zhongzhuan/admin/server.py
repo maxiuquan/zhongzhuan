@@ -1,4 +1,5 @@
 """Admin HTTP server."""
+
 from __future__ import annotations
 
 from aiohttp import web
@@ -14,7 +15,7 @@ from .api_export_import import register_routes as register_export
 from .api_auth import register_routes as register_auth
 from .api_tokens import register_routes as register_tokens
 from .api_fallback import register_routes as register_fallback
-from .auth import make_auth_middleware, init_jwt_secret, auth_enabled
+from .auth import make_auth_middleware, init_jwt_secret
 from .notify import configure_reload_target
 from .ui import mount_ui
 
@@ -27,6 +28,7 @@ class AdminServer:
 
     def app(self) -> web.Application:
         from ..proxy.cors import make_cors_middleware
+
         app = web.Application(
             client_max_size=64 * 1024 * 1024,
             middlewares=[make_cors_middleware()],  # admin 也启用 CORS
@@ -53,6 +55,7 @@ class AdminServer:
                     {"error": {"message": str(e), "type": "internal_error"}},
                     status=500,
                 )
+
         app.middlewares.append(error_middleware)
 
         # JWT auth middleware
@@ -86,6 +89,7 @@ class AdminServer:
 
     async def _health_liveness(self, _request: web.Request) -> web.Response:
         from ..observability.health import build_liveness, sanitize_health_payload
+
         return web.json_response(sanitize_health_payload(build_liveness()))
 
     async def _health_readiness(self, _request: web.Request) -> web.Response:
@@ -94,6 +98,7 @@ class AdminServer:
             migration_status,
             sanitize_health_payload,
         )
+
         migration_ok, migration_detail = await migration_status(self.store)
         payload, status = build_readiness(
             migration_ok=migration_ok,
@@ -112,6 +117,7 @@ class AdminServer:
             migration_status,
             sanitize_health_payload,
         )
+
         mig_ok, mig_detail = await migration_status(self.store)
         deps = [dependency_item("store", mig_ok, mig_detail)]
         return web.json_response(

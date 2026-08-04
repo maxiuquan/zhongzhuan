@@ -1,4 +1,5 @@
 """Service control API (sc.exe wrapper)."""
+
 from __future__ import annotations
 
 import subprocess
@@ -13,7 +14,8 @@ def _sc(*args: str) -> tuple[int, str, str]:
     """Run sc.exe command, return (code, stdout, stderr)."""
     r = subprocess.run(
         ["sc.exe", *args],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     return r.returncode, r.stdout, r.stderr
 

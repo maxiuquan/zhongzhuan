@@ -1,4 +1,5 @@
 """SQLite store tests."""
+
 import asyncio
 
 import pytest

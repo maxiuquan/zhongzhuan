@@ -18,6 +18,7 @@ Acceptance mapping
 
 All timing is injectable-clock driven -- zero real waits.
 """
+
 from __future__ import annotations
 
 import json
@@ -34,8 +35,7 @@ from zhongzhuan.observability.capture import (
 # Hard-coded sensitive samples (criterion ①: regex must never hit these).
 API_KEY_SAMPLE = "sk-test-1234"
 AUTH_HEADER_SAMPLE = "Authorization: Bearer t0k3n"
-REASONING_SAMPLE = ("The model reasoned at length about the internal design of "
-                    "the tokenizer, then concluded nothing.")
+REASONING_SAMPLE = "The model reasoned at length about the internal design of the tokenizer, then concluded nothing."
 JWT_SAMPLE = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzZWNyZXQifQ.abc"
 TEXT_DELTA_SAMPLE = "今天天气很好，适合部署 MCP server。"
 ARGS_JSON_SAMPLE = '{"path": "/etc/x", "content": "hello"}'
@@ -66,26 +66,51 @@ def _capture(**cfg_overrides) -> tuple[DebugCapture, FakeClock]:
 def _sensitive_stream() -> list[dict]:
     """A Responses-shaped event stream stuffed with plaintext everywhere."""
     return [
-        {"type": "response.created", "response_id": RESPONSE_ID_SAMPLE, "seq": 0,
-         "prompt": "请用 sk-test-1234 访问 https://example.invalid"},
-        {"type": "response.output_item.added", "seq": 1, "output_index": 0,
-         "item_id": ITEM_ID_SAMPLE,
-         "item": {"id": ITEM_ID_SAMPLE, "type": "message",
-                  "status": "in_progress", "role": "assistant"}},
-        {"type": "response.output_text.delta", "seq": 2, "output_index": 0,
-         "delta": TEXT_DELTA_SAMPLE},
+        {
+            "type": "response.created",
+            "response_id": RESPONSE_ID_SAMPLE,
+            "seq": 0,
+            "prompt": "请用 sk-test-1234 访问 https://example.invalid",
+        },
+        {
+            "type": "response.output_item.added",
+            "seq": 1,
+            "output_index": 0,
+            "item_id": ITEM_ID_SAMPLE,
+            "item": {"id": ITEM_ID_SAMPLE, "type": "message", "status": "in_progress", "role": "assistant"},
+        },
+        {"type": "response.output_text.delta", "seq": 2, "output_index": 0, "delta": TEXT_DELTA_SAMPLE},
         {"type": "response.output_text.done", "seq": 3, "output_index": 0},
-        {"type": "response.function_call_arguments.delta", "seq": 4,
-         "output_index": 1, "call_id": CALL_ID_SAMPLE, "name": "write_file",
-         "arguments": ARGS_JSON_SAMPLE},
-        {"type": "response.function_call_arguments.done", "seq": 5,
-         "output_index": 1, "call_id": CALL_ID_SAMPLE, "name": "write_file",
-         "arguments": ARGS_JSON_SAMPLE},
-        {"type": "response.reasoning_summary_text.delta", "seq": 6,
-         "output_index": 2, "reasoning_summary_text": REASONING_SAMPLE},
-        {"type": "response.failed", "seq": 7, "response_id": RESPONSE_ID_SAMPLE,
-         "error": {"message": "bad " + API_KEY_SAMPLE + " " + AUTH_HEADER_SAMPLE},
-         "jwt": JWT_SAMPLE, "token": "ghp_deadbeefdeadbeefdeadbeef"},
+        {
+            "type": "response.function_call_arguments.delta",
+            "seq": 4,
+            "output_index": 1,
+            "call_id": CALL_ID_SAMPLE,
+            "name": "write_file",
+            "arguments": ARGS_JSON_SAMPLE,
+        },
+        {
+            "type": "response.function_call_arguments.done",
+            "seq": 5,
+            "output_index": 1,
+            "call_id": CALL_ID_SAMPLE,
+            "name": "write_file",
+            "arguments": ARGS_JSON_SAMPLE,
+        },
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "seq": 6,
+            "output_index": 2,
+            "reasoning_summary_text": REASONING_SAMPLE,
+        },
+        {
+            "type": "response.failed",
+            "seq": 7,
+            "response_id": RESPONSE_ID_SAMPLE,
+            "error": {"message": "bad " + API_KEY_SAMPLE + " " + AUTH_HEADER_SAMPLE},
+            "jwt": JWT_SAMPLE,
+            "token": "ghp_deadbeefdeadbeefdeadbeef",
+        },
     ]
 
 
@@ -109,13 +134,21 @@ def test_capture_contains_no_plaintext():
     # Every mandated sensitive family must be absent -- including the hash
     # inputs (response/item/call IDs are never stored, only their hashes).
     for sample in (
-        API_KEY_SAMPLE, AUTH_HEADER_SAMPLE, REASONING_SAMPLE, JWT_SAMPLE,
-        TEXT_DELTA_SAMPLE, ARGS_JSON_SAMPLE, RESPONSE_ID_SAMPLE,
-        ITEM_ID_SAMPLE, CALL_ID_SAMPLE,
-        "ghp_deadbeefdeadbeefdeadbeef", "t0k3n", "/etc/x", "hello",
+        API_KEY_SAMPLE,
+        AUTH_HEADER_SAMPLE,
+        REASONING_SAMPLE,
+        JWT_SAMPLE,
+        TEXT_DELTA_SAMPLE,
+        ARGS_JSON_SAMPLE,
+        RESPONSE_ID_SAMPLE,
+        ITEM_ID_SAMPLE,
+        CALL_ID_SAMPLE,
+        "ghp_deadbeefdeadbeefdeadbeef",
+        "t0k3n",
+        "/etc/x",
+        "hello",
     ):
-        assert re.search(re.escape(sample), blob) is None, \
-            "plaintext leaked: {0}".format(sample)
+        assert re.search(re.escape(sample), blob) is None, "plaintext leaked: {0}".format(sample)
 
     # The output is still a valid, replayable capture document.
     parsed = json.loads(blob)
@@ -129,8 +162,7 @@ def test_capture_keeps_only_metadata_fields():
     entries = store.replay()
     assert len(entries) == 8
 
-    allowed_keys = {"type", "timestamp", "seq", "index",
-                    "response_id", "item_id", "call_id", "lengths"}
+    allowed_keys = {"type", "timestamp", "seq", "index", "response_id", "item_id", "call_id", "lengths"}
     for entry in entries:
         assert set(entry.keys()) <= allowed_keys, entry
 
@@ -151,12 +183,13 @@ def test_capture_keeps_only_metadata_fields():
 
 def test_same_id_hashes_deterministically():
     """The same ID hashes to the same short token; different IDs differ."""
-    store, _clock = _capture_stream([
-        {"type": "response.created", "response_id": RESPONSE_ID_SAMPLE, "seq": 0},
-        {"type": "response.output_text.delta", "seq": 1,
-         "response_id": RESPONSE_ID_SAMPLE, "delta": "a"},
-        {"type": "response.created", "response_id": "resp-other-999", "seq": 2},
-    ])
+    store, _clock = _capture_stream(
+        [
+            {"type": "response.created", "response_id": RESPONSE_ID_SAMPLE, "seq": 0},
+            {"type": "response.output_text.delta", "seq": 1, "response_id": RESPONSE_ID_SAMPLE, "delta": "a"},
+            {"type": "response.created", "response_id": "resp-other-999", "seq": 2},
+        ]
+    )
     entries = store.replay()
     assert entries[0]["response_id"] == entries[1]["response_id"]
     assert entries[0]["response_id"] != entries[2]["response_id"]
@@ -168,8 +201,7 @@ def test_capture_disabled_is_noop():
     """Default config is disabled; capture() records nothing."""
     store = DebugCapture()  # default CaptureConfig().enabled is False
     assert store.enabled is False
-    store.capture({"type": "response.created", "response_id": RESPONSE_ID_SAMPLE,
-                   "delta": TEXT_DELTA_SAMPLE})
+    store.capture({"type": "response.created", "response_id": RESPONSE_ID_SAMPLE, "delta": TEXT_DELTA_SAMPLE})
     assert store.replay() == []
     assert store.stats.entries == 0
 
@@ -197,8 +229,7 @@ def test_capture_module_imports_stdlib_only():
                         imported.add(head)
     assert imported, "expected to find imports"
     for mod in imported:
-        assert mod in sys.stdlib_module_names, \
-            "third-party import in capture.py: {0}".format(mod)
+        assert mod in sys.stdlib_module_names, "third-party import in capture.py: {0}".format(mod)
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +251,14 @@ def test_replay_reproduces_event_sequence():
 
     # output_index survives as index.
     assert [entry.get("index") for entry in replay] == [
-        None, 0, 0, 0, 1, 1, 2, None,
+        None,
+        0,
+        0,
+        0,
+        1,
+        1,
+        2,
+        None,
     ]
 
     # Fragment lengths survive.
@@ -254,8 +292,7 @@ def test_max_entries_drops_oldest():
     """Over the entry cap, the *oldest* entries are dropped first."""
     store, _clock = _capture(max_entries=3)
     for i in range(5):
-        store.capture({"type": "response.output_text.delta", "seq": i,
-                       "delta": "x" * 4})
+        store.capture({"type": "response.output_text.delta", "seq": i, "delta": "x" * 4})
     replay = store.replay()
     assert [e["seq"] for e in replay] == [2, 3, 4]
     assert store.stats.dropped == 2
@@ -266,8 +303,7 @@ def test_max_bytes_evicts_oldest():
     """Over the byte budget, entries are evicted until the buffer fits."""
     store, _clock = _capture(max_bytes=250)
     for i in range(6):
-        store.capture({"type": "response.created", "seq": i,
-                       "response_id": "resp-{0}".format(i)})
+        store.capture({"type": "response.created", "seq": i, "response_id": "resp-{0}".format(i)})
     replay = store.replay()
     # The buffer stays within budget, keeps a contiguous tail, and dropped
     # at least one entry.
@@ -283,8 +319,7 @@ def test_max_bytes_evicts_oldest():
 def test_oversized_single_entry_still_recorded():
     """A lone entry is never dropped, even when it exceeds max_bytes."""
     store, _clock = _capture(max_bytes=1)
-    store.capture({"type": "response.created", "seq": 0,
-                   "response_id": RESPONSE_ID_SAMPLE})
+    store.capture({"type": "response.created", "seq": 0, "response_id": RESPONSE_ID_SAMPLE})
     assert len(store.replay()) == 1
     assert store.stats.dropped == 0
 
@@ -292,13 +327,13 @@ def test_oversized_single_entry_still_recorded():
 def test_ttl_filters_expired_entries():
     """Entries older than ttl_seconds are filtered out on replay."""
     store, clock = _capture(ttl_seconds=100)
-    store.capture({"type": "response.created", "seq": 0})       # t=0
+    store.capture({"type": "response.created", "seq": 0})  # t=0
     clock.advance(50)
-    store.capture({"type": "response.created", "seq": 1})       # t=50
+    store.capture({"type": "response.created", "seq": 1})  # t=50
     clock.advance(100)
-    store.capture({"type": "response.created", "seq": 2})       # t=150
+    store.capture({"type": "response.created", "seq": 2})  # t=150
 
-    clock.advance(10)                                           # now t=160
+    clock.advance(10)  # now t=160
     replay = store.replay()
     # t=0  -> 160s old  (expired); t=50 -> 110s old (expired); t=150 -> 10s old (ok)
     assert [e["seq"] for e in replay] == [2]
@@ -308,9 +343,9 @@ def test_ttl_filters_expired_entries():
 def test_ttl_prunes_expired_on_write():
     """A later capture prunes the expired entries out of the buffer."""
     store, clock = _capture(ttl_seconds=100)
-    store.capture({"type": "response.created", "seq": 0})       # t=0
+    store.capture({"type": "response.created", "seq": 0})  # t=0
     clock.advance(200)
-    store.capture({"type": "response.created", "seq": 1})       # t=200
+    store.capture({"type": "response.created", "seq": 1})  # t=200
     assert store.stats.expired == 1
     assert store.stats.entries == 1
     assert [e["seq"] for e in store.replay()] == [1]

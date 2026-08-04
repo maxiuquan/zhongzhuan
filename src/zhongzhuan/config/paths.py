@@ -1,4 +1,5 @@
 """Cross-platform path resolution."""
+
 from __future__ import annotations
 
 import os
@@ -60,6 +61,7 @@ def is_admin() -> bool:
         return False
     try:
         import ctypes
+
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False

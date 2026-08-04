@@ -25,6 +25,7 @@
   的真实上游** —— 断言本身与 mock 完全一致。诚实标注：本文件不发起任何真实
   网络请求。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -68,9 +69,9 @@ def _parse_events(frames: list[bytes]) -> list[tuple[str, dict]]:
         data_lines: list[str] = []
         for line in text.splitlines():
             if line.startswith("event: "):
-                event_type = line[len("event: "):]
+                event_type = line[len("event: ") :]
             elif line.startswith("data: "):
-                data_lines.append(line[len("data: "):])
+                data_lines.append(line[len("data: ") :])
         if event_type is None:
             continue
         data = json.loads("\n".join(data_lines)) if data_lines else {}
@@ -90,8 +91,9 @@ def _rs(store) -> ResponseStore:
     return ResponseStore(store)
 
 
-async def _run_pipeline(store, chunks: list, *, response_id: str = "resp_m",
-                        **kw) -> tuple[ResponsePipeline, list[tuple[str, dict]]]:
+async def _run_pipeline(
+    store, chunks: list, *, response_id: str = "resp_m", **kw
+) -> tuple[ResponsePipeline, list[tuple[str, dict]]]:
     upstream = iter(list(chunks))
 
     async def source():
@@ -99,7 +101,9 @@ async def _run_pipeline(store, chunks: list, *, response_id: str = "resp_m",
             yield c
 
     pipeline = ResponsePipeline(
-        response_id, workspace_id="t1", store=_rs(store),
+        response_id,
+        workspace_id="t1",
+        store=_rs(store),
         config=PipelineConfig(**kw),
     )
     frames = [f async for f in pipeline.run(source())]
@@ -154,8 +158,7 @@ async def _deepseek_reasoning_upstream():
     out: list[bytes] = []
     for c in [
         _sse({"id": "c1", "choices": [{"index": 0, "delta": {"reasoning_content": "think deep"}}]}),
-        _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "答案在此"},
-                                       "finish_reason": "stop"}]}),
+        _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "答案在此"}, "finish_reason": "stop"}]}),
         b"data: [DONE]\n\n",
     ]:
         out.extend(await tr.feed(c))
@@ -169,8 +172,7 @@ async def _openai_non_reasoning_upstream():
     out: list[bytes] = []
     for c in [
         _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "Hello "}}]}),
-        _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "world"},
-                                       "finish_reason": "stop"}]}),
+        _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "world"}, "finish_reason": "stop"}]}),
     ]:
         out.extend(await tr.feed(c))
     out.extend(await tr.afinish())
@@ -194,8 +196,7 @@ async def _anthropic_upstream():
             'data: {"type":"content_block_delta","index":0,'
             '"delta":{"type":"text_delta","text":"Anthropic"}}\n\n'
         ).encode("utf-8"),
-        b"event: message_stop\n"
-        b'data: {"type":"message_stop"}\n\n',
+        b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
         b"data: [DONE]\n\n",
     ]
     out: list[bytes] = []
@@ -206,36 +207,52 @@ async def _anthropic_upstream():
 
 
 async def _single_tool_upstream(store):
-    _, events = await _run_pipeline(store, [
-        _tool("call_1", "web_search", '{"q": "北京', source_index=0),
-        _tool("call_1", "web_search", '"}', source_index=0),
-        _tool_done("call_1", ""),
-    ], response_id="resp_m_tool1")
+    _, events = await _run_pipeline(
+        store,
+        [
+            _tool("call_1", "web_search", '{"q": "北京', source_index=0),
+            _tool("call_1", "web_search", '"}', source_index=0),
+            _tool_done("call_1", ""),
+        ],
+        response_id="resp_m_tool1",
+    )
     return events
 
 
 async def _parallel_tool_upstream(store):
-    _, events = await _run_pipeline(store, [
-        _tool("call_a", "alpha", '{"n":1,', source_index=0),
-        _tool("call_b", "beta", '{"m":2,', source_index=1),
-        _tool("call_a", "alpha", '"x":true}', source_index=0),
-        _tool("call_b", "beta", '"y":false}', source_index=1),
-        _tool_done("call_a", ""),
-        _tool_done("call_b", ""),
-    ], response_id="resp_m_tool2")
+    _, events = await _run_pipeline(
+        store,
+        [
+            _tool("call_a", "alpha", '{"n":1,', source_index=0),
+            _tool("call_b", "beta", '{"m":2,', source_index=1),
+            _tool("call_a", "alpha", '"x":true}', source_index=0),
+            _tool("call_b", "beta", '"y":false}', source_index=1),
+            _tool_done("call_a", ""),
+            _tool_done("call_b", ""),
+        ],
+        response_id="resp_m_tool2",
+    )
     return events
 
 
 async def _tool_failure_next_turn_upstream(store):
     """工具失败后下一轮：第一轮工具调用以失败收尾，第二轮新会话仍正常。"""
-    _, first = await _run_pipeline(store, [
-        _tool("call_fail", "shell", '{"cmd":"rm"}', source_index=0),
-        _tool_done("call_fail", ""),
-    ], response_id="resp_m_fail")
-    _, second = await _run_pipeline(store, [
-        {"type": "text", "delta": "重试成功"},
-        {"type": "finish"},
-    ], response_id="resp_m_next")
+    _, first = await _run_pipeline(
+        store,
+        [
+            _tool("call_fail", "shell", '{"cmd":"rm"}', source_index=0),
+            _tool_done("call_fail", ""),
+        ],
+        response_id="resp_m_fail",
+    )
+    _, second = await _run_pipeline(
+        store,
+        [
+            {"type": "text", "delta": "重试成功"},
+            {"type": "finish"},
+        ],
+        response_id="resp_m_next",
+    )
     return first, second
 
 
@@ -256,7 +273,9 @@ async def _first_token_late_120s_upstream():
             pass
 
     pipeline = ResponsePipeline(
-        "resp_m_120", workspace_id="t1", store=None,
+        "resp_m_120",
+        workspace_id="t1",
+        store=None,
         config=PipelineConfig(heartbeat_seconds=15),
     )
     gen = pipeline.run(SilentAfterNothing(), clock=clock, sleep=sleeper)
@@ -274,10 +293,14 @@ async def _first_token_late_120s_upstream():
 
 
 async def _midstream_disconnect_upstream(store):
-    _, events = await _run_pipeline(store, [
-        {"type": "text", "delta": "hel"},
-        {"type": "text", "delta": "lo"},
-    ], response_id="resp_m_disc")  # 上游在正常结束前断流
+    _, events = await _run_pipeline(
+        store,
+        [
+            {"type": "text", "delta": "hel"},
+            {"type": "text", "delta": "lo"},
+        ],
+        response_id="resp_m_disc",
+    )  # 上游在正常结束前断流
     return events
 
 
@@ -348,8 +371,7 @@ def _assert_anthropic(events):
 def _assert_single_tool(events):
     done = _collect(events, "response.function_call_arguments.done")
     assert done and json.loads(done[0]["arguments"]) == {"q": "北京"}
-    fc = [d for d in _collect(events, "response.output_item.done")
-          if d["item"]["type"] == "function_call"]
+    fc = [d for d in _collect(events, "response.output_item.done") if d["item"]["type"] == "function_call"]
     assert fc and fc[0]["item"]["status"] == "completed"
 
 
@@ -362,8 +384,7 @@ def _assert_parallel_tool(events):
 def _assert_tool_failure_next_turn(result):
     first, second = result
     # 第一轮：工具调用失败（参数未补齐 -> incomplete 安全收尾）。
-    fc = [d for d in _collect(first, "response.output_item.done")
-          if d["item"]["type"] == "function_call"]
+    fc = [d for d in _collect(first, "response.output_item.done") if d["item"]["type"] == "function_call"]
     assert fc, "expected a function_call in the failed turn"
     assert fc[0]["item"]["status"] in ("completed", "incomplete")
     # 第二轮（工具失败后的下一轮）：正常完成、无残留。
@@ -398,12 +419,9 @@ def _assert_client_cancel(result):
 
 
 MATRIX: list[tuple[str, str, str, str, object]] = [
-    ("01", "codex_deepseek_reasoning", "Codex CLI × DeepSeek reasoning model",
-     "reasoning", "reasoning"),
-    ("02", "codex_openai_non_reasoning", "Codex CLI × OpenAI-compatible non-reasoning model",
-     "openai", "openai"),
-    ("03", "codex_anthropic", "Codex CLI × Anthropic upstream",
-     "anthropic", "anthropic"),
+    ("01", "codex_deepseek_reasoning", "Codex CLI × DeepSeek reasoning model", "reasoning", "reasoning"),
+    ("02", "codex_openai_non_reasoning", "Codex CLI × OpenAI-compatible non-reasoning model", "openai", "openai"),
+    ("03", "codex_anthropic", "Codex CLI × Anthropic upstream", "anthropic", "anthropic"),
     ("04", "single_tool", "单工具调用", "single", "single"),
     ("05", "parallel_tool", "并行工具调用", "parallel", "parallel"),
     ("06", "tool_failure_next_turn", "工具失败后下一轮", "failure", "failure"),
@@ -458,7 +476,8 @@ def _assert_matrix_case(assert_kind: str, result: object) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "case", MATRIX,
+    "case",
+    MATRIX,
     ids=lambda c: f"{c[0]}_{c[1]}_mock",
 )
 async def test_matrix_mock(store, case):
@@ -479,7 +498,8 @@ async def test_matrix_mock(store, case):
     reason="真机套件需 ZHONGZHUAN_UPSTREAM_BASE_URL 环境变量；CI 无 key 时跳过",
 )
 @pytest.mark.parametrize(
-    "case", MATRIX,
+    "case",
+    MATRIX,
     ids=lambda c: f"{c[0]}_{c[1]}_live",
 )
 @pytest.mark.asyncio

@@ -12,16 +12,15 @@ The registry is the single source of truth for the 18 item types enumerated in
 :attr:`~.responses_models.ItemType`.  It imports only from
 :mod:`.responses_models` and :mod:`.responses_errors`.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from .responses_models import (
     ItemType,
     NormalizedItem,
-    canonical_json,
-    coerce_enum,
     enum_values,
 )
 
@@ -39,21 +38,23 @@ MESSAGE_ITEM_TYPES: frozenset[str] = frozenset({"message"})
 REDACTED_ITEM_TYPES: frozenset[str] = frozenset({"reasoning"})
 
 #: Item types that are output-only (never valid as inputs).
-OUTPUT_ONLY_ITEM_TYPES: frozenset[str] = frozenset({
-    "output_text",
-    "reasoning",
-    "function_call",
-    "file_search_call",
-    "web_search_call",
-    "computer_call",
-    "code_interpreter_call",
-    "image_generation_call",
-    "local_shell_call",
-    "mcp_call",
-    "mcp_list_tools",
-    "mcp_approval_request",
-    "mcp_approval_response",
-})
+OUTPUT_ONLY_ITEM_TYPES: frozenset[str] = frozenset(
+    {
+        "output_text",
+        "reasoning",
+        "function_call",
+        "file_search_call",
+        "web_search_call",
+        "computer_call",
+        "code_interpreter_call",
+        "image_generation_call",
+        "local_shell_call",
+        "mcp_call",
+        "mcp_list_tools",
+        "mcp_approval_request",
+        "mcp_approval_response",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -201,10 +202,7 @@ def redact_item(raw: Mapping[str, Any]) -> dict[str, Any]:
         # Keep structural summary metadata, drop the text bodies.
         summary = out.get("summary")
         if isinstance(summary, list):
-            out["summary"] = [
-                {k: v for k, v in s.items() if k != "text"}
-                for s in summary if isinstance(s, dict)
-            ]
+            out["summary"] = [{k: v for k, v in s.items() if k != "text"} for s in summary if isinstance(s, dict)]
         for drop_key in ("content", "text", "encrypted_content"):
             out.pop(drop_key, None)
     return out
@@ -220,17 +218,19 @@ def parse_input_items(input_val: Any, *, start_seq: int = 0) -> list[NormalizedI
     items: list[NormalizedItem] = []
     if isinstance(input_val, str):
         text = input_val.strip() or "..."
-        items.append(NormalizedItem(
-            id="",
-            seq=start_seq,
-            item_type="message",
-            role="user",
-            payload={
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": text}],
-            },
-        ))
+        items.append(
+            NormalizedItem(
+                id="",
+                seq=start_seq,
+                item_type="message",
+                role="user",
+                payload={
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            )
+        )
         return items
 
     if not isinstance(input_val, list):

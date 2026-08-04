@@ -1,4 +1,5 @@
 """UpstreamClient tests."""
+
 import pytest
 import pytest_asyncio
 from aiohttp import web
@@ -29,7 +30,8 @@ async def test_request_passes_authorization(mock_server: str):
     await client.start()
     try:
         resp = await client.request(
-            "POST", "/v1/chat/completions",
+            "POST",
+            "/v1/chat/completions",
             headers={"Authorization": "Bearer sk-test", "Content-Type": "application/json"},
             content=b'{"model":"x"}',
         )

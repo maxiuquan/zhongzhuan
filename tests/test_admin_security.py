@@ -13,6 +13,7 @@
 * HTTP 层：限速命中返回 429 且带 ``Retry-After``
 * CSRF / 安全响应头的复验（标注来源）
 """
+
 from __future__ import annotations
 
 import socket

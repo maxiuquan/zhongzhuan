@@ -6,6 +6,7 @@ dependency）各断言字段。
 
 同时覆盖判据③的 `/metrics` 可被 Prometheus 抓取（R-P2-09 前半）。
 """
+
 from __future__ import annotations
 
 import re
@@ -47,10 +48,14 @@ async def _start_proxy(store=None, *, with_keys: bool = True):
     await upstream.start()
     keys = []
     if with_keys:
-        keys = [KeyHealth(
-            key_id=1, api_key="sk-test", window=SlidingWindow(60, 1000),
-            upstream_base="http://127.0.0.1:19999",
-        )]
+        keys = [
+            KeyHealth(
+                key_id=1,
+                api_key="sk-test",
+                window=SlidingWindow(60, 1000),
+                upstream_base="http://127.0.0.1:19999",
+            )
+        ]
     proxy = ProxyServer(
         upstream_clients={"http://127.0.0.1:19999": upstream},
         keys=keys,
@@ -188,6 +193,7 @@ async def test_migration_status_incomplete_returns_false():
 async def test_migration_status_complete_returns_true():
     """schema_migrations 达到注册表最大版本 → 完成。"""
     from zhongzhuan.store.migrations import MIGRATIONS
+
     top = max(m.version for m in MIGRATIONS)
     rows = [(v,) for v in (1, 3, 4, 5, 6, top)]
     ok, detail = await migration_status(_FakeStore(rows=rows))
@@ -213,8 +219,7 @@ async def test_migration_status_no_store_or_error():
 def test_find_leaks_detects_url_and_keys():
     """find_leaks 能抓到 URL / sk-key / api_key 模式。"""
     leaks = find_leaks(
-        "db at https://internal.example.com:3306/zhongzhuan "
-        "key sk-proj-AAAAAAAAAA api_key=secretvalue123"
+        "db at https://internal.example.com:3306/zhongzhuan key sk-proj-AAAAAAAAAA api_key=secretvalue123"
     )
     assert any(l.startswith("url:") for l in leaks)
     assert any(l.startswith("key:") for l in leaks)
@@ -226,9 +231,7 @@ def test_find_leaks_clean_text_empty():
 
 
 def test_sanitize_health_text_removes_url_and_keys():
-    text = sanitize_health_text(
-        "upstream https://upstream.example.com/v1 sk-ABC12345 api_key=xyzzz"
-    )
+    text = sanitize_health_text("upstream https://upstream.example.com/v1 sk-ABC12345 api_key=xyzzz")
     assert "[REDACTED]" in text
     assert find_leaks(text) == []
 
@@ -286,5 +289,6 @@ async def test_metrics_endpoint_prometheus_scrapeable(store):
     assert "# TYPE responses_requests_total counter" in body
     # 13 个指标全在（T29 保证）。
     from zhongzhuan.observability.metrics import ALL_METRICS
+
     for metric in ALL_METRICS:
         assert f"# HELP {metric.name}" in body, metric.name

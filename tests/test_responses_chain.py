@@ -20,6 +20,7 @@ Acceptance criteria, one assertion block each:
   payload has none of its text:
   :func:`test_retrieve_keeps_reasoning_placeholder_but_upstream_drops_text`.
 """
+
 from __future__ import annotations
 
 import json
@@ -78,14 +79,16 @@ def assert_standard_responses_error(status: int, body: dict) -> None:
 
 def reasoning_placeholder(item_id: str) -> dict:
     """A reasoning item as it is allowed to be persisted (metadata only)."""
-    return redact_item({
-        "id": item_id,
-        "type": "reasoning",
-        "status": "completed",
-        "summary": [{"type": "summary_text", "text": SECRET_COT}],
-        "content": [{"type": "reasoning_text", "text": SECRET_COT}],
-        "encrypted_content": SECRET_COT,
-    })
+    return redact_item(
+        {
+            "id": item_id,
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": SECRET_COT}],
+            "content": [{"type": "reasoning_text", "text": SECRET_COT}],
+            "encrypted_content": SECRET_COT,
+        }
+    )
 
 
 def assistant_message(text: str) -> dict:
@@ -131,11 +134,15 @@ async def turn(
     if instructions is not None:
         body["instructions"] = instructions
     status, created = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id=workspace_id, body=body,
+        "POST",
+        "/v1/responses",
+        workspace_id=workspace_id,
+        body=body,
     )
     if status == 200 and answer:
         await rs.update_status(
-            created["id"], "completed",
+            created["id"],
+            "completed",
             output=[reasoning_placeholder("rs_" + created["id"]), assistant_message(answer)],
         )
     return status, created
@@ -158,7 +165,9 @@ async def test_self_reference_returns_standard_error(env):
     assert resolution.items == []
 
     status, body = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1",
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
         body={"model": "gpt-4o", "input": "hi", "previous_response_id": "resp_self"},
     )
     assert_standard_responses_error(status, body)
@@ -177,7 +186,9 @@ async def test_two_node_cycle_returns_standard_error(env):
     assert resolution.visited == ["resp_a", "resp_b"]
 
     status, body = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1",
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
         body={"model": "gpt-4o", "input": "hi", "previous_response_id": "resp_a"},
     )
     assert_standard_responses_error(status, body)
@@ -196,7 +207,9 @@ async def test_three_node_cycle_returns_standard_error(env):
     assert resolution.visited == ["resp_a", "resp_b", "resp_c"]
 
     status, body = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1",
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
         body={"model": "gpt-4o", "input": "hi", "previous_response_id": "resp_a"},
     )
     assert_standard_responses_error(status, body)
@@ -209,7 +222,9 @@ async def test_chain_deeper_than_max_depth_returns_standard_error(env):
     total = DEFAULT_MAX_CHAIN_DEPTH + 1  # 65 nodes: resp_0 (root) .. resp_64
     for i in range(total):
         await seed_response(
-            rs, f"resp_{i}", previous_response_id=(f"resp_{i - 1}" if i else ""),
+            rs,
+            f"resp_{i}",
+            previous_response_id=(f"resp_{i - 1}" if i else ""),
         )
 
     ok = await resolver.resolve_chain(f"resp_{DEFAULT_MAX_CHAIN_DEPTH - 1}", "t1")
@@ -221,9 +236,10 @@ async def test_chain_deeper_than_max_depth_returns_standard_error(env):
     assert too_deep.items == []
 
     status, body = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1",
-        body={"model": "gpt-4o", "input": "hi",
-              "previous_response_id": f"resp_{total - 1}"},
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
+        body={"model": "gpt-4o", "input": "hi", "previous_response_id": f"resp_{total - 1}"},
     )
     assert_standard_responses_error(status, body)
     assert "response_chain_too_deep" in body["error"]["message"]
@@ -234,7 +250,9 @@ async def test_cross_tenant_parent_returns_standard_error(env):
     """① t2 may not chain onto a response owned by t1."""
     rs, handler, resolver = env
     _, created = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1",
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
         body={"model": "gpt-4o", "input": "tenant one"},
     )
     parent = created["id"]
@@ -245,7 +263,9 @@ async def test_cross_tenant_parent_returns_standard_error(env):
     assert foreign.items == []
 
     status, body = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t2",
+        "POST",
+        "/v1/responses",
+        workspace_id="t2",
         body={"model": "gpt-4o", "input": "hi", "previous_response_id": parent},
     )
     assert_standard_responses_error(status, body)
@@ -262,14 +282,11 @@ async def test_cross_tenant_parent_returns_standard_error(env):
 async def test_third_turn_payload_has_first_user_text_and_no_reasoning(env):
     """② turn 3 sees turn 1's user text and zero reasoning (R-P1-31 / 铁律 1)."""
     rs, handler, resolver = env
-    status1, r1 = await turn(handler, rs, text="What is the capital of France?",
-                             answer="Paris.")
+    status1, r1 = await turn(handler, rs, text="What is the capital of France?", answer="Paris.")
     assert status1 == 200
-    status2, r2 = await turn(handler, rs, text="And Germany?",
-                             previous_response_id=r1["id"], answer="Berlin.")
+    status2, r2 = await turn(handler, rs, text="And Germany?", previous_response_id=r1["id"], answer="Berlin.")
     assert status2 == 200
-    status3, r3 = await turn(handler, rs, text="And Italy?",
-                             previous_response_id=r2["id"])
+    status3, r3 = await turn(handler, rs, text="And Italy?", previous_response_id=r2["id"])
     assert status3 == 200
     assert r3["previous_response_id"] == r2["id"]
 
@@ -283,9 +300,7 @@ async def test_third_turn_payload_has_first_user_text_and_no_reasoning(env):
     # Responses-level array too -- otherwise a leak would hide behind it.
     assert all(it.get("type") != "reasoning" for it in wire_input)
     assert SECRET_COT not in json.dumps(wire_input, ensure_ascii=False)
-    upstream = convert_responses_request_to_chatcompletions(
-        {"model": "gpt-4o", "input": wire_input}
-    )
+    upstream = convert_responses_request_to_chatcompletions({"model": "gpt-4o", "input": wire_input})
     blob = json.dumps(upstream, ensure_ascii=False)
 
     # First turn survived, in chronological order, together with its answer.
@@ -312,13 +327,12 @@ async def test_third_turn_payload_has_first_user_text_and_no_reasoning(env):
 async def test_instructions_are_not_inherited(env):
     """③ a child never picks up its parent's ``instructions`` (R-P1-31)."""
     rs, handler, resolver = env
-    _, parent = await turn(handler, rs, text="ahoy",
-                           instructions="You are a pirate. Always say ARRR.",
-                           answer="ARRR.")
+    _, parent = await turn(handler, rs, text="ahoy", instructions="You are a pirate. Always say ARRR.", answer="ARRR.")
     status, child = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1",
-        body={"model": "gpt-4o", "input": "hello",
-              "previous_response_id": parent["id"]},
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
+        body={"model": "gpt-4o", "input": "hello", "previous_response_id": parent["id"]},
     )
     assert status == 200
     assert child["instructions"] is None
@@ -331,9 +345,9 @@ async def test_instructions_are_not_inherited(env):
     assert "You are a pirate" not in blob
     assert not any(m.get("role") == "system" for m in upstream["messages"])
     # The parent's own instructions are still readable on the parent itself.
-    assert (await rs.get_response(parent["id"], workspace_id="t1")).request[
-        "instructions"
-    ].startswith("You are a pirate")
+    assert (
+        (await rs.get_response(parent["id"], workspace_id="t1")).request["instructions"].startswith("You are a pirate")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +363,9 @@ async def test_deleted_parent_returns_standard_error(env):
     assert (await resolver.resolve_chain(parent["id"], "t1")).ok
 
     del_status, _ = await handler.dispatch(
-        "DELETE", f"/v1/responses/{parent['id']}", workspace_id="t1",
+        "DELETE",
+        f"/v1/responses/{parent['id']}",
+        workspace_id="t1",
     )
     assert del_status == 200
 
@@ -359,9 +375,10 @@ async def test_deleted_parent_returns_standard_error(env):
     assert gone.items == []
 
     status, body = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1",
-        body={"model": "gpt-4o", "input": "round two",
-              "previous_response_id": parent["id"]},
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
+        body={"model": "gpt-4o", "input": "round two", "previous_response_id": parent["id"]},
     )
     assert_standard_responses_error(status, body)
 
@@ -378,7 +395,9 @@ async def test_retrieve_keeps_reasoning_placeholder_but_upstream_drops_text(env)
     _, parent = await turn(handler, rs, text="think hard", answer="42")
 
     status, retrieved = await handler.dispatch(
-        "GET", f"/v1/responses/{parent['id']}", workspace_id="t1",
+        "GET",
+        f"/v1/responses/{parent['id']}",
+        workspace_id="t1",
     )
     assert status == 200
     reasoning = [it for it in retrieved["output"] if it.get("type") == "reasoning"]
@@ -394,9 +413,7 @@ async def test_retrieve_keeps_reasoning_placeholder_but_upstream_drops_text(env)
     resolution = await resolver.resolve_chain(parent["id"], "t1")
     wire_input = build_upstream_input(resolution, "next")
     assert all(it.get("type") != "reasoning" for it in wire_input)
-    upstream = convert_responses_request_to_chatcompletions(
-        {"model": "gpt-4o", "input": wire_input}
-    )
+    upstream = convert_responses_request_to_chatcompletions({"model": "gpt-4o", "input": wire_input})
     blob = json.dumps(upstream, ensure_ascii=False)
     assert SECRET_COT not in blob
     assert "reasoning" not in blob
@@ -416,7 +433,10 @@ async def test_empty_previous_response_id_is_rejected_by_resolver(env):
     assert res.terminal_reason is None
     # An absent previous_response_id is a plain stateless create, not an error.
     status, _ = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o", "input": "hi"},
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
+        body={"model": "gpt-4o", "input": "hi"},
     )
     assert status == 200
 
@@ -427,7 +447,9 @@ async def test_tenant_ceiling_can_only_narrow_the_per_call_limits(env):
     rs, handler, _ = env
     for i in range(5):
         await seed_response(
-            rs, f"resp_{i}", previous_response_id=(f"resp_{i - 1}" if i else ""),
+            rs,
+            f"resp_{i}",
+            previous_response_id=(f"resp_{i - 1}" if i else ""),
         )
     narrow = ChainResolver(rs, max_depth=3)
     res = await narrow.resolve_chain("resp_4", "t1", max_depth=64)
@@ -441,7 +463,9 @@ async def test_handler_uses_the_injected_tenant_resolver(env):
     rs, _, _ = env
     for i in range(5):
         await seed_response(
-            rs, f"resp_{i}", previous_response_id=(f"resp_{i - 1}" if i else ""),
+            rs,
+            f"resp_{i}",
+            previous_response_id=(f"resp_{i - 1}" if i else ""),
         )
     handler = ResponsesV3Handler(rs, chain=ChainResolver(rs, max_depth=2))
 
@@ -449,7 +473,9 @@ async def test_handler_uses_the_injected_tenant_resolver(env):
     assert via_handler.terminal_reason is TerminalReason.RESPONSE_CHAIN_TOO_DEEP
 
     status, body = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1",
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
         body={"model": "gpt-4o", "input": "hi", "previous_response_id": "resp_4"},
     )
     assert_standard_responses_error(status, body)
@@ -482,15 +508,26 @@ async def test_max_tokens_budget_trips(env):
 async def test_compact_boundary_stops_the_walk(env):
     """A compacted record is the new root: nothing older is recovered."""
     rs, handler, resolver = env
-    await seed_response(rs, "resp_old", request={
-        "input": [{"type": "message", "role": "user",
-                   "content": [{"type": "input_text", "text": "ANCIENT-HISTORY"}]}],
-    })
-    await seed_response(rs, "resp_sum", previous_response_id="resp_old", request={
-        "compact_boundary": True,
-        "input": [{"type": "message", "role": "user",
-                   "content": [{"type": "input_text", "text": "SUMMARY-SO-FAR"}]}],
-    })
+    await seed_response(
+        rs,
+        "resp_old",
+        request={
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "ANCIENT-HISTORY"}]}
+            ],
+        },
+    )
+    await seed_response(
+        rs,
+        "resp_sum",
+        previous_response_id="resp_old",
+        request={
+            "compact_boundary": True,
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "SUMMARY-SO-FAR"}]}
+            ],
+        },
+    )
     res = await resolver.resolve_chain("resp_sum", "t1")
     assert res.ok and res.depth == 1
     assert res.visited == ["resp_sum"]
@@ -504,15 +541,20 @@ async def test_create_persists_input_items_with_reasoning_redacted(env):
     """铁律 1 on the write path: reasoning text never reaches the store."""
     rs, handler, _ = env
     status, created = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1",
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
         body={
             "model": "gpt-4o",
             "input": [
-                {"type": "message", "role": "user",
-                 "content": [{"type": "input_text", "text": "hello"}]},
-                {"id": "rs_1", "type": "reasoning", "status": "completed",
-                 "summary": [{"type": "summary_text", "text": SECRET_COT}],
-                 "encrypted_content": SECRET_COT},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                {
+                    "id": "rs_1",
+                    "type": "reasoning",
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": SECRET_COT}],
+                    "encrypted_content": SECRET_COT,
+                },
             ],
         },
     )

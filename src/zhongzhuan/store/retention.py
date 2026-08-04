@@ -125,9 +125,7 @@ async def _delete_batched(
     """
     deleted = 0
     while True:
-        count_row = await store.fetchone(
-            f"SELECT COUNT(*) FROM {table} WHERE {where}", params
-        )
+        count_row = await store.fetchone(f"SELECT COUNT(*) FROM {table} WHERE {where}", params)
         remaining = count_row[0] if count_row else 0
         if remaining <= 0:
             break
@@ -241,7 +239,12 @@ async def run_full_retention(
         ("response_state_chain", ("response_id",)),
     ):
         deleted[table] = await _delete_batched(
-            store, table, cols, orphan, (), batch_size=batch_size,
+            store,
+            table,
+            cols,
+            orphan,
+            (),
+            batch_size=batch_size,
         )
 
     # response_events: 7d from the event timestamp.
@@ -283,8 +286,7 @@ async def run_full_retention(
             store,
             "background_jobs",
             ("task_id",),
-            f"status IN ({terminal}) AND "
-            f"((expires_at > 0 AND expires_at <= ?) OR created_at < ?)",
+            f"status IN ({terminal}) AND ((expires_at > 0 AND expires_at <= ?) OR created_at < ?)",
             (ts, ts - bg_secs),
             batch_size=batch_size,
         )
@@ -396,9 +398,7 @@ async def early_reclaim_if_needed(
     Returns:
         Per-table deleted counts; an empty dict when usage is under the limit.
     """
-    ratio = await check_disk_watermark(
-        db_path, soft_limit_gb=soft_limit_gb, soft_limit_bytes=soft_limit_bytes
-    )
+    ratio = await check_disk_watermark(db_path, soft_limit_gb=soft_limit_gb, soft_limit_bytes=soft_limit_bytes)
     if ratio <= 1.0:
         return {}
     factor = 1.0 / ratio
@@ -459,8 +459,7 @@ class RetentionScheduler:
         self._stop_event.clear()
         self._task = asyncio.create_task(self._run(), name="retention-cleanup")
         logger.info(
-            f"retention scheduler started: request_logs TTL={self.retention_days}d "
-            f"interval={self.interval_seconds}s"
+            f"retention scheduler started: request_logs TTL={self.retention_days}d interval={self.interval_seconds}s"
         )
 
     async def stop(self) -> None:
@@ -479,9 +478,7 @@ class RetentionScheduler:
         limits = self.limits if self.limits is not None else DEFAULT_RETENTION_LIMITS
         if limits.request_logs_days == self.retention_days:
             return limits
-        return RetentionLimits(
-            **{**asdict(limits), "request_logs_days": self.retention_days}
-        )
+        return RetentionLimits(**{**asdict(limits), "request_logs_days": self.retention_days})
 
     async def _run(self) -> None:
         # Run once immediately, then every ``interval_seconds``.
@@ -504,7 +501,9 @@ class RetentionScheduler:
     async def _one_pass(self) -> int:
         limits = self._effective_limits()
         report = await run_full_retention(
-            self.store, limits, batch_size=self.batch_size,
+            self.store,
+            limits,
+            batch_size=self.batch_size,
         )
         if self.db_path:
             extra = await early_reclaim_if_needed(

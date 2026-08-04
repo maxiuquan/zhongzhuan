@@ -23,11 +23,11 @@ This module imports only from :mod:`.responses_models` so it stays free of
 cycles and can be reused by the stream parser, the turn accumulator and the
 v3 handlers.
 """
+
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from .responses_models import canonical_json, make_synthetic_call_id
 

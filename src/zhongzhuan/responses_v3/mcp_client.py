@@ -56,6 +56,7 @@ MCP over HTTP 就是 JSON-RPC over POST，仓库的核心依赖 ``aiohttp`` 足�
    —— :meth:`McpClient._acquire`（占位失败后轮询等待原执行者，超时与同键异体
    各自映射到独立的 failed 错误码）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -99,17 +100,19 @@ EVENT_CALL_FAILED: str = "response.mcp_call.failed"
 EVENT_APPROVAL_REQUEST: str = "response.output_item.approval_request"
 
 #: §10.3 为 MCP 列出的全部事件类型。测试用它断言「本模块不会发明事件名」。
-MCP_EVENT_TYPES: frozenset[str] = frozenset({
-    EVENT_LIST_TOOLS_IN_PROGRESS,
-    EVENT_LIST_TOOLS_COMPLETED,
-    EVENT_LIST_TOOLS_FAILED,
-    EVENT_CALL_IN_PROGRESS,
-    EVENT_CALL_ARGUMENTS_DELTA,
-    EVENT_CALL_ARGUMENTS_DONE,
-    EVENT_CALL_COMPLETED,
-    EVENT_CALL_FAILED,
-    EVENT_APPROVAL_REQUEST,
-})
+MCP_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        EVENT_LIST_TOOLS_IN_PROGRESS,
+        EVENT_LIST_TOOLS_COMPLETED,
+        EVENT_LIST_TOOLS_FAILED,
+        EVENT_CALL_IN_PROGRESS,
+        EVENT_CALL_ARGUMENTS_DELTA,
+        EVENT_CALL_ARGUMENTS_DONE,
+        EVENT_CALL_COMPLETED,
+        EVENT_CALL_FAILED,
+        EVENT_APPROVAL_REQUEST,
+    }
+)
 
 #: ``mcp_call`` 失败时写进 ``item["error"]["code"]`` 的取值。每种失败一个独立
 #: 的码 —— 全部塞成 ``mcp_error`` 会让客户端无法区分「重试有用」（超时、传输）
@@ -124,12 +127,18 @@ ERROR_IDEMPOTENCY_WAIT_TIMEOUT: str = "idempotency_wait_timeout"
 ERROR_DEPENDENCY_MISSING: str = "mcp_dependency_missing"
 
 #: 全部会出现在 ``mcp_call.failed`` 里的错误码。
-MCP_ERROR_CODES: frozenset[str] = frozenset({
-    ERROR_TIMEOUT, ERROR_TRANSPORT, ERROR_TOOL_FAILED,
-    ERROR_APPROVAL_REJECTED, ERROR_TOOL_NOT_ALLOWED,
-    ERROR_IDEMPOTENCY_CONFLICT, ERROR_IDEMPOTENCY_WAIT_TIMEOUT,
-    ERROR_DEPENDENCY_MISSING,
-})
+MCP_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        ERROR_TIMEOUT,
+        ERROR_TRANSPORT,
+        ERROR_TOOL_FAILED,
+        ERROR_APPROVAL_REJECTED,
+        ERROR_TOOL_NOT_ALLOWED,
+        ERROR_IDEMPOTENCY_CONFLICT,
+        ERROR_IDEMPOTENCY_WAIT_TIMEOUT,
+        ERROR_DEPENDENCY_MISSING,
+    }
+)
 
 #: 写进 ``tool_executions.status`` 的执行状态（审计轨迹，判据②）。
 STATUS_AWAITING_APPROVAL: str = "awaiting_approval"
@@ -225,7 +234,9 @@ class McpTransport(Protocol):
     """JSON-RPC 层传输：一次 ``request`` 对应 MCP 的一个方法调用。"""
 
     async def request(
-        self, method: str, params: Mapping[str, Any],
+        self,
+        method: str,
+        params: Mapping[str, Any],
     ) -> Mapping[str, Any]: ...
 
 
@@ -241,7 +252,9 @@ class McpSession(Protocol):
     async def list_tools(self) -> Sequence[Mapping[str, Any]]: ...
 
     async def call_tool(
-        self, name: str, arguments: Mapping[str, Any],
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
     ) -> Mapping[str, Any]: ...
 
 
@@ -271,11 +284,14 @@ class JsonRpcMcpSession:
 
     async def initialize(self) -> dict[str, Any]:
         if self._server_info is None:
-            result = await self._request("initialize", {
-                "protocolVersion": self._protocol_version,
-                "capabilities": {"tools": {}},
-                "clientInfo": {"name": self._client_name, "version": "3"},
-            })
+            result = await self._request(
+                "initialize",
+                {
+                    "protocolVersion": self._protocol_version,
+                    "capabilities": {"tools": {}},
+                    "clientInfo": {"name": self._client_name, "version": "3"},
+                },
+            )
             self._server_info = dict(result)
         return dict(self._server_info)
 
@@ -288,29 +304,34 @@ class JsonRpcMcpSession:
         return [_normalize_tool(tool) for tool in tools]
 
     async def call_tool(
-        self, name: str, arguments: Mapping[str, Any],
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
     ) -> dict[str, Any]:
         await self.initialize()
-        result = await self._request("tools/call", {
-            "name": name, "arguments": dict(arguments),
-        })
+        result = await self._request(
+            "tools/call",
+            {
+                "name": name,
+                "arguments": dict(arguments),
+            },
+        )
         return _normalize_call_result(result)
 
     async def _request(
-        self, method: str, params: Mapping[str, Any],
+        self,
+        method: str,
+        params: Mapping[str, Any],
     ) -> dict[str, Any]:
         raw = await self._transport.request(method, params)
         if not isinstance(raw, Mapping):
-            raise McpTransportError(
-                "transport returned {0}, expected a mapping".format(
-                    type(raw).__name__
-                )
-            )
+            raise McpTransportError("transport returned {0}, expected a mapping".format(type(raw).__name__))
         error = raw.get("error")
         if isinstance(error, Mapping):
             raise McpToolError(
                 "MCP server returned error for {0}: {1}".format(
-                    method, error.get("message") or error,
+                    method,
+                    error.get("message") or error,
                 )
             )
         result = raw.get("result", raw)
@@ -334,7 +355,9 @@ class SdkMcpSession:
         return [_normalize_tool(tool) for tool in (tools or ())]
 
     async def call_tool(
-        self, name: str, arguments: Mapping[str, Any],
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
     ) -> dict[str, Any]:
         raw = await self._session.call_tool(name, dict(arguments))
         return _normalize_call_result(raw)
@@ -358,8 +381,7 @@ class HttpMcpTransport:
         url: str,
         *,
         headers: Mapping[str, str] | None = None,
-        poster: Callable[..., Awaitable[tuple[int, Mapping[str, str], bytes]]]
-        | None = None,
+        poster: Callable[..., Awaitable[tuple[int, Mapping[str, str], bytes]]] | None = None,
         protocol_version: str = MCP_PROTOCOL_VERSION,
     ) -> None:
         if not url:
@@ -377,15 +399,20 @@ class HttpMcpTransport:
         return self._session_id
 
     async def request(
-        self, method: str, params: Mapping[str, Any],
+        self,
+        method: str,
+        params: Mapping[str, Any],
     ) -> dict[str, Any]:
         self._next_id += 1
-        body = json.dumps({
-            "jsonrpc": "2.0",
-            "id": self._next_id,
-            "method": method,
-            "params": dict(params),
-        }, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": self._next_id,
+                "method": method,
+                "params": dict(params),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
 
         headers = {
             "Content-Type": "application/json",
@@ -398,36 +425,32 @@ class HttpMcpTransport:
         headers.update(self._extra_headers)
 
         status, resp_headers, payload = await self._poster(
-            self._url, headers, body,
+            self._url,
+            headers,
+            body,
         )
         lowered = {str(k).lower(): str(v) for k, v in dict(resp_headers).items()}
         session_id = lowered.get("mcp-session-id", "")
         if session_id:
             self._session_id = session_id
         if status < 200 or status >= 300:
-            raise McpTransportError(
-                "MCP server returned HTTP {0} for {1}".format(status, method)
-            )
+            raise McpTransportError("MCP server returned HTTP {0} for {1}".format(status, method))
         content_type = lowered.get("content-type", "")
         if "text/event-stream" in content_type:
             return _parse_sse_jsonrpc(payload)
         try:
             decoded = json.loads(payload.decode("utf-8") or "{}")
         except ValueError as exc:
-            raise McpTransportError(
-                "MCP server returned a non-JSON body for " + method
-            ) from exc
+            raise McpTransportError("MCP server returned a non-JSON body for " + method) from exc
         if not isinstance(decoded, Mapping):
-            raise McpTransportError(
-                "MCP server returned a JSON {0}, expected an object".format(
-                    type(decoded).__name__
-                )
-            )
+            raise McpTransportError("MCP server returned a JSON {0}, expected an object".format(type(decoded).__name__))
         return dict(decoded)
 
 
 async def _aiohttp_post(
-    url: str, headers: Mapping[str, str], body: bytes,
+    url: str,
+    headers: Mapping[str, str],
+    body: bytes,
 ) -> tuple[int, dict[str, str], bytes]:
     """默认 HTTP 后端。
 
@@ -450,16 +473,14 @@ def _parse_sse_jsonrpc(payload: bytes) -> dict[str, Any]:
     for line in payload.decode("utf-8", "replace").splitlines():
         if not line.startswith("data:"):
             continue
-        chunk = line[len("data:"):].strip()
+        chunk = line[len("data:") :].strip()
         if not chunk or chunk == "[DONE]":
             continue
         try:
             decoded = json.loads(chunk)
         except ValueError:
             continue
-        if isinstance(decoded, Mapping) and (
-            "result" in decoded or "error" in decoded
-        ):
+        if isinstance(decoded, Mapping) and ("result" in decoded or "error" in decoded):
             return dict(decoded)
     raise McpTransportError("no JSON-RPC payload found in SSE response")
 
@@ -481,8 +502,7 @@ def connect(
     config: "McpServerConfig",
     *,
     transport: McpTransport | None = None,
-    poster: Callable[..., Awaitable[tuple[int, Mapping[str, str], bytes]]]
-    | None = None,
+    poster: Callable[..., Awaitable[tuple[int, Mapping[str, str], bytes]]] | None = None,
 ) -> McpSession:
     """按配置建立会话。
 
@@ -499,12 +519,15 @@ def connect(
     if config.server_url:
         return JsonRpcMcpSession(
             HttpMcpTransport(
-                config.server_url, headers=config.headers, poster=poster,
+                config.server_url,
+                headers=config.headers,
+                poster=poster,
             )
         )
     raise McpDependencyError(
         "mcp server '{0}' has no server_url; {1}".format(
-            config.server_label, DEPENDENCY_HINT,
+            config.server_label,
+            DEPENDENCY_HINT,
         )
     )
 
@@ -526,9 +549,7 @@ class InMemoryMcpServer:
     """
 
     tools: list[dict[str, Any]] = field(default_factory=list)
-    handlers: dict[str, Callable[[Mapping[str, Any]], Any]] = field(
-        default_factory=dict
-    )
+    handlers: dict[str, Callable[[Mapping[str, Any]], Any]] = field(default_factory=dict)
     #: 每次 ``request`` 前 sleep 的秒数（驱动超时用例）。
     delay_seconds: float = 0.0
     #: 非空时 ``request`` 直接抛 :class:`McpTransportError`（驱动传输故障用例）。
@@ -537,7 +558,9 @@ class InMemoryMcpServer:
     server_name: str = "fake-mcp"
 
     async def request(
-        self, method: str, params: Mapping[str, Any],
+        self,
+        method: str,
+        params: Mapping[str, Any],
     ) -> dict[str, Any]:
         self.calls.append((method, dict(params)))
         if self.delay_seconds:
@@ -545,11 +568,13 @@ class InMemoryMcpServer:
         if self.transport_error:
             raise McpTransportError(self.transport_error)
         if method == "initialize":
-            return {"result": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": self.server_name, "version": "1.0"},
-            }}
+            return {
+                "result": {
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {"listChanged": False}},
+                    "serverInfo": {"name": self.server_name, "version": "1.0"},
+                }
+            }
         if method == "tools/list":
             return {"result": {"tools": [dict(t) for t in self.tools]}}
         if method == "tools/call":
@@ -692,7 +717,7 @@ def parse_approval_request_id(request_id: str) -> tuple[str, int]:
     """
     if not request_id.startswith("mcpr_"):
         raise ValueError("not an approval_request_id: {0!r}".format(request_id))
-    body = request_id[len("mcpr_"):]
+    body = request_id[len("mcpr_") :]
     head, _, tail = body.rpartition("_")
     if not head or not tail.lstrip("-").isdigit():
         raise ValueError("malformed approval_request_id: {0!r}".format(request_id))
@@ -700,7 +725,9 @@ def parse_approval_request_id(request_id: str) -> tuple[str, int]:
 
 
 def build_list_tools_item(
-    item_id: str, server_label: str, tools: Sequence[Mapping[str, Any]],
+    item_id: str,
+    server_label: str,
+    tools: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     return {
         "id": item_id,
@@ -751,7 +778,10 @@ def build_approval_request_item(
 
 
 def build_approval_response_item(
-    request_id: str, *, approve: bool, reason: str = "",
+    request_id: str,
+    *,
+    approve: bool,
+    reason: str = "",
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
         "type": ItemType.MCP_APPROVAL_RESPONSE.value,
@@ -875,38 +905,58 @@ class McpClient:
         工具，只会换来一次必然失败的 ``tools/call``。
         """
         item_id = make_list_tools_item_id(response_id, output_index)
-        base = {"output_index": output_index, "item_id": item_id,
-                "server_label": config.server_label}
+        base = {"output_index": output_index, "item_id": item_id, "server_label": config.server_label}
         events: list[dict[str, Any]] = [
             dict(base, type=EVENT_LIST_TOOLS_IN_PROGRESS),
         ]
         try:
             tools = await asyncio.wait_for(
-                session.list_tools(), timeout=self._timeout,
+                session.list_tools(),
+                timeout=self._timeout,
             )
         except TimeoutError:
             return await self._list_tools_failed(
-                base, events, config, response_id, workspace_id, tool_seq,
+                base,
+                events,
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
                 ERROR_TIMEOUT,
                 "mcp_list_tools timed out after {0}s".format(self._timeout),
             )
         except McpError as exc:
             return await self._list_tools_failed(
-                base, events, config, response_id, workspace_id, tool_seq,
-                exc.code, str(exc),
+                base,
+                events,
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
+                exc.code,
+                str(exc),
             )
         except Exception as exc:  # noqa: BLE001 - 判据③：不静默丢弃
             return await self._list_tools_failed(
-                base, events, config, response_id, workspace_id, tool_seq,
-                ERROR_TRANSPORT, "{0}: {1}".format(type(exc).__name__, exc),
+                base,
+                events,
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
+                ERROR_TRANSPORT,
+                "{0}: {1}".format(type(exc).__name__, exc),
             )
 
         visible = [t for t in tools if config.tool_allowed(str(t.get("name") or ""))]
         item = build_list_tools_item(item_id, config.server_label, visible)
         events.append(dict(base, type=EVENT_LIST_TOOLS_COMPLETED, item=item))
         await self._audit(
-            response_id, workspace_id, tool_seq,
-            status=STATUS_COMPLETED, approval_state=APPROVAL_NONE,
+            response_id,
+            workspace_id,
+            tool_seq,
+            status=STATUS_COMPLETED,
+            approval_state=APPROVAL_NONE,
         )
         return McpOutcome(kind=OUTCOME_COMPLETED, item=item, events=tuple(events))
 
@@ -930,14 +980,19 @@ class McpClient:
             "tools": [],
             "error": error,
         }
-        events.append(dict(base, type=EVENT_LIST_TOOLS_FAILED,
-                           item=item, error=error))
+        events.append(dict(base, type=EVENT_LIST_TOOLS_FAILED, item=item, error=error))
         await self._audit(
-            response_id, workspace_id, tool_seq,
-            status=STATUS_FAILED, approval_state=APPROVAL_NONE,
+            response_id,
+            workspace_id,
+            tool_seq,
+            status=STATUS_FAILED,
+            approval_state=APPROVAL_NONE,
         )
         return McpOutcome(
-            kind=OUTCOME_FAILED, item=item, events=tuple(events), error=error,
+            kind=OUTCOME_FAILED,
+            item=item,
+            events=tuple(events),
+            error=error,
         )
 
     # -- 审批往返（偿还 T26 STUB #1 / #2）---------------------------------
@@ -962,11 +1017,17 @@ class McpClient:
         """
         request_id = make_approval_request_id(response_id, tool_seq)
         item = build_approval_request_item(
-            request_id, config.server_label, name, arguments,
+            request_id,
+            config.server_label,
+            name,
+            arguments,
         )
         await self._audit(
-            response_id, workspace_id, tool_seq,
-            status=STATUS_AWAITING_APPROVAL, approval_state=APPROVAL_PENDING,
+            response_id,
+            workspace_id,
+            tool_seq,
+            status=STATUS_AWAITING_APPROVAL,
+            approval_state=APPROVAL_PENDING,
         )
         event = {
             "type": EVENT_APPROVAL_REQUEST,
@@ -976,7 +1037,9 @@ class McpClient:
             "item": item,
         }
         return McpOutcome(
-            kind=OUTCOME_PENDING_APPROVAL, item=item, events=(event,),
+            kind=OUTCOME_PENDING_APPROVAL,
+            item=item,
+            events=(event,),
         )
 
     async def submit_approval(
@@ -1002,7 +1065,9 @@ class McpClient:
             tool_seq=tool_seq,
             approved=approved,
             item=build_approval_response_item(
-                request_id, approve=approved, reason=reason,
+                request_id,
+                approve=approved,
+                reason=reason,
             ),
             reason=reason,
         )
@@ -1034,57 +1099,94 @@ class McpClient:
         """
         args = dict(arguments or {})
         item_id = make_call_item_id(response_id, tool_seq)
-        base = {"output_index": output_index, "item_id": item_id,
-                "server_label": config.server_label, "name": name}
+        base = {"output_index": output_index, "item_id": item_id, "server_label": config.server_label, "name": name}
 
         if not config.tool_allowed(name):
             return await self._call_failed(
-                base, [], config, response_id, workspace_id, tool_seq, name, args,
+                base,
+                [],
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
+                name,
+                args,
                 ERROR_TOOL_NOT_ALLOWED,
                 "tool '{0}' is not in allowed_tools of server '{1}'".format(
-                    name, config.server_label,
+                    name,
+                    config.server_label,
                 ),
-                approval_state=APPROVAL_NONE, status=STATUS_FAILED,
+                approval_state=APPROVAL_NONE,
+                status=STATUS_FAILED,
             )
 
         needs_approval = config.approval_required(name)
         if needs_approval and approved is None:
             return await self.request_approval(
                 config,
-                response_id=response_id, tool_seq=tool_seq, name=name,
-                arguments=args, workspace_id=workspace_id,
+                response_id=response_id,
+                tool_seq=tool_seq,
+                name=name,
+                arguments=args,
+                workspace_id=workspace_id,
                 output_index=output_index,
             )
         if needs_approval and not approved:
             return await self._call_failed(
-                base, [], config, response_id, workspace_id, tool_seq, name, args,
+                base,
+                [],
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
+                name,
+                args,
                 ERROR_APPROVAL_REJECTED,
                 "approval was rejected for tool '{0}'".format(name),
-                approval_state=APPROVAL_REJECTED, status=STATUS_REJECTED,
+                approval_state=APPROVAL_REJECTED,
+                status=STATUS_REJECTED,
             )
         approval_state = APPROVAL_APPROVED if needs_approval else APPROVAL_NONE
 
         digest = request_digest(config.server_label, name, args)
         lease = await self._acquire(
             idempotency_key,
-            workspace_id=workspace_id, digest=digest,
-            response_id=response_id, tool_seq=tool_seq,
+            workspace_id=workspace_id,
+            digest=digest,
+            response_id=response_id,
+            tool_seq=tool_seq,
         )
         if lease.state == LEASE_CONFLICT:
             return await self._call_failed(
-                base, [], config, response_id, workspace_id, tool_seq, name, args,
+                base,
+                [],
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
+                name,
+                args,
                 ERROR_IDEMPOTENCY_CONFLICT,
-                "idempotency key '{0}' was already used with a different "
-                "request body".format(idempotency_key),
-                approval_state=approval_state, status=STATUS_FAILED,
+                "idempotency key '{0}' was already used with a different request body".format(idempotency_key),
+                approval_state=approval_state,
+                status=STATUS_FAILED,
             )
         if lease.state == LEASE_WAIT_TIMEOUT:
             return await self._call_failed(
-                base, [], config, response_id, workspace_id, tool_seq, name, args,
+                base,
+                [],
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
+                name,
+                args,
                 ERROR_IDEMPOTENCY_WAIT_TIMEOUT,
-                "another execution still holds idempotency key '{0}' after "
-                "{1}s".format(idempotency_key, self._wait_seconds),
-                approval_state=approval_state, status=STATUS_FAILED,
+                "another execution still holds idempotency key '{0}' after {1}s".format(
+                    idempotency_key, self._wait_seconds
+                ),
+                approval_state=approval_state,
+                status=STATUS_FAILED,
             )
 
         events: list[dict[str, Any]] = [dict(base, type=EVENT_CALL_IN_PROGRESS)]
@@ -1096,64 +1198,113 @@ class McpClient:
             # ``replayed_from`` 去 ResponseStore 取整条（输出体不在幂等表里，
             # 那张表只存 (response_id, status_code, state)）。
             item = build_call_item(
-                item_id, config.server_label, name, args,
-                status="completed", output=None,
+                item_id,
+                config.server_label,
+                name,
+                args,
+                status="completed",
+                output=None,
             )
             item["duplicate_of"] = lease.holder
             events.append(dict(base, type=EVENT_CALL_COMPLETED, item=item))
             await self._audit(
-                response_id, workspace_id, tool_seq,
-                status=STATUS_DUPLICATE, approval_state=approval_state,
+                response_id,
+                workspace_id,
+                tool_seq,
+                status=STATUS_DUPLICATE,
+                approval_state=approval_state,
                 idempotency_key=idempotency_key,
             )
             return McpOutcome(
-                kind=OUTCOME_DUPLICATE, item=item, events=tuple(events),
+                kind=OUTCOME_DUPLICATE,
+                item=item,
+                events=tuple(events),
                 replayed_from=lease.holder,
             )
 
         await self._audit(
-            response_id, workspace_id, tool_seq,
-            status=STATUS_IN_PROGRESS, approval_state=approval_state,
+            response_id,
+            workspace_id,
+            tool_seq,
+            status=STATUS_IN_PROGRESS,
+            approval_state=approval_state,
             idempotency_key=idempotency_key,
         )
 
         try:
             result = await asyncio.wait_for(
-                session.call_tool(name, args), timeout=self._timeout,
+                session.call_tool(name, args),
+                timeout=self._timeout,
             )
         except TimeoutError:
             return await self._call_failed(
-                base, events, config, response_id, workspace_id, tool_seq,
-                name, args, ERROR_TIMEOUT,
+                base,
+                events,
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
+                name,
+                args,
+                ERROR_TIMEOUT,
                 "mcp_call '{0}' timed out after {1}s".format(name, self._timeout),
-                approval_state=approval_state, status=STATUS_FAILED,
+                approval_state=approval_state,
+                status=STATUS_FAILED,
             )
         except McpError as exc:
             return await self._call_failed(
-                base, events, config, response_id, workspace_id, tool_seq,
-                name, args, exc.code, str(exc),
-                approval_state=approval_state, status=STATUS_FAILED,
+                base,
+                events,
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
+                name,
+                args,
+                exc.code,
+                str(exc),
+                approval_state=approval_state,
+                status=STATUS_FAILED,
             )
         except Exception as exc:  # noqa: BLE001 - 判据③：不静默丢弃
             return await self._call_failed(
-                base, events, config, response_id, workspace_id, tool_seq,
-                name, args, ERROR_TRANSPORT,
+                base,
+                events,
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
+                name,
+                args,
+                ERROR_TRANSPORT,
                 "{0}: {1}".format(type(exc).__name__, exc),
-                approval_state=approval_state, status=STATUS_FAILED,
+                approval_state=approval_state,
+                status=STATUS_FAILED,
             )
 
         if result.get("isError"):
             return await self._call_failed(
-                base, events, config, response_id, workspace_id, tool_seq,
-                name, args, ERROR_TOOL_FAILED,
-                _content_text(result.get("content")) or "remote tool reported "
-                "an error",
-                approval_state=approval_state, status=STATUS_FAILED,
+                base,
+                events,
+                config,
+                response_id,
+                workspace_id,
+                tool_seq,
+                name,
+                args,
+                ERROR_TOOL_FAILED,
+                _content_text(result.get("content")) or "remote tool reported an error",
+                approval_state=approval_state,
+                status=STATUS_FAILED,
             )
 
         item = build_call_item(
-            item_id, config.server_label, name, args,
-            status="completed", output=result.get("content"),
+            item_id,
+            config.server_label,
+            name,
+            args,
+            status="completed",
+            output=result.get("content"),
         )
         events.append(dict(base, type=EVENT_CALL_COMPLETED, item=item))
         if idempotency_key and self._idempotency is not None:
@@ -1166,8 +1317,11 @@ class McpClient:
                 ttl_seconds=self._result_ttl,
             )
         await self._audit(
-            response_id, workspace_id, tool_seq,
-            status=STATUS_COMPLETED, approval_state=approval_state,
+            response_id,
+            workspace_id,
+            tool_seq,
+            status=STATUS_COMPLETED,
+            approval_state=approval_state,
             idempotency_key=idempotency_key,
         )
         return McpOutcome(kind=OUTCOME_COMPLETED, item=item, events=tuple(events))
@@ -1193,30 +1347,39 @@ class McpClient:
         """判据③的唯一出口：任何失败都在这里变成 ``mcp_call.failed``。"""
         error = build_error(code, message)
         item = build_call_item(
-            base["item_id"], config.server_label, name, args,
-            status="incomplete", error=error,
+            base["item_id"],
+            config.server_label,
+            name,
+            args,
+            status="incomplete",
+            error=error,
         )
         events = list(events)
         events.append(dict(base, type=EVENT_CALL_FAILED, item=item, error=error))
         await self._audit(
-            response_id, workspace_id, tool_seq,
-            status=status, approval_state=approval_state,
+            response_id,
+            workspace_id,
+            tool_seq,
+            status=status,
+            approval_state=approval_state,
         )
         return McpOutcome(
-            kind=OUTCOME_FAILED, item=item, events=tuple(events), error=error,
+            kind=OUTCOME_FAILED,
+            item=item,
+            events=tuple(events),
+            error=error,
         )
 
     def _argument_events(
-        self, base: Mapping[str, Any], args: Mapping[str, Any],
+        self,
+        base: Mapping[str, Any],
+        args: Mapping[str, Any],
     ) -> list[dict[str, Any]]:
         """``arguments.delta`` * N -> ``arguments.done``（永远成对）。"""
         text = canonical_json(dict(args))
         size = self._chunk if self._chunk > 0 else len(text) or 1
-        chunks = [text[i:i + size] for i in range(0, len(text), size)] or [""]
-        events = [
-            dict(base, type=EVENT_CALL_ARGUMENTS_DELTA, delta=chunk)
-            for chunk in chunks
-        ]
+        chunks = [text[i : i + size] for i in range(0, len(text), size)] or [""]
+        events = [dict(base, type=EVENT_CALL_ARGUMENTS_DELTA, delta=chunk) for chunk in chunks]
         events.append(dict(base, type=EVENT_CALL_ARGUMENTS_DONE, arguments=text))
         return events
 
@@ -1299,7 +1462,9 @@ class McpClient:
 
 
 def request_digest(
-    server_label: str, name: str, arguments: Mapping[str, Any],
+    server_label: str,
+    name: str,
+    arguments: Mapping[str, Any],
 ) -> str:
     """幂等键的「同键异体」判据。
 
@@ -1307,9 +1472,13 @@ def request_digest(
     只是换了键序的同一个请求必须算作**同一体**，否则幂等保护会被 Python 的
     dict 插入序随手绕过。
     """
-    payload = canonical_json({
-        "server_label": server_label, "name": name, "arguments": dict(arguments),
-    })
+    payload = canonical_json(
+        {
+            "server_label": server_label,
+            "name": name,
+            "arguments": dict(arguments),
+        }
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -1337,9 +1506,7 @@ def _normalize_call_result(result: Any) -> dict[str, Any]:
         is_error = bool(result.get("isError") or result.get("is_error"))
     else:
         content = getattr(result, "content", None)
-        is_error = bool(
-            getattr(result, "isError", None) or getattr(result, "is_error", False)
-        )
+        is_error = bool(getattr(result, "isError", None) or getattr(result, "is_error", False))
     return {
         "isError": is_error,
         "content": [_to_plain(part) for part in (content or ())],
@@ -1368,11 +1535,7 @@ def _content_text(content: Any) -> str:
     """把 MCP ``content`` 数组里的文本块拼成一行（错误消息用）。"""
     if not isinstance(content, (list, tuple)):
         return ""
-    parts = [
-        str(block.get("text") or "")
-        for block in content
-        if isinstance(block, Mapping) and block.get("text")
-    ]
+    parts = [str(block.get("text") or "") for block in content if isinstance(block, Mapping) and block.get("text")]
     return " ".join(p for p in parts if p)
 
 

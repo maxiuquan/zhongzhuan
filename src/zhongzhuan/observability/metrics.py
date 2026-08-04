@@ -23,6 +23,7 @@ API* the pipeline / handler will call.  Criterion ⑤ ("10 类熔断原因 + 14 
 分类各触发一次，指标与 terminal_reason 可反查") is served by
 :data:`ERROR_CLASS_TO_TERMINAL_REASON` + :func:`record_stream_truncated`.
 """
+
 from __future__ import annotations
 
 import threading
@@ -62,14 +63,14 @@ class _BaseMetric:
         if unknown:
             raise KeyError(
                 "{0}: unknown label(s) {1}; expected {2}".format(
-                    self.name, sorted(unknown), list(self.labelnames),
+                    self.name,
+                    sorted(unknown),
+                    list(self.labelnames),
                 )
             )
         missing = [k for k in self.labelnames if k not in labels]
         if missing:
-            raise KeyError(
-                "{0}: missing label(s) {1}".format(self.name, sorted(missing))
-            )
+            raise KeyError("{0}: missing label(s) {1}".format(self.name, sorted(missing)))
         # Prometheus output is sorted by label name for stable snapshots.
         return tuple(labels[k] for k in sorted(self.labelnames))
 
@@ -77,10 +78,7 @@ class _BaseMetric:
     def _render_labels(labelnames: Sequence[str], values: Sequence[Any]) -> str:
         if not labelnames:
             return ""
-        pairs = [
-            '{0}="{1}"'.format(name, _escape_label(value))
-            for name, value in zip(labelnames, values)
-        ]
+        pairs = ['{0}="{1}"'.format(name, _escape_label(value)) for name, value in zip(labelnames, values)]
         return "{" + ",".join(pairs) + "}"
 
     def _header(self, kind: str) -> list[str]:
@@ -130,7 +128,8 @@ class Histogram(_BaseMetric):
     ) -> None:
         super().__init__(name, help_text, labelnames)
         self._buckets: tuple[float, ...] = (
-            tuple(float(b) for b in buckets) if buckets
+            tuple(float(b) for b in buckets)
+            if buckets
             else (0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0)
         )
         # key -> [bucket counts (len buckets+1, +Inf last), sum, count]
@@ -157,12 +156,19 @@ class Histogram(_BaseMetric):
         for key, entry in items:
             base = self.name + self._render_labels(names, key)
             for i, upper in enumerate(self._buckets):
-                lines.append("{0}_bucket{{le=\"{1}\"}} {2}".format(
-                    base, _escape_label(upper), _format_number(entry[i]),
-                ))
-            lines.append("{0}_bucket{{le=\"+Inf\"}} {1}".format(
-                base, _format_number(entry[len(self._buckets)]),
-            ))
+                lines.append(
+                    '{0}_bucket{{le="{1}"}} {2}'.format(
+                        base,
+                        _escape_label(upper),
+                        _format_number(entry[i]),
+                    )
+                )
+            lines.append(
+                '{0}_bucket{{le="+Inf"}} {1}'.format(
+                    base,
+                    _format_number(entry[len(self._buckets)]),
+                )
+            )
             lines.append("{0}_sum {1}".format(base, _format_number(entry[len(self._buckets) + 1])))
             lines.append("{0}_count {1}".format(base, _format_number(entry[len(self._buckets) + 2])))
         return lines

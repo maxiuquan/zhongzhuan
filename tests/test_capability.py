@@ -11,6 +11,7 @@
 * 判据⑤ 生产模式 + strict_capability_startup=true + 缺口 -> 拒绝启动
   -> ``test_strict_startup_rejects_on_gap``
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -100,7 +101,9 @@ def make_req(
 
 
 def router_for(
-    keys: list[KeyHealth], cfg: FakeCfg | None = None, **kwargs,
+    keys: list[KeyHealth],
+    cfg: FakeCfg | None = None,
+    **kwargs,
 ) -> CapabilityRouter:
     return CapabilityRouter(StaticRouteRegistry(keys), cfg or FakeCfg(), **kwargs)
 
@@ -171,7 +174,7 @@ def test_route_translate_anthropic_uses_messages_path():
 
 def test_native_mode_never_downgrades_to_chat():
     """upstream_mode=responses_native：即使上游没声明能力也不降级。"""
-    key = make_key(upstream_mode="native")          # 未声明 web_search
+    key = make_key(upstream_mode="native")  # 未声明 web_search
     cfg = FakeCfg(upstream_mode="responses_native")
     decision = router_for([key], cfg).route(make_req(Capability.WEB_SEARCH), [key])
 
@@ -191,7 +194,8 @@ def test_forced_native_prefers_a_fully_declaring_key():
     capable = make_key(2, capabilities={"code_interpreter"}, upstream_mode="native")
     cfg = FakeCfg(upstream_mode="responses_native")
     decision = router_for([plain, capable], cfg).route(
-        make_req(Capability.CODE_INTERPRETER), [plain, capable],
+        make_req(Capability.CODE_INTERPRETER),
+        [plain, capable],
     )
 
     assert isinstance(decision, RouteDecision)
@@ -236,7 +240,8 @@ def test_route_unsupported_capability_returns_error():
     assert result.param.startswith("tools[")
     assert result.param.endswith("].type")
     assert {g.capability for g in result.gaps} == {
-        Capability.WEB_SEARCH, Capability.COMPUTER,
+        Capability.WEB_SEARCH,
+        Capability.COMPUTER,
     }
     assert all(g.reason == REASON_NO_UPSTREAM for g in result.gaps)
 
@@ -280,7 +285,10 @@ def test_unavailable_and_unsupported_are_not_conflated():
     other = make_key(2, capabilities={"file_search"}, upstream_mode="native")
 
     down = make_key(
-        3, capabilities={"web_search"}, upstream_mode="native", available=False,
+        3,
+        capabilities={"web_search"},
+        upstream_mode="native",
+        available=False,
     )
     unavailable = router_for([down]).route(req, [down])
     unsupported = router_for([other]).route(req, [other])
@@ -361,7 +369,9 @@ def test_startup_gap_report_is_deterministically_ordered():
     gaps = router_for([make_key()], cfg).startup_gap_report()
 
     assert [g.capability.value for g in gaps] == [
-        "computer", "image_generation", "web_search",
+        "computer",
+        "image_generation",
+        "web_search",
     ]
 
 
@@ -467,17 +477,19 @@ def test_default_emulated_set_excludes_unimplemented_hosted_tools():
     router = router_for([make_key()])
 
     for cap in (
-        Capability.WEB_SEARCH, Capability.FILE_SEARCH, Capability.COMPUTER,
-        Capability.CODE_INTERPRETER, Capability.IMAGE_GENERATION,
-        Capability.REMOTE_MCP, Capability.TOOL_SEARCH,
+        Capability.WEB_SEARCH,
+        Capability.FILE_SEARCH,
+        Capability.COMPUTER,
+        Capability.CODE_INTERPRETER,
+        Capability.IMAGE_GENERATION,
+        Capability.REMOTE_MCP,
+        Capability.TOOL_SEARCH,
     ):
         assert cap not in router.emulated_capabilities
 
 
 def test_forced_mode_property():
-    assert router_for([], FakeCfg(upstream_mode="responses_native")).forced_mode is (
-        ExecutionMode.NATIVE
-    )
+    assert router_for([], FakeCfg(upstream_mode="responses_native")).forced_mode is (ExecutionMode.NATIVE)
     assert router_for([], FakeCfg(upstream_mode="bonded")).forced_mode is None
     assert router_for([], FakeCfg()).forced_mode is None
 
@@ -501,7 +513,8 @@ def test_router_works_with_a_duck_typed_registry():
 
     key = make_key(capabilities={"web_search"}, upstream_mode="native")
     router = CapabilityRouter(
-        MinimalRegistry([key]), FakeCfg(required_capabilities=("web_search",)),
+        MinimalRegistry([key]),
+        FakeCfg(required_capabilities=("web_search",)),
     )
 
     decision = router.route(make_req(Capability.WEB_SEARCH), [key])

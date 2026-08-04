@@ -15,6 +15,7 @@ The background-jobs semantics deserve an explicit note: ``expire_stale`` owns
 statuses (completed / failed / cancelled / expired).  A queued/in_progress job
 -- even one with ``expires_at = 0`` -- can never be killed mid-flight here.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -46,8 +47,7 @@ async def _add_response(store, rid: str, *, created_at: int, expires_at: int = 0
 
 async def _add_input_item(store, rid: str, seq: int):
     await store.execute(
-        "INSERT INTO response_input_items(response_id, seq, workspace_id, item_type, role) "
-        "VALUES(?,?,?,?,?)",
+        "INSERT INTO response_input_items(response_id, seq, workspace_id, item_type, role) VALUES(?,?,?,?,?)",
         (rid, seq, "ws", "message", "user"),
     )
 
@@ -62,16 +62,14 @@ async def _add_output_item(store, rid: str, out_idx: int):
 
 async def _add_state_chain(store, rid: str):
     await store.execute(
-        "INSERT INTO response_state_chain(response_id, workspace_id, previous_response_id, depth) "
-        "VALUES(?,?,?,?)",
+        "INSERT INTO response_state_chain(response_id, workspace_id, previous_response_id, depth) VALUES(?,?,?,?)",
         (rid, "ws", "", 0),
     )
 
 
 async def _add_event(store, rid: str, seq: int, *, ts: int):
     await store.execute(
-        "INSERT INTO response_events(response_id, seq, workspace_id, event_type, data, ts) "
-        "VALUES(?,?,?,?,?,?)",
+        "INSERT INTO response_events(response_id, seq, workspace_id, event_type, data, ts) VALUES(?,?,?,?,?,?)",
         (rid, seq, "ws", "response.created", "{}", ts),
     )
 
@@ -104,8 +102,7 @@ async def _add_idem(store, key: str, *, created_at: int, expires_at: int):
 
 async def _add_log(store, rid: str, ts: int):
     await store.execute(
-        "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id) "
-        "VALUES(?,?,?,?,?)",
+        "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id) VALUES(?,?,?,?,?)",
         (ts, "gpt-4o", 200, 10, rid),
     )
 
@@ -122,8 +119,8 @@ async def _count(store, table: str, where: str = "1=1", params: tuple = ()) -> i
 
 async def test_responses_cleaned_by_30d_ttl_and_expires_at(store):
     now = Store.now()
-    await _add_response(store, "r_old", created_at=now - 31 * _DAY)             # age-based: deleted
-    await _add_response(store, "r_fresh", created_at=now - 5 * _DAY)            # kept
+    await _add_response(store, "r_old", created_at=now - 31 * _DAY)  # age-based: deleted
+    await _add_response(store, "r_fresh", created_at=now - 5 * _DAY)  # kept
     await _add_response(store, "r_deadline", created_at=now - _DAY, expires_at=now - 100)  # deadline: deleted
 
     report = await run_full_retention(store, DEFAULT_RETENTION_LIMITS, now=now)
@@ -156,8 +153,8 @@ async def test_input_output_items_and_state_chain_cascade(store):
 
 async def test_response_events_cleaned_by_7d_ttl(store):
     now = Store.now()
-    await _add_event(store, "r1", 0, ts=now - 8 * _DAY)   # deleted
-    await _add_event(store, "r2", 0, ts=now - 3 * _DAY)   # kept
+    await _add_event(store, "r1", 0, ts=now - 8 * _DAY)  # deleted
+    await _add_event(store, "r2", 0, ts=now - 3 * _DAY)  # kept
 
     report = await run_full_retention(store, DEFAULT_RETENTION_LIMITS, now=now)
 
@@ -179,7 +176,9 @@ async def test_tool_executions_cleaned_by_90d_ttl(store):
 async def test_background_jobs_terminal_only_never_sweeps_active(store):
     now = Store.now()
     await _add_bg_job(store, "bg_old_terminal", status="completed", created_at=now - 31 * _DAY)  # deleted
-    await _add_bg_job(store, "bg_active", status="queued", created_at=now - 31 * _DAY)  # KEPT (expires_at=0, never swept)
+    await _add_bg_job(
+        store, "bg_active", status="queued", created_at=now - 31 * _DAY
+    )  # KEPT (expires_at=0, never swept)
     await _add_bg_job(store, "bg_recent", status="completed", created_at=now - 5 * _DAY)  # kept
     await _add_bg_job(store, "bg_deadline", status="completed", created_at=now - _DAY, expires_at=now - 10)  # deleted
 
@@ -204,8 +203,8 @@ async def test_idempotency_records_expires_at_is_the_only_ttl(store):
 
 async def test_request_logs_cleaned_by_14d_ttl(store):
     now = Store.now()
-    await _add_log(store, "req_old", ts=now - 15 * _DAY)   # deleted
-    await _add_log(store, "req_new", ts=now - 3 * _DAY)    # kept
+    await _add_log(store, "req_old", ts=now - 15 * _DAY)  # deleted
+    await _add_log(store, "req_new", ts=now - 3 * _DAY)  # kept
 
     report = await run_full_retention(store, DEFAULT_RETENTION_LIMITS, now=now)
 
@@ -216,9 +215,15 @@ async def test_request_logs_cleaned_by_14d_ttl(store):
 async def test_full_retention_report_covers_all_tables(store):
     report = await run_full_retention(store, DEFAULT_RETENTION_LIMITS)
     expected = {
-        "responses", "response_input_items", "response_output_items",
-        "response_state_chain", "response_events", "tool_executions",
-        "background_jobs", "idempotency_records", "request_logs",
+        "responses",
+        "response_input_items",
+        "response_output_items",
+        "response_state_chain",
+        "response_events",
+        "tool_executions",
+        "background_jobs",
+        "idempotency_records",
+        "request_logs",
     }
     assert set(report) == expected
     assert all(isinstance(v, int) and v >= 0 for v in report.values())
@@ -268,8 +273,11 @@ async def test_disk_watermark_triggers_early_reclaim_and_alert(store, tmp_path):
     records, sink_id = _capture_loguru()
     try:
         report = await early_reclaim_if_needed(
-            store, fake_db, DEFAULT_RETENTION_LIMITS,
-            soft_limit_bytes=100, now=now,
+            store,
+            fake_db,
+            DEFAULT_RETENTION_LIMITS,
+            soft_limit_bytes=100,
+            now=now,
         )
     finally:
         logger.remove(sink_id)
@@ -291,8 +299,11 @@ async def test_disk_watermark_under_limit_is_noop(store, tmp_path):
     records, sink_id = _capture_loguru()
     try:
         report = await early_reclaim_if_needed(
-            store, fake_db, DEFAULT_RETENTION_LIMITS,
-            soft_limit_bytes=100, now=now,
+            store,
+            fake_db,
+            DEFAULT_RETENTION_LIMITS,
+            soft_limit_bytes=100,
+            now=now,
         )
     finally:
         logger.remove(sink_id)

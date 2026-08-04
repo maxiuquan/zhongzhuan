@@ -237,13 +237,9 @@ SQLITE_INDEXES: tuple[str, ...] = tuple(
 #: 这个坑；v004 / v006 的 MySQL 分支沿用了 SQLite 写法，是既有缺陷，不在本次
 #: 修复范围）。这里按 v001 的既定规则写裸 ``CREATE INDEX``，重复建索引由引擎的
 #: errno 1061（``ER_DUP_KEYNAME``）白名单吞掉，效果等价且语法合法。
-MYSQL_INDEXES: tuple[str, ...] = tuple(
-    f"CREATE INDEX {name} ON {target}" for name, target in _INDEX_SPECS
-)
+MYSQL_INDEXES: tuple[str, ...] = tuple(f"CREATE INDEX {name} ON {target}" for name, target in _INDEX_SPECS)
 
-SQLITE_SQL: tuple[str, ...] = (
-    SQLITE_ADD_COLUMNS + SQLITE_CREATE_TABLES + SQLITE_INDEXES
-)
+SQLITE_SQL: tuple[str, ...] = SQLITE_ADD_COLUMNS + SQLITE_CREATE_TABLES + SQLITE_INDEXES
 MYSQL_SQL: tuple[str, ...] = MYSQL_ADD_COLUMNS + MYSQL_CREATE_TABLES + MYSQL_INDEXES
 
 
@@ -309,8 +305,7 @@ async def _column_names(ex: MigrationExecutor, table: str) -> set[str]:
         rows = await ex.fetchall(f"PRAGMA table_info({table})")
         return {str(r[1]) for r in rows}
     rows = await ex.fetchall(
-        "SELECT column_name FROM information_schema.columns "
-        "WHERE table_schema = DATABASE() AND table_name = ?",
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?",
         (table,),
     )
     return {str(r[0]) for r in rows}
@@ -331,10 +326,7 @@ async def _backfill_tenant_ids(ex: MigrationExecutor) -> None:
         columns = await _column_names(ex, table)
         if "tenant_id" not in columns or "workspace_id" not in columns:
             continue
-        await ex.execute(
-            f"UPDATE {table} SET workspace_id = tenant_id "
-            "WHERE workspace_id = '' AND tenant_id <> ''"
-        )
+        await ex.execute(f"UPDATE {table} SET workspace_id = tenant_id WHERE workspace_id = '' AND tenant_id <> ''")
         logger.info(f"v007: backfilled workspace_id from tenant_id on {table}")
 
 
@@ -362,10 +354,7 @@ async def _migrate_legacy_jobs(ex: MigrationExecutor) -> None:
     target = ", ".join(new for new, _ in pairs)
     source = ", ".join(old for _, old in pairs)
     prefix = "INSERT OR IGNORE INTO" if ex.dialect == "sqlite" else "INSERT IGNORE INTO"
-    await ex.execute(
-        f"{prefix} background_jobs ({target}) "
-        f"SELECT {source} FROM {_LEGACY_JOB_TABLE}"
-    )
+    await ex.execute(f"{prefix} background_jobs ({target}) SELECT {source} FROM {_LEGACY_JOB_TABLE}")
     logger.info(
         f"v007: migrated {_LEGACY_JOB_TABLE} -> background_jobs "
         f"(columns={target}); the legacy table is now deprecated but kept"

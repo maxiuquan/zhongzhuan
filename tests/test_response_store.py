@@ -1,4 +1,5 @@
 """T16 tests: ResponseStore persistence (v004 tables, §4.2.2)."""
+
 from __future__ import annotations
 
 import pytest
@@ -23,8 +24,11 @@ async def store(tmp_path):
 async def test_create_and_get_response(store):
     rs = ResponseStore(store)
     await rs.create_response(
-        response_id="resp_1", workspace_id="t1", model="gpt-4o",
-        status="in_progress", previous_response_id="",
+        response_id="resp_1",
+        workspace_id="t1",
+        model="gpt-4o",
+        status="in_progress",
+        previous_response_id="",
         request={"model": "gpt-4o", "input": "hi"},
     )
     rec = await rs.get_response("resp_1", workspace_id="t1")
@@ -47,7 +51,9 @@ async def test_update_status_and_usage(store):
     rs = ResponseStore(store)
     await rs.create_response(response_id="resp_1", workspace_id="t1")
     await rs.update_status(
-        "resp_1", "completed", terminal_reason="normal_finish",
+        "resp_1",
+        "completed",
+        terminal_reason="normal_finish",
         usage={"prompt_tokens": 10, "completion_tokens": 5},
         output=[{"id": "msg_1", "type": "output_text"}],
     )
@@ -81,10 +87,13 @@ async def test_set_cancelled(store):
 async def test_save_and_list_input_items(store):
     rs = ResponseStore(store)
     await rs.create_response(response_id="resp_1", workspace_id="t1")
-    await rs.save_input_items("resp_1", [
-        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
-        {"type": "function_call_output", "call_id": "c1", "output": "42"},
-    ])
+    await rs.save_input_items(
+        "resp_1",
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            {"type": "function_call_output", "call_id": "c1", "output": "42"},
+        ],
+    )
     items = await rs.list_input_items("resp_1")
     assert len(items) == 2
     assert items[0]["type"] == "message"
@@ -95,10 +104,13 @@ async def test_save_and_list_input_items(store):
 async def test_save_and_list_output_items(store):
     rs = ResponseStore(store)
     await rs.create_response(response_id="resp_1", workspace_id="t1")
-    await rs.save_output_items("resp_1", [
-        {"id": "msg_1", "type": "message", "role": "assistant"},
-        {"id": "fc_1", "type": "function_call"},
-    ])
+    await rs.save_output_items(
+        "resp_1",
+        [
+            {"id": "msg_1", "type": "message", "role": "assistant"},
+            {"id": "fc_1", "type": "function_call"},
+        ],
+    )
     items = await rs.list_output_items("resp_1")
     assert len(items) == 2
     assert items[0]["type"] == "message"
@@ -152,7 +164,11 @@ async def test_tool_execution_idempotency(store):
     rs = ResponseStore(store)
     assert await rs.has_execution("idem_1") is False
     await rs.record_tool_execution(
-        execution_id="exec_1", response_id="resp_1", workspace_id="t1",
-        call_id="c1", tool_name="get_weather", idempotency_key="idem_1",
+        execution_id="exec_1",
+        response_id="resp_1",
+        workspace_id="t1",
+        call_id="c1",
+        tool_name="get_weather",
+        idempotency_key="idem_1",
     )
     assert await rs.has_execution("idem_1") is True

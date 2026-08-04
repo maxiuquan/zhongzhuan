@@ -1,4 +1,5 @@
 """E2E test: start the real proxy server with a real API key and make a request through it."""
+
 import asyncio
 import json
 import socket
@@ -38,20 +39,29 @@ async def main():
     store = Store(":memory:")
     # Apply schema
     from zhongzhuan.store.schema import SCHEMA
+
     conn = store.connect()
     conn.executescript(SCHEMA)
     # Insert a model
     from zhongzhuan.store.models import create_model
     from zhongzhuan.store.keys import create_key, ApiKey
-    model = create_model(store, type("M", (), {
-        "name": "agens",
-        "upstream_base": UPSTREAM,
-        "upstream_model": "agnes-2.0-flash",
-        "rpm_limit": 60,
-        "tpm_limit": 100000,
-        "enabled": True,
-        "weight": 1,
-    })())
+
+    model = create_model(
+        store,
+        type(
+            "M",
+            (),
+            {
+                "name": "agens",
+                "upstream_base": UPSTREAM,
+                "upstream_model": "agnes-2.0-flash",
+                "rpm_limit": 60,
+                "tpm_limit": 100000,
+                "enabled": True,
+                "weight": 1,
+            },
+        )(),
+    )
 
     # Insert a key
     k = ApiKey(id=None, model_id=model.id, label="test", key_value=API_KEY)
@@ -61,8 +71,10 @@ async def main():
     upstream = UpstreamClient(base_url=UPSTREAM, timeout=30.0)
     await upstream.start()
     health = KeyHealth(
-        key_id=k.id, api_key=API_KEY,
-        window=SlidingWindow(60, 60), rpm_limit=60,
+        key_id=k.id,
+        api_key=API_KEY,
+        window=SlidingWindow(60, 60),
+        rpm_limit=60,
         upstream_base=UPSTREAM,
         upstream_model="agnes-2.0-flash",
         model_name="agens",
@@ -88,7 +100,10 @@ async def main():
             async with sess.post(
                 f"http://127.0.0.1:{port}/v1/chat/completions",
                 headers={"Content-Type": "application/json"},
-                json={"model": "agens", "messages": [{"role": "user", "content": "Hello, please respond with a short greeting."}]},
+                json={
+                    "model": "agens",
+                    "messages": [{"role": "user", "content": "Hello, please respond with a short greeting."}],
+                },
                 timeout=30.0,
             ) as resp:
                 text = await resp.text()

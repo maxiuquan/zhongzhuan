@@ -3,6 +3,7 @@
 覆盖 R-P1-46（识别不丢弃）、R-P1-48（tool_choice）、§4-Q4 错误契约。
 判据映射见各测试 docstring。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -42,15 +43,17 @@ def test_hosted_tool_type_and_capability_counts():
     assert "tool_search" in HOSTED_TOOL_TYPES
 
     # 去重后的能力面恰好 7 个。
-    assert HOSTED_CAPABILITIES == frozenset({
-        Capability.WEB_SEARCH,
-        Capability.FILE_SEARCH,
-        Capability.COMPUTER,
-        Capability.CODE_INTERPRETER,
-        Capability.IMAGE_GENERATION,
-        Capability.REMOTE_MCP,
-        Capability.TOOL_SEARCH,
-    })
+    assert HOSTED_CAPABILITIES == frozenset(
+        {
+            Capability.WEB_SEARCH,
+            Capability.FILE_SEARCH,
+            Capability.COMPUTER,
+            Capability.CODE_INTERPRETER,
+            Capability.IMAGE_GENERATION,
+            Capability.REMOTE_MCP,
+            Capability.TOOL_SEARCH,
+        }
+    )
     assert len(HOSTED_CAPABILITIES) == 7
 
 
@@ -63,19 +66,23 @@ def test_recognize_interleaved_function_tools_uses_original_index():
     payload = {
         "tools": [
             {"type": "function", "function": {"name": "get_weather"}},
-            {"type": "web_search"},                      # -> tools[1]
+            {"type": "web_search"},  # -> tools[1]
             {"type": "function", "function": {"name": "calc"}},
-            {"type": "file_search"},                    # -> tools[3]
-            {"type": "computer_use_preview"},           # -> tools[4]
+            {"type": "file_search"},  # -> tools[3]
+            {"type": "computer_use_preview"},  # -> tools[4]
         ],
     }
     specs = HostedToolRecognizer().recognize(payload)
     # 只识别到 3 个 hosted tool，function tool 被跳过。
     assert [s.tool_type for s in specs] == [
-        "web_search", "file_search", "computer_use_preview",
+        "web_search",
+        "file_search",
+        "computer_use_preview",
     ]
     assert [s.param_path for s in specs] == [
-        "tools[1].type", "tools[3].type", "tools[4].type",
+        "tools[1].type",
+        "tools[3].type",
+        "tools[4].type",
     ]
     # 能力映射正确（含 computer 别名 -> COMPUTER）。
     assert specs[0].required_capability == Capability.WEB_SEARCH
@@ -148,30 +155,36 @@ def test_build_unsupported_tool_error_shape():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("choice", [
-    pytest.param(None, id="absent-is-ok"),
-    pytest.param("auto", id="auto"),
-    pytest.param("none", id="none"),
-    pytest.param("required", id="required"),
-    pytest.param("web_search", id="hosted-tool-name-string"),
-    pytest.param({"type": "function", "function": {"name": "foo"}}, id="function-object"),
-    pytest.param({"type": "web_search"}, id="hosted-object"),
-    pytest.param({"type": "allowed_tools", "allowed_tools": ["x"]}, id="allowed_tools"),
-])
+@pytest.mark.parametrize(
+    "choice",
+    [
+        pytest.param(None, id="absent-is-ok"),
+        pytest.param("auto", id="auto"),
+        pytest.param("none", id="none"),
+        pytest.param("required", id="required"),
+        pytest.param("web_search", id="hosted-tool-name-string"),
+        pytest.param({"type": "function", "function": {"name": "foo"}}, id="function-object"),
+        pytest.param({"type": "web_search"}, id="hosted-object"),
+        pytest.param({"type": "allowed_tools", "allowed_tools": ["x"]}, id="allowed_tools"),
+    ],
+)
 def test_validate_tool_choice_valid(choice):
     """判据③：四类合法形态都应通过（返回 None）。"""
     payload = {} if choice is None else {"tool_choice": choice}
     assert validate_tool_choice(payload) is None
 
 
-@pytest.mark.parametrize("choice", [
-    pytest.param({"type": "bogus"}, id="unknown-type"),
-    pytest.param({"type": "function"}, id="function-no-name"),
-    pytest.param({"type": ""}, id="empty-type"),
-    pytest.param(123, id="int"),
-    pytest.param("", id="empty-string"),
-    pytest.param({"foo": "bar"}, id="missing-type"),
-])
+@pytest.mark.parametrize(
+    "choice",
+    [
+        pytest.param({"type": "bogus"}, id="unknown-type"),
+        pytest.param({"type": "function"}, id="function-no-name"),
+        pytest.param({"type": ""}, id="empty-type"),
+        pytest.param(123, id="int"),
+        pytest.param("", id="empty-string"),
+        pytest.param({"foo": "bar"}, id="missing-type"),
+    ],
+)
 def test_validate_tool_choice_invalid_is_invalid_arguments_not_unsupported(choice):
     """判据③：非法 tool_choice -> 400 ``invalid_tool_arguments``，且 **不是**
 
@@ -202,19 +215,15 @@ def test_runtime_unavailable_strict_vs_compat():
     strict = build_runtime_unavailable_event(spec, strict=True, response_id="resp_1")
     assert strict["type"] == "response.incomplete"
     assert strict["response"]["status"] == "incomplete"
-    assert strict["response"]["terminal_reason"] == \
-        TerminalReason.CAPABILITY_ROUTE_UNAVAILABLE.value
-    assert strict["response"]["incomplete_details"]["reason"] == \
-        TerminalReason.CAPABILITY_ROUTE_UNAVAILABLE.value
+    assert strict["response"]["terminal_reason"] == TerminalReason.CAPABILITY_ROUTE_UNAVAILABLE.value
+    assert strict["response"]["incomplete_details"]["reason"] == TerminalReason.CAPABILITY_ROUTE_UNAVAILABLE.value
 
     compat = build_runtime_unavailable_event(spec, strict=False, response_id="resp_1")
     assert compat["type"] == "response.completed"
     assert compat["response"]["status"] == "completed"
     # 兼容模式也必须带 terminal_reason + incomplete_details（R-P1-22：这是唯一可诊断信号）。
-    assert compat["response"]["terminal_reason"] == \
-        TerminalReason.CAPABILITY_ROUTE_UNAVAILABLE.value
-    assert compat["response"]["incomplete_details"]["reason"] == \
-        TerminalReason.CAPABILITY_ROUTE_UNAVAILABLE.value
+    assert compat["response"]["terminal_reason"] == TerminalReason.CAPABILITY_ROUTE_UNAVAILABLE.value
+    assert compat["response"]["incomplete_details"]["reason"] == TerminalReason.CAPABILITY_ROUTE_UNAVAILABLE.value
     # 两种模式事实一致。
     assert strict["response"]["terminal_reason"] == compat["response"]["terminal_reason"]
 

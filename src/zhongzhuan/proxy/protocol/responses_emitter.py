@@ -21,6 +21,7 @@ This module imports only from :mod:`.responses_models` and
 :mod:`.responses_errors` and stays free of any IO -- the caller writes the
 returned ``bytes`` frames to the wire.
 """
+
 from __future__ import annotations
 
 import json
@@ -31,8 +32,6 @@ from typing import Any
 from .responses_errors import to_incomplete_details
 from .responses_models import (
     EmitterState,
-    ItemStatus,
-    ItemType,
     OutputItem,
     ResponseStatus,
     SSE_DONE_FRAME,
@@ -146,16 +145,24 @@ class ResponsesEventEmitter:
             return []
         self._transition(EmitterState.CREATED)
         frames: list[bytes] = [
-            self._frame("response.created", {
-                "type": "response.created",
-                "response": self._response_object("in_progress"),
-            }),
+            self._frame(
+                "response.created",
+                {
+                    "type": "response.created",
+                    "response": self._response_object("in_progress"),
+                },
+            ),
         ]
         self._transition(EmitterState.IN_PROGRESS)
-        frames.append(self._frame("response.in_progress", {
-            "type": "response.in_progress",
-            "response": self._response_object("in_progress"),
-        }))
+        frames.append(
+            self._frame(
+                "response.in_progress",
+                {
+                    "type": "response.in_progress",
+                    "response": self._response_object("in_progress"),
+                },
+            )
+        )
         return frames
 
     def open_item(self, item: "OutputItem") -> list[bytes]:
@@ -167,11 +174,16 @@ class ResponsesEventEmitter:
         self._transition(EmitterState.STREAMING)
         self._open_items.add(item.id)
         self.stats.items_added += 1
-        return [self._frame("response.output_item.added", {
-            "type": "response.output_item.added",
-            "output_index": item.output_index,
-            "item": self._item_wire(item, status="in_progress"),
-        })]
+        return [
+            self._frame(
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": item.output_index,
+                    "item": self._item_wire(item, status="in_progress"),
+                },
+            )
+        ]
 
     def close_item(self, item: "OutputItem", *, status: str = "completed") -> list[bytes]:
         """Emit ``response.output_item.done`` for ``item`` (idempotent)."""
@@ -185,11 +197,16 @@ class ResponsesEventEmitter:
         self._open_items.discard(item.id)
         self._done_items.add(item.id)
         self.stats.items_done += 1
-        return [self._frame("response.output_item.done", {
-            "type": "response.output_item.done",
-            "output_index": item.output_index,
-            "item": wire,
-        })]
+        return [
+            self._frame(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": item.output_index,
+                    "item": wire,
+                },
+            )
+        ]
 
     @staticmethod
     def _item_wire(item: "OutputItem", *, status: str) -> dict[str, Any]:
@@ -258,17 +275,20 @@ class ResponsesEventEmitter:
         if incomplete_details:
             response_obj["incomplete_details"] = incomplete_details
         elif terminal == ResponseStatus.INCOMPLETE and not incomplete_details:
-            response_obj["incomplete_details"] = to_incomplete_details(
-                terminal_reason or "unknown", "incomplete"
-            )
+            response_obj["incomplete_details"] = to_incomplete_details(terminal_reason or "unknown", "incomplete")
         if error:
             response_obj["error"] = error
         if terminal_reason:
             response_obj["terminal_reason"] = terminal_reason
-        frames.append(self._frame(event_name, {
-            "type": event_name,
-            "response": response_obj,
-        }))
+        frames.append(
+            self._frame(
+                event_name,
+                {
+                    "type": event_name,
+                    "response": response_obj,
+                },
+            )
+        )
         self._completed_emitted = True
         self._transition(emitter_state)
 
@@ -283,11 +303,16 @@ class ResponsesEventEmitter:
         self._done_items.add(item_id)
         self._open_items.discard(item_id)
         self.stats.items_done += 1
-        return [self._frame("response.output_item.done", {
-            "type": "response.output_item.done",
-            "output_index": 0,
-            "item": {"id": item_id, "status": "incomplete"},
-        })]
+        return [
+            self._frame(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {"id": item_id, "status": "incomplete"},
+                },
+            )
+        ]
 
     # -- heartbeat -----------------------------------------------------------
 

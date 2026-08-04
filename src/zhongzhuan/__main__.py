@@ -1,11 +1,11 @@
 """CLI entry: python -m zhongzhuan [args]"""
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import os
 import signal
-import subprocess
 import sys
 import webbrowser
 from pathlib import Path
@@ -13,7 +13,7 @@ from pathlib import Path
 import yaml
 
 from zhongzhuan import __version__
-from zhongzhuan.config import default_config, load_config, resolve_data_dir, is_admin
+from zhongzhuan.config import default_config, load_config, resolve_data_dir
 from zhongzhuan.observability import setup_logging
 from zhongzhuan.proxy import ProxyServer
 from zhongzhuan.proxy.ratelimit import KeyHealth, SlidingWindow
@@ -68,7 +68,9 @@ def make_default_config(path: Path) -> None:
                 },
                 "storage": {"db_path": "data.db", "log_dir": "logs"},
             },
-            f, allow_unicode=True, sort_keys=False,
+            f,
+            allow_unicode=True,
+            sort_keys=False,
         )
 
 
@@ -78,6 +80,7 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
     优化点4：启动时从 key_health 表恢复之前学到的 status/cooldown/限额。
     """
     from zhongzhuan.store.key_health import load_all_health
+
     saved_health = await load_all_health(store)
 
     key_rows = await list_keys(store)
@@ -91,11 +94,12 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
         model = await get_model_by_id(store, kr.model_id)
         rpm_limit = model.rpm_limit if model and model.rpm_limit > 0 else cfg.limits.default_rpm_per_key
         tpm_limit = model.tpm_limit if model and model.tpm_limit > 0 else cfg.limits.default_tpm_per_key
-        upstream_base = (model.upstream_base if model else "").replace("`", "").replace('"', '').strip()
-        upstream_model = (model.upstream_model if model else "").replace("`", "").replace('"', '').strip()
-        model_name = (model.name if model else "").replace("`", "").replace('"', '').strip()
+        upstream_base = (model.upstream_base if model else "").replace("`", "").replace('"', "").strip()
+        upstream_model = (model.upstream_model if model else "").replace("`", "").replace('"', "").strip()
+        model_name = (model.name if model else "").replace("`", "").replace('"', "").strip()
         kh = KeyHealth(
-            key_id=kr.id, api_key=plain,
+            key_id=kr.id,
+            api_key=plain,
             window=SlidingWindow(cfg.limits.per_key_window_seconds, rpm_limit),
             model_id=kr.model_id,
             rpm_limit=rpm_limit,
@@ -140,14 +144,18 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
 
 # 拉取失败时的默认免费模型列表（兜底中的兜底）
 _DEFAULT_FREE_MODELS = [
-    "glm-5.2-free", "glm-5.1-free", "kimi-k2.7-code-free",
-    "deepseek-v4-flash-free", "mimo-v2.5-free",
+    "glm-5.2-free",
+    "glm-5.1-free",
+    "kimi-k2.7-code-free",
+    "deepseek-v4-flash-free",
+    "mimo-v2.5-free",
 ]
 
 
 async def _fetch_opencode_models(cfg) -> list[str]:
     """从 OpenCode Free 拉取免费模型列表，失败时返回默认列表。"""
     import httpx
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
@@ -158,15 +166,13 @@ async def _fetch_opencode_models(cfg) -> list[str]:
             data = resp.json()
             models = data.get("data", []) if isinstance(data, dict) else data
             # 过滤 -free 后缀的模型（OpenCode Free 的免费模型约定）
-            free_ids = [
-                m.get("id", "") for m in models
-                if isinstance(m, dict) and m.get("id", "").endswith("-free")
-            ]
+            free_ids = [m.get("id", "") for m in models if isinstance(m, dict) and m.get("id", "").endswith("-free")]
             if free_ids:
                 return free_ids
             return _DEFAULT_FREE_MODELS
     except Exception as e:
         from loguru import logger
+
         logger.warning(f"fetch opencode models failed: {e}, using defaults")
         return _DEFAULT_FREE_MODELS
 
@@ -181,6 +187,7 @@ async def _sync_fallback_models(store, cfg, model_ids: list[str]) -> list[int]:
     """
     from zhongzhuan.store.models import Model, get_model, create_model, update_model, list_models
     from zhongzhuan.store.keys import ApiKey, list_keys, create_key
+
     prefix = cfg.fallback.model_prefix
     upserted_ids: list[int] = []
     for mid in model_ids:
@@ -212,11 +219,17 @@ async def _sync_fallback_models(store, cfg, model_ids: list[str]) -> list[int]:
         # 为兜底模型创建 api_key（若该模型下还没有 key）
         existing_keys = await list_keys(store, upserted_ids[-1])
         if not existing_keys:
-            await create_key(store, ApiKey(
-                id=None, model_id=upserted_ids[-1],
-                label="OpenCode Free", key_value=cfg.fallback.api_key,
-                enabled=True, priority=0,
-            ))
+            await create_key(
+                store,
+                ApiKey(
+                    id=None,
+                    model_id=upserted_ids[-1],
+                    label="OpenCode Free",
+                    key_value=cfg.fallback.api_key,
+                    enabled=True,
+                    priority=0,
+                ),
+            )
     # 禁用上游已消失的兜底模型（不删除，保留分组配置）
     all_models = await list_models(store)
     valid_names = {f"{prefix}{mid}" for mid in model_ids}
@@ -229,8 +242,10 @@ async def _sync_fallback_models(store, cfg, model_ids: list[str]) -> list[int]:
 
 
 async def run_foreground(
-    cfg_path: str, port_override: int | None,
-    upstream_url: str | None, key: str | None,
+    cfg_path: str,
+    port_override: int | None,
+    upstream_url: str | None,
+    key: str | None,
     as_service: bool = False,
 ) -> int:
     from aiohttp import web
@@ -250,6 +265,7 @@ async def run_foreground(
     # Request-log retention scheduler (T06 / R-P0-03): deletes rows older than
     # the configured TTL on a fixed cadence.  Defaults to 14d / 3h.
     from zhongzhuan.store.retention import RetentionScheduler
+
     retention_scheduler = RetentionScheduler(
         store,
         retention_days=int(os.getenv("ZHONGZHUAN_RETENTION_REQUEST_LOG_DAYS", "14")),
@@ -259,10 +275,12 @@ async def run_foreground(
 
     # 从 DB 读取持久化的兜底配置（后台修改的 fallback_enabled / fallback_penalty 优先于 config.yaml）
     try:
-        rows = await store.fetchall("SELECT `key`, value FROM system_config WHERE `key` IN ('fallback_enabled','fallback_penalty')")
+        rows = await store.fetchall(
+            "SELECT `key`, value FROM system_config WHERE `key` IN ('fallback_enabled','fallback_penalty')"
+        )
         for k, v in rows:
             if k == "fallback_enabled":
-                cfg.fallback.enabled = (v == "1")
+                cfg.fallback.enabled = v == "1"
             elif k == "fallback_penalty":
                 cfg.fallback.fallback_penalty = max(0.01, min(1.0, float(v)))
         logger.info(f"fallback config: enabled={cfg.fallback.enabled}, penalty={cfg.fallback.fallback_penalty}")
@@ -271,17 +289,19 @@ async def run_foreground(
 
     # Initialize crypto with store (for AES key in TiDB system_config)
     from zhongzhuan.crypto import init as crypto_init
+
     async def _get_config(key_name: str) -> str | None:
-        row = await store.fetchone(
-            "SELECT value FROM system_config WHERE `key`=?", (key_name,)
-        )
+        row = await store.fetchone("SELECT value FROM system_config WHERE `key`=?", (key_name,))
         return row[0] if row else None
+
     await crypto_init(data_dir, store_get_key=_get_config)
 
     # Create default admin user if auth is enabled and no admin exists
     from zhongzhuan.admin.auth import auth_enabled
+
     if auth_enabled():
         from zhongzhuan.store.admin_users import admin_exists, create_admin
+
         if not await admin_exists(store):
             admin_user = os.getenv("ZHONGZHUAN_ADMIN_USER", "admin")
             admin_pass = os.getenv("ZHONGZHUAN_ADMIN_PASSWORD", "")
@@ -293,8 +313,10 @@ async def run_foreground(
 
     # Create default access token if proxy auth is enabled and no tokens exist
     from zhongzhuan.proxy.auth import proxy_auth_enabled
+
     if proxy_auth_enabled():
         from zhongzhuan.store.access_tokens import token_count, create_token as create_access_token
+
         if await token_count(store) == 0:
             token = await create_access_token(store, "default")
             logger.info(f"自动生成访问令牌: {token.token}")
@@ -317,25 +339,31 @@ async def run_foreground(
         api_key = key or os.environ.get("ZHONGZHUAN_KEY", "")
         if api_key:
             upstream_base = upstream_url or os.environ.get("ZHONGZHUAN_UPSTREAM", "https://api.openai.com")
-            keys.append(KeyHealth(
-                key_id=0, api_key=api_key,
-                window=SlidingWindow(cfg.limits.per_key_window_seconds, cfg.limits.default_rpm_per_key),
-                rpm_limit=cfg.limits.default_rpm_per_key,
-                upstream_base=upstream_base,
-                upstream_model="",
-            ))
+            keys.append(
+                KeyHealth(
+                    key_id=0,
+                    api_key=api_key,
+                    window=SlidingWindow(cfg.limits.per_key_window_seconds, cfg.limits.default_rpm_per_key),
+                    rpm_limit=cfg.limits.default_rpm_per_key,
+                    upstream_base=upstream_base,
+                    upstream_model="",
+                )
+            )
 
     # If no keys at all (fallback disabled), use a dummy to avoid crash
     if not keys:
         api_key = key or os.environ.get("ZHONGZHUAN_KEY", "dummy-key-no-auth")
         upstream_base = upstream_url or os.environ.get("ZHONGZHUAN_UPSTREAM", "https://api.openai.com")
-        keys.append(KeyHealth(
-            key_id=0, api_key=api_key,
-            window=SlidingWindow(cfg.limits.per_key_window_seconds, cfg.limits.default_rpm_per_key),
-            rpm_limit=cfg.limits.default_rpm_per_key,
-            upstream_base=upstream_base,
-            upstream_model="",
-        ))
+        keys.append(
+            KeyHealth(
+                key_id=0,
+                api_key=api_key,
+                window=SlidingWindow(cfg.limits.per_key_window_seconds, cfg.limits.default_rpm_per_key),
+                rpm_limit=cfg.limits.default_rpm_per_key,
+                upstream_base=upstream_base,
+                upstream_model="",
+            )
+        )
 
     # Build upstream clients dict: one client per unique upstream_base
     upstream_urls: set[str] = set()
@@ -346,6 +374,7 @@ async def run_foreground(
         upstream_urls.add(upstream_url or os.environ.get("ZHONGZHUAN_UPSTREAM", "https://api.openai.com"))
 
     from loguru import logger
+
     logger.info(f"loaded {len(keys)} keys, {len(upstream_urls)} upstreams")
 
     upstream_clients: dict[str, UpstreamClient] = {}
@@ -357,6 +386,7 @@ async def run_foreground(
     # Load models and groups for /v1/models（兜底模型已在 DB，自动包含）
     models_data = [{"name": m.name} for m in await list_models(store)]
     from zhongzhuan.store.groups import list_groups as list_groups_db
+
     groups_data = [
         {
             "id": g["id"],
@@ -368,9 +398,12 @@ async def run_foreground(
     ]
 
     proxy = ProxyServer(
-        upstream_clients=upstream_clients, keys=keys,
+        upstream_clients=upstream_clients,
+        keys=keys,
         proxy_timeout=cfg.limits.proxy_request_timeout,
-        models=models_data, groups=groups_data, store=store,
+        models=models_data,
+        groups=groups_data,
+        store=store,
         load_keys_fn=lambda: _load_keys_from_store(store, cfg),
         sticky_ttl=float(cfg.limits.sticky_session_ttl),
     )
@@ -379,9 +412,12 @@ async def run_foreground(
 
     # Build SSL context for proxy port (TLS for VPS / Claude Code)
     from zhongzhuan.proxy.tls import build_ssl_context
+
     ssl_ctx = build_ssl_context(cfg.server.tls)
     proxy_site = web.TCPSite(
-        proxy_runner, cfg.server.proxy.host, cfg.server.proxy.port,
+        proxy_runner,
+        cfg.server.proxy.host,
+        cfg.server.proxy.port,
         ssl_context=ssl_ctx,
     )
     await proxy_site.start()
@@ -389,6 +425,7 @@ async def run_foreground(
     logger.info(f"proxy listening on {scheme}://{cfg.server.proxy.host}:{cfg.server.proxy.port}")
 
     from zhongzhuan.admin import AdminServer  # 惰性导入：核心安装（无 [admin] extra）下 --help 等不触发
+
     admin = AdminServer(store=store, version=__version__, config=cfg)
     admin_runner = web.AppRunner(admin.app())
     await admin_runner.setup()
@@ -445,12 +482,18 @@ def handle_service_commands(args: argparse.Namespace) -> int | None:
         return None
 
     from zhongzhuan.config import load_config
+
     cfg = load_config(args.config)
     svc_name = cfg.windows_service.service_name
     display_name = cfg.windows_service.display_name
 
     from zhongzhuan.service import (
-        install, uninstall, start, stop, status, set_autostart,
+        install,
+        uninstall,
+        start,
+        stop,
+        status,
+        set_autostart,
     )
 
     if args.install:
@@ -501,12 +544,18 @@ def main() -> int:
     if args.tls_selfsign:
         from zhongzhuan.proxy.tls import selfsign
         from pathlib import Path as _P
+
         for p in (args.out_cert, args.out_key, args.out_ca):
             _P(p).parent.mkdir(parents=True, exist_ok=True)
         san_dns = args.san_dns or (["localhost"] if not args.san_ip else [])
         selfsign(
-            out_cert=args.out_cert, out_key=args.out_key, out_ca=args.out_ca,
-            cn=args.cn, san_dns=san_dns, san_ip=args.san_ip, days=args.days,
+            out_cert=args.out_cert,
+            out_key=args.out_key,
+            out_ca=args.out_ca,
+            cn=args.cn,
+            san_dns=san_dns,
+            san_ip=args.san_ip,
+            days=args.days,
         )
         print(f"[zhongzhuan] TLS certificate generated:")
         print(f"  cert: {args.out_cert}")
@@ -524,10 +573,15 @@ def main() -> int:
         make_default_config(cfg_path)
         print(f"[zhongzhuan] created default config: {cfg_path}", file=sys.stderr)
 
-    return asyncio.run(run_foreground(
-        args.config, args.port, args.upstream, args.key,
-        as_service=args.service,
-    ))
+    return asyncio.run(
+        run_foreground(
+            args.config,
+            args.port,
+            args.upstream,
+            args.key,
+            as_service=args.service,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -23,11 +23,11 @@ this bridge (门面 + 组合, §2.10), so the existing
 ``ResponsesStreamTranslator`` signature and behaviour are preserved and the old
 tests keep passing with zero modification.
 """
+
 from __future__ import annotations
 
 import json
 import time
-from typing import Any
 
 from .responses_emitter import ResponsesEventEmitter
 from .responses_models import (
@@ -36,8 +36,6 @@ from .responses_models import (
     ReasoningEventMode,
     ResponseStatus,
     make_function_call_item_id,
-    make_message_item_id,
-    make_reasoning_item_id,
 )
 from .sse_parser import SSEParser
 from .turn_accumulator import TurnAccumulator
@@ -226,22 +224,30 @@ class ResponsesTurnBridge:
             role="assistant",
         )
         frames = list(self._emitter.open_item(item))
-        frames.extend(self._emitter.delta("response.content_part.added", {
-            "item_id": msg.item_id,
-            "output_index": msg.output_index,
-            "content_index": 0,
-            "part": {"type": "output_text", "annotations": [], "logprobs": [], "text": ""},
-        }))
+        frames.extend(
+            self._emitter.delta(
+                "response.content_part.added",
+                {
+                    "item_id": msg.item_id,
+                    "output_index": msg.output_index,
+                    "content_index": 0,
+                    "part": {"type": "output_text", "annotations": [], "logprobs": [], "text": ""},
+                },
+            )
+        )
         return frames
 
     def _emit_output_text_delta(self, msg, text: str) -> list[bytes]:
-        return self._emitter.delta("response.output_text.delta", {
-            "item_id": msg.item_id,
-            "output_index": msg.output_index,
-            "content_index": 0,
-            "delta": text,
-            "logprobs": [],
-        })
+        return self._emitter.delta(
+            "response.output_text.delta",
+            {
+                "item_id": msg.item_id,
+                "output_index": msg.output_index,
+                "content_index": 0,
+                "delta": text,
+                "logprobs": [],
+            },
+        )
 
     def _close_message(self, msg) -> list[bytes]:
         if self._msg_done.get(msg.output_index):
@@ -249,27 +255,44 @@ class ResponsesTurnBridge:
         self._msg_done[msg.output_index] = True
         frames: list[bytes] = []
         full = msg.text
-        frames.extend(self._emitter.delta("response.output_text.done", {
-            "item_id": msg.item_id,
-            "output_index": msg.output_index,
-            "content_index": 0,
-            "text": full,
-            "logprobs": [],
-        }))
-        frames.extend(self._emitter.delta("response.content_part.done", {
-            "item_id": msg.item_id,
-            "output_index": msg.output_index,
-            "content_index": 0,
-            "part": {"type": "output_text", "annotations": [], "logprobs": [], "text": full},
-        }))
+        frames.extend(
+            self._emitter.delta(
+                "response.output_text.done",
+                {
+                    "item_id": msg.item_id,
+                    "output_index": msg.output_index,
+                    "content_index": 0,
+                    "text": full,
+                    "logprobs": [],
+                },
+            )
+        )
+        frames.extend(
+            self._emitter.delta(
+                "response.content_part.done",
+                {
+                    "item_id": msg.item_id,
+                    "output_index": msg.output_index,
+                    "content_index": 0,
+                    "part": {"type": "output_text", "annotations": [], "logprobs": [], "text": full},
+                },
+            )
+        )
         item = OutputItem(
             id=msg.item_id,
             output_index=msg.output_index,
             item_type=ItemType.MESSAGE,
             role="assistant",
-            extra={"content": [{
-                "type": "output_text", "annotations": [], "logprobs": [], "text": full,
-            }]},
+            extra={
+                "content": [
+                    {
+                        "type": "output_text",
+                        "annotations": [],
+                        "logprobs": [],
+                        "text": full,
+                    }
+                ]
+            },
         )
         frames.extend(self._emitter.close_item(item, status="completed"))
         return frames
@@ -299,12 +322,17 @@ class ResponsesTurnBridge:
         )
         frames.extend(self._emitter.open_item(item))
         event = _REASONING_PART_EVENT.get(self.reasoning_event_mode, "reasoning_summary_part")
-        frames.extend(self._emitter.delta(f"response.{event}.added", {
-            "item_id": rea.item_id,
-            "output_index": rea.output_index,
-            "summary_index": 0,
-            "part": {"type": "summary_text", "text": ""},
-        }))
+        frames.extend(
+            self._emitter.delta(
+                f"response.{event}.added",
+                {
+                    "item_id": rea.item_id,
+                    "output_index": rea.output_index,
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": ""},
+                },
+            )
+        )
         return frames
 
     def _emit_reasoning_delta(self, text: str) -> list[bytes]:
@@ -317,12 +345,15 @@ class ResponsesTurnBridge:
             return []
         rea.append(text)
         event = _REASONING_EVENT.get(self.reasoning_event_mode, "reasoning_summary_text")
-        return self._emitter.delta(f"response.{event}.delta", {
-            "item_id": rea.item_id,
-            "output_index": rea.output_index,
-            "summary_index": 0,
-            "delta": text,
-        })
+        return self._emitter.delta(
+            f"response.{event}.delta",
+            {
+                "item_id": rea.item_id,
+                "output_index": rea.output_index,
+                "summary_index": 0,
+                "delta": text,
+            },
+        )
 
     def _close_reasoning(self) -> list[bytes]:
         if not self._reasoning_enabled():
@@ -334,18 +365,28 @@ class ResponsesTurnBridge:
         frames: list[bytes] = []
         event = _REASONING_EVENT.get(self.reasoning_event_mode, "reasoning_summary_text")
         part_event = _REASONING_PART_EVENT.get(self.reasoning_event_mode, "reasoning_summary_part")
-        frames.extend(self._emitter.delta(f"response.{event}.done", {
-            "item_id": rea.item_id,
-            "output_index": rea.output_index,
-            "summary_index": 0,
-            "text": rea.text,
-        }))
-        frames.extend(self._emitter.delta(f"response.{part_event}.done", {
-            "item_id": rea.item_id,
-            "output_index": rea.output_index,
-            "summary_index": 0,
-            "part": {"type": "summary_text", "text": rea.text},
-        }))
+        frames.extend(
+            self._emitter.delta(
+                f"response.{event}.done",
+                {
+                    "item_id": rea.item_id,
+                    "output_index": rea.output_index,
+                    "summary_index": 0,
+                    "text": rea.text,
+                },
+            )
+        )
+        frames.extend(
+            self._emitter.delta(
+                f"response.{part_event}.done",
+                {
+                    "item_id": rea.item_id,
+                    "output_index": rea.output_index,
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": rea.text},
+                },
+            )
+        )
         item = OutputItem(
             id=rea.item_id,
             output_index=rea.output_index,
@@ -385,22 +426,27 @@ class ResponsesTurnBridge:
 
     def _open_tool_call(self, acc) -> list[bytes]:
         item_id = make_function_call_item_id(acc.call_id)
-        frames = self._emitter.open_item(OutputItem(
-            id=item_id,
-            output_index=acc.output_index,
-            item_type=ItemType.FUNCTION_CALL,
-            call_id=acc.call_id,
-            name=acc.name,
-        ))
+        frames = self._emitter.open_item(
+            OutputItem(
+                id=item_id,
+                output_index=acc.output_index,
+                item_type=ItemType.FUNCTION_CALL,
+                call_id=acc.call_id,
+                name=acc.name,
+            )
+        )
         return frames
 
     def _emit_tool_args_delta(self, acc, args: str) -> list[bytes]:
         item_id = make_function_call_item_id(acc.call_id)
-        return self._emitter.delta("response.function_call_arguments.delta", {
-            "item_id": item_id,
-            "output_index": acc.output_index,
-            "delta": args,
-        })
+        return self._emitter.delta(
+            "response.function_call_arguments.delta",
+            {
+                "item_id": item_id,
+                "output_index": acc.output_index,
+                "delta": args,
+            },
+        )
 
     def _close_tool_call(self, acc) -> list[bytes]:
         if self._tool_done.get(acc.output_index):
@@ -408,19 +454,29 @@ class ResponsesTurnBridge:
         self._tool_done[acc.output_index] = True
         item_id = make_function_call_item_id(acc.call_id)
         frames: list[bytes] = []
-        frames.extend(self._emitter.delta("response.function_call_arguments.done", {
-            "item_id": item_id,
-            "output_index": acc.output_index,
-            "arguments": acc.arguments or "{}",
-        }))
-        frames.extend(self._emitter.close_item(OutputItem(
-            id=item_id,
-            output_index=acc.output_index,
-            item_type=ItemType.FUNCTION_CALL,
-            call_id=acc.call_id,
-            name=acc.name,
-            extra={"arguments": acc.arguments or "{}"},
-        ), status="completed"))
+        frames.extend(
+            self._emitter.delta(
+                "response.function_call_arguments.done",
+                {
+                    "item_id": item_id,
+                    "output_index": acc.output_index,
+                    "arguments": acc.arguments or "{}",
+                },
+            )
+        )
+        frames.extend(
+            self._emitter.close_item(
+                OutputItem(
+                    id=item_id,
+                    output_index=acc.output_index,
+                    item_type=ItemType.FUNCTION_CALL,
+                    call_id=acc.call_id,
+                    name=acc.name,
+                    extra={"arguments": acc.arguments or "{}"},
+                ),
+                status="completed",
+            )
+        )
         return frames
 
     # -- close / terminal -------------------------------------------------

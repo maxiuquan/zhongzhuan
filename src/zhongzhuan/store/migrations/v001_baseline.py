@@ -26,6 +26,7 @@ latent startup bug at ``schema.py:269``).  The MySQL variant therefore uses a
 plain ``CREATE INDEX`` and relies on the engine tolerating errno 1061
 (``ER_DUP_KEYNAME``).
 """
+
 from __future__ import annotations
 
 from ..migration_engine import Migration

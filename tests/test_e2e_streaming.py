@@ -1,4 +1,5 @@
 """End-to-end test mimicking a real chat completion flow."""
+
 import asyncio
 import json
 import socket
@@ -23,6 +24,7 @@ def _free_port() -> int:
 
 async def make_upstream_that_returns_sse():
     """Mock upstream that returns proper SSE for streaming."""
+
     async def handler(request: web.Request) -> web.StreamResponse:
         body = await request.read()
         print(f"[upstream] recv: {body!r}")
@@ -50,14 +52,16 @@ async def make_upstream_that_returns_sse():
             await resp.prepare(request)
             await resp.write(b'data: {"id":"x","choices":[{"delta":{"content":"hello"}}]}\n\n')
             await resp.write(b'data: {"id":"x","choices":[{"delta":{"content":" world"}}]}\n\n')
-            await resp.write(b'data: [DONE]\n\n')
+            await resp.write(b"data: [DONE]\n\n")
             await resp.write_eof()
             return resp
         else:
-            return web.json_response({
-                "id": "x",
-                "choices": [{"message": {"role": "assistant", "content": "hi"}}],
-            })
+            return web.json_response(
+                {
+                    "id": "x",
+                    "choices": [{"message": {"role": "assistant", "content": "hi"}}],
+                }
+            )
 
     app = web.Application()
     app.router.add_post("/{tail:.*}", handler)
@@ -77,14 +81,19 @@ async def test_e2e_streaming():
         await upstream.start()
         keys = [
             KeyHealth(
-                key_id=1, api_key="sk-test", window=SlidingWindow(60, 1000),
-                rpm_limit=1000, upstream_base=upstream_url,
-                upstream_model="real-model-name", model_name="my-custom-name",
+                key_id=1,
+                api_key="sk-test",
+                window=SlidingWindow(60, 1000),
+                rpm_limit=1000,
+                upstream_base=upstream_url,
+                upstream_model="real-model-name",
+                model_name="my-custom-name",
             ),
         ]
         proxy = ProxyServer(
             upstream_clients={upstream_url: upstream},
-            keys=keys, proxy_timeout=10.0,
+            keys=keys,
+            proxy_timeout=10.0,
         )
         port = _free_port()
         proxy_runner = web.AppRunner(proxy.app())

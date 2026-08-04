@@ -1,4 +1,5 @@
 """Proxy HTTP server."""
+
 from __future__ import annotations
 
 from aiohttp import web
@@ -51,26 +52,36 @@ class ProxyServer:
         the_keys = list(self.keys)
         if not the_keys and self.api_key:
             from .ratelimit import KeyHealth, SlidingWindow
+
             fallback_base = next(iter(self.upstream_clients)) if self.upstream_clients else ""
-            the_keys = [KeyHealth(
-                key_id=0, api_key=self.api_key,
-                window=SlidingWindow(60, 1000),
-                upstream_base=fallback_base,
-            )]
+            the_keys = [
+                KeyHealth(
+                    key_id=0,
+                    api_key=self.api_key,
+                    window=SlidingWindow(60, 1000),
+                    upstream_base=fallback_base,
+                )
+            ]
 
         handler = make_handler(
-            upstream_clients=self.upstream_clients, keys=the_keys,
-            proxy_timeout=self.proxy_timeout, store=self.store,
-            load_keys_fn=self.load_keys_fn, groups=self.groups,
+            upstream_clients=self.upstream_clients,
+            keys=the_keys,
+            proxy_timeout=self.proxy_timeout,
+            store=self.store,
+            load_keys_fn=self.load_keys_fn,
+            groups=self.groups,
             sticky_ttl=self.sticky_ttl,
         )
         #: 供 readiness 检查 handler 的 background worker 生命周期（T33）。
         self._proxy_handler = handler
+
         # 注册后台任务钩子（优化点4+5：sticky 清理 + 健康状态快照）
         async def _on_startup(app: web.Application) -> None:
             await handler.start_background_tasks()
+
         async def _on_cleanup(app: web.Application) -> None:
             await handler.stop_background_tasks()
+
         app.on_startup.append(_on_startup)
         app.on_cleanup.append(_on_cleanup)
 
@@ -95,6 +106,7 @@ class ProxyServer:
 
     async def _health_liveness(self, _request: web.Request) -> web.Response:
         from ..observability.health import build_liveness, sanitize_health_payload
+
         return web.json_response(sanitize_health_payload(build_liveness()))
 
     async def _health_readiness(self, _request: web.Request) -> web.Response:
@@ -103,15 +115,14 @@ class ProxyServer:
             migration_status,
             sanitize_health_payload,
         )
+
         migration_ok, migration_detail = await migration_status(self.store)
         routes_ok = self._available_route_count() > 0
         routes_detail = "ok" if routes_ok else "no available upstream route"
         handler = getattr(self, "_proxy_handler", None)
         worker_ok = bool(handler is not None and getattr(handler, "_bg_running", False))
         worker_detail = (
-            "ok" if worker_ok
-            else "background worker not started" if handler is not None
-            else "no proxy handler"
+            "ok" if worker_ok else "background worker not started" if handler is not None else "no proxy handler"
         )
         payload, status = build_readiness(
             migration_ok=migration_ok,
@@ -130,29 +141,35 @@ class ProxyServer:
             migration_status,
             sanitize_health_payload,
         )
+
         deps: list[dict] = []
         mig_ok, mig_detail = await migration_status(self.store)
         deps.append(dependency_item("store", mig_ok, mig_detail))
         up_ok = bool(self.upstream_clients)
-        deps.append(dependency_item(
-            "upstream",
-            up_ok,
-            "ok" if up_ok else "no upstream clients configured",
-        ))
+        deps.append(
+            dependency_item(
+                "upstream",
+                up_ok,
+                "ok" if up_ok else "no upstream clients configured",
+            )
+        )
         # 工具执行器（T25/26）：无可注入执行器时报告 optional_unavailable。
         executor = getattr(self, "tool_executor", None)
-        deps.append(dependency_item(
-            "tool_executor",
-            executor is not None,
-            "ok" if executor is not None else "no tool executor configured",
-            optional=True,
-        ))
+        deps.append(
+            dependency_item(
+                "tool_executor",
+                executor is not None,
+                "ok" if executor is not None else "no tool executor configured",
+                optional=True,
+            )
+        )
         return web.json_response(
             sanitize_health_payload(build_dependency_status(deps)),
         )
 
     async def _metrics(self, _request: web.Request) -> web.Response:
         from ..observability.metrics import render_metrics
+
         # Prometheus 标准 content-type 带 version/charset 参数；
         # aiohttp 的 content_type 参数不接受 charset，故直接设头。
         resp = web.Response(text=render_metrics(), content_type="text/plain")
@@ -162,11 +179,13 @@ class ProxyServer:
     async def _reload(self, _request: web.Request, handler) -> web.Response:
         n = await handler.reload_keys()
         from loguru import logger
+
         logger.info(f"reloaded {n} keys from store")
         return web.json_response({"ok": True, "keys": n})
 
     async def _version(self, _request: web.Request) -> web.Response:
         from zhongzhuan import __version__
+
         return web.json_response({"name": "zhongzhuan", "version": __version__})
 
     async def _list_models(self, _request: web.Request) -> web.Response:

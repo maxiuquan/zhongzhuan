@@ -1,4 +1,5 @@
 """Admin user CRUD (async)."""
+
 from __future__ import annotations
 
 import bcrypt
@@ -18,9 +19,7 @@ async def create_admin(s: Store, username: str, password: str) -> None:
 
 async def verify_admin(s: Store, username: str, password: str) -> bool:
     """Verify admin credentials."""
-    r = await s.fetchone(
-        "SELECT password_hash FROM admin_users WHERE username=?", (username,)
-    )
+    r = await s.fetchone("SELECT password_hash FROM admin_users WHERE username=?", (username,))
     if not r:
         return False
     return bcrypt.checkpw(password.encode("utf-8"), r[0].encode("utf-8"))

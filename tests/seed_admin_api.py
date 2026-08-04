@@ -1,4 +1,5 @@
 """Seed the running proxy's DB with model + key via admin API."""
+
 import asyncio
 import os
 import sys
@@ -25,13 +26,16 @@ async def main():
                 await sess.delete(f"{base}/api/keys/{k['id']}")
 
         # Create model
-        async with sess.post(f"{base}/api/models", json={
-            "name": "agens",
-            "upstream_base": "https://apihub.agnes-ai.com/",
-            "upstream_model": "agnes-2.0-flash",
-            "rpm_limit": 60,
-            "tpm_limit": 100000,
-        }) as r:
+        async with sess.post(
+            f"{base}/api/models",
+            json={
+                "name": "agens",
+                "upstream_base": "https://apihub.agnes-ai.com/",
+                "upstream_model": "agnes-2.0-flash",
+                "rpm_limit": 60,
+                "tpm_limit": 100000,
+            },
+        ) as r:
             print(f"[seed] create model: {r.status} {await r.text()}")
 
         # Get model id
@@ -41,12 +45,15 @@ async def main():
             print(f"[seed] model_id = {model_id}")
 
         # Create key
-        async with sess.post(f"{base}/api/keys", json={
-            "model_id": model_id,
-            "label": "test-key",
-            "key_value": api_key,
-            "priority": 0,
-        }) as r:
+        async with sess.post(
+            f"{base}/api/keys",
+            json={
+                "model_id": model_id,
+                "label": "test-key",
+                "key_value": api_key,
+                "priority": 0,
+            },
+        ) as r:
             print(f"[seed] create key: {r.status} {await r.text()}")
 
 

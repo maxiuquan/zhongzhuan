@@ -11,6 +11,7 @@ R-P1-62 之后加载路径变成：
 fail-closed 安全检查（R-P2-02/04/05），违反即抛 :class:`ConfigError`，
 启动失败。开发模式保留宽松行为并输出告警。
 """
+
 from __future__ import annotations
 
 import os
@@ -106,6 +107,7 @@ class WinSvcConfig:
 @dataclass
 class FallbackConfig:
     """OpenCode Free 兜底上游（R-P2-06：显式 opt-in，默认关闭）。"""
+
     enabled: bool = False
     upstream_base: str = "https://opencode.ai"
     api_key: str = "public"  # OpenCode Free 使用硬编码 "public" 占位 token
@@ -368,15 +370,9 @@ def validate_production_ready(
             "or explicitly confirm with ZHONGZHUAN_ALLOW_INSECURE_DISABLE=true"
         )
     if not cfg.auth.jwt_secret:
-        issues.append(
-            "ZHONGZHUAN_JWT_SECRET is required in production (fail closed, "
-            "no in-process random generation)"
-        )
+        issues.append("ZHONGZHUAN_JWT_SECRET is required in production (fail closed, no in-process random generation)")
     if api_key_count is not None and api_key_count == 0:
-        issues.append(
-            "no valid API keys configured in production (fail closed, "
-            "no dummy-key-no-auth fallback)"
-        )
+        issues.append("no valid API keys configured in production (fail closed, no dummy-key-no-auth fallback)")
     if issues:
         raise ConfigError("production safety check failed: " + "; ".join(issues))
 
@@ -389,6 +385,7 @@ def _warn_no_keys_dev() -> None:
     warnings.warn(message, UserWarning, stacklevel=3)
     try:
         from loguru import logger
+
         logger.warning(f"[config] {message}")
     except Exception:  # pragma: no cover - logging must never break startup
         pass
@@ -478,6 +475,7 @@ def _warn_deprecated_proxy_timeout(value: int) -> None:
     warnings.warn(message, DeprecationWarning, stacklevel=3)
     try:
         from loguru import logger
+
         logger.warning(f"[config] {message}")
     except Exception:  # pragma: no cover - logging must never break startup
         pass

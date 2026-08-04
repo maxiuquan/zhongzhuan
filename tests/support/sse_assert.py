@@ -17,6 +17,7 @@
 
 本模块不依赖 ``zhongzhuan``，可独立使用。
 """
+
 from __future__ import annotations
 
 import json
@@ -96,9 +97,7 @@ class SseFrame:
         """把 ``data`` 解析为 JSON 对象；解析失败抛 :class:`SseLifecycleError`。"""
         obj = self.json_or_none()
         if obj is _SENTINEL:
-            raise SseLifecycleError(
-                f"frame #{self.index} data 不是合法 JSON: {self.data[:200]!r}"
-            )
+            raise SseLifecycleError(f"frame #{self.index} data 不是合法 JSON: {self.data[:200]!r}")
         return obj
 
     def json_or_none(self) -> Any:
@@ -112,10 +111,7 @@ class SseFrame:
             return _SENTINEL
 
     def __repr__(self) -> str:  # pragma: no cover - 仅用于失败信息展示
-        return (
-            f"SseFrame(#{self.index}, event={self.event!r}, "
-            f"data={self.data[:120]!r})"
-        )
+        return f"SseFrame(#{self.index}, event={self.event!r}, data={self.data[:120]!r})"
 
 
 class _Sentinel:
@@ -294,8 +290,7 @@ def _fail(report_events: Sequence[str], message: str) -> None:
     raise SseLifecycleError(f"{message}\n实际事件序列: {rendered}")
 
 
-def _assert_openai(frames: list[SseFrame], events: list[str],
-                   report: LifecycleReport, require_done: bool) -> None:
+def _assert_openai(frames: list[SseFrame], events: list[str], report: LifecycleReport, require_done: bool) -> None:
     """OpenAI Chat Completions SSE 生命周期。
 
     Chat Completions 没有显式的 ``created`` 事件，约定：
@@ -357,8 +352,7 @@ def _assert_openai(frames: list[SseFrame], events: list[str],
     report.terminal_name = "finish_reason"
 
 
-def _assert_anthropic(frames: list[SseFrame], events: list[str],
-                      report: LifecycleReport) -> None:
+def _assert_anthropic(frames: list[SseFrame], events: list[str], report: LifecycleReport) -> None:
     """Anthropic Messages SSE 生命周期。
 
     * created  = ``message_start``（有且仅一个，且是第一个非注释帧）
@@ -415,8 +409,7 @@ def _assert_anthropic(frames: list[SseFrame], events: list[str],
     report.terminal_name = "message_stop"
 
 
-def _assert_responses(frames: list[SseFrame], events: list[str],
-                      report: LifecycleReport, require_done: bool) -> None:
+def _assert_responses(frames: list[SseFrame], events: list[str], report: LifecycleReport, require_done: bool) -> None:
     """OpenAI Responses SSE 生命周期。
 
     * created  = ``response.created``（有且仅一个，且是第一个非注释帧）
@@ -431,9 +424,7 @@ def _assert_responses(frames: list[SseFrame], events: list[str],
     names = [n for n in events if n != "<comment>"]
 
     created_positions = [i for i, n in enumerate(names) if n == "response.created"]
-    terminal_positions = [
-        (i, n) for i, n in enumerate(names) if n in RESPONSES_TERMINAL_EVENTS
-    ]
+    terminal_positions = [(i, n) for i, n in enumerate(names) if n in RESPONSES_TERMINAL_EVENTS]
     done_positions = [i for i, n in enumerate(names) if n == "[DONE]"]
 
     if len(created_positions) != 1:
@@ -490,9 +481,7 @@ def assert_lifecycle(
         ValueError: ``protocol`` 不在支持列表内。
     """
     if protocol not in _SUPPORTED_PROTOCOLS:
-        raise ValueError(
-            f"不支持的 protocol={protocol!r}，可选：{_SUPPORTED_PROTOCOLS}"
-        )
+        raise ValueError(f"不支持的 protocol={protocol!r}，可选：{_SUPPORTED_PROTOCOLS}")
 
     if isinstance(events, (bytes, bytearray)):
         frames = parse_sse_bytes(bytes(events))

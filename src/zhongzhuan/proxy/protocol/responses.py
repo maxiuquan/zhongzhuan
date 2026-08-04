@@ -8,6 +8,7 @@
 流式引擎 / turn 累积 / 事件发射在 ``responses_bridge.py`` / ``turn_accumulator.py`` /
 ``responses_emitter.py``。
 """
+
 from __future__ import annotations
 
 import json
@@ -50,12 +51,10 @@ def normalize_responses_input(input_val: Any) -> list | None:
     """Responses ``input`` may be a string or an array. Returns a list, or None."""
     if isinstance(input_val, str):
         text = input_val.strip() or "..."
-        return [{"type": ITEM_MESSAGE, "role": ROLE_USER,
-                 "content": [{"type": ITEM_INPUT_TEXT, "text": text}]}]
+        return [{"type": ITEM_MESSAGE, "role": ROLE_USER, "content": [{"type": ITEM_INPUT_TEXT, "text": text}]}]
     if isinstance(input_val, list):
         if len(input_val) == 0:
-            return [{"type": ITEM_MESSAGE, "role": ROLE_USER,
-                     "content": [{"type": ITEM_INPUT_TEXT, "text": "..."}]}]
+            return [{"type": ITEM_MESSAGE, "role": ROLE_USER, "content": [{"type": ITEM_INPUT_TEXT, "text": "..."}]}]
         return input_val
     return None
 
@@ -135,11 +134,13 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
                 continue
             if current_assistant is None:
                 current_assistant = {"role": ROLE_ASSISTANT, "content": None, "tool_calls": []}
-            current_assistant["tool_calls"].append({
-                "id": item.get("call_id"),
-                "type": BLOCK_FUNCTION,
-                "function": {"name": name, "arguments": item.get("arguments")},
-            })
+            current_assistant["tool_calls"].append(
+                {
+                    "id": item.get("call_id"),
+                    "type": BLOCK_FUNCTION,
+                    "function": {"name": name, "arguments": item.get("arguments")},
+                }
+            )
 
         elif item_type == ITEM_FUNCTION_CALL_OUTPUT:
             if current_assistant is not None:
@@ -149,11 +150,13 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
                 result["messages"].extend(pending_tool_results)
                 pending_tool_results = []
             output = item.get("output")
-            result["messages"].append({
-                "role": ROLE_TOOL,
-                "tool_call_id": item.get("call_id"),
-                "content": output if isinstance(output, str) else json.dumps(output, ensure_ascii=False),
-            })
+            result["messages"].append(
+                {
+                    "role": ROLE_TOOL,
+                    "tool_call_id": item.get("call_id"),
+                    "content": output if isinstance(output, str) else json.dumps(output, ensure_ascii=False),
+                }
+            )
 
     if current_assistant is not None:
         result["messages"].append(current_assistant)
@@ -192,23 +195,27 @@ def chatcompletions_to_responses(resp: Any, model: str = "") -> Any:
     output: list[dict] = []
     content = message.get("content")
     if isinstance(content, str) and content:
-        output.append({
-            "id": f"msg_{msg_id_base}_0",
-            "type": ITEM_MESSAGE,
-            "role": ROLE_ASSISTANT,
-            "content": [{"type": ITEM_OUTPUT_TEXT, "text": content, "annotations": []}],
-            "status": "completed",
-        })
-    for tc in (message.get("tool_calls") or []):
+        output.append(
+            {
+                "id": f"msg_{msg_id_base}_0",
+                "type": ITEM_MESSAGE,
+                "role": ROLE_ASSISTANT,
+                "content": [{"type": ITEM_OUTPUT_TEXT, "text": content, "annotations": []}],
+                "status": "completed",
+            }
+        )
+    for tc in message.get("tool_calls") or []:
         fn = tc.get("function") or {}
-        output.append({
-            "id": f"fc_{tc.get('id', '')}",
-            "type": ITEM_FUNCTION_CALL,
-            "call_id": tc.get("id", ""),
-            "name": fn.get("name", ""),
-            "arguments": fn.get("arguments", "{}"),
-            "status": "completed",
-        })
+        output.append(
+            {
+                "id": f"fc_{tc.get('id', '')}",
+                "type": ITEM_FUNCTION_CALL,
+                "call_id": tc.get("id", ""),
+                "name": fn.get("name", ""),
+                "arguments": fn.get("arguments", "{}"),
+                "status": "completed",
+            }
+        )
 
     usage = resp.get("usage") or {}
     return {

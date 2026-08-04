@@ -28,6 +28,7 @@ Quota fields
 ``quota_tokens`` (-1 = unlimited), ``used_tokens``, ``model_whitelist``
 (comma separated, empty = allow all), ``expires_at`` (0 = never).
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -64,10 +65,7 @@ _HASHED_COLUMNS: str = (
 
 #: Legacy (pre-v003) column list -- kept so that stubs and not-yet-migrated
 #: databases keep working.  See :func:`get_token_by_value`.
-_LEGACY_COLUMNS: str = (
-    "id, token, label, enabled, quota_tokens, used_tokens, model_whitelist, "
-    "expires_at, created_at"
-)
+_LEGACY_COLUMNS: str = "id, token, label, enabled, quota_tokens, used_tokens, model_whitelist, expires_at, created_at"
 
 #: Minimum seconds between two ``last_used_at`` writes for the same token.
 LAST_USED_THROTTLE_SECONDS: int = 60
@@ -342,9 +340,20 @@ async def create_token(
         "created_by, revoked_at, revoked_by) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
-            prefix, digest, label, 1, quota_tokens, 0,
-            model_whitelist, expires_at, now, rotation_of, 0,
-            created_by, 0, "",
+            prefix,
+            digest,
+            label,
+            1,
+            quota_tokens,
+            0,
+            model_whitelist,
+            expires_at,
+            now,
+            rotation_of,
+            0,
+            created_by,
+            0,
+            "",
         ),
     )
     return AccessToken(
@@ -370,9 +379,7 @@ async def list_tokens(s: Store) -> list[dict]:
     be reconstructed.  ``token`` is kept as an alias of the mask so existing
     UI code keeps rendering, but it is *not* a usable credential.
     """
-    rows = await s.fetchall(
-        f"SELECT {_HASHED_COLUMNS} FROM access_tokens ORDER BY id"
-    )
+    rows = await s.fetchall(f"SELECT {_HASHED_COLUMNS} FROM access_tokens ORDER BY id")
     result: list[dict] = []
     for r in rows:
         prefix = r[1] or ""
@@ -473,9 +480,7 @@ async def touch_last_used(s: Store, token_id: int, previous: int = 0) -> None:
     if previous and now - previous < LAST_USED_THROTTLE_SECONDS:
         return
     try:
-        await s.execute(
-            "UPDATE access_tokens SET last_used_at=? WHERE id=?", (now, token_id)
-        )
+        await s.execute("UPDATE access_tokens SET last_used_at=? WHERE id=?", (now, token_id))
     except Exception as exc:
         logger.debug(f"last_used_at update skipped for token {token_id}: {exc}")
 
@@ -493,9 +498,7 @@ async def revoke_token(s: Store, token_id: int, revoked_by: str = "") -> None:
     )
 
 
-async def rotate_token(
-    s: Store, token_id: int, rotated_by: str = ""
-) -> AccessToken | None:
+async def rotate_token(s: Store, token_id: int, rotated_by: str = "") -> AccessToken | None:
     """Issue a replacement token and revoke the old one.
 
     Args:
@@ -508,8 +511,7 @@ async def rotate_token(
         *token_id* does not exist.
     """
     row = await s.fetchone(
-        "SELECT label, quota_tokens, model_whitelist, expires_at "
-        "FROM access_tokens WHERE id=?",
+        "SELECT label, quota_tokens, model_whitelist, expires_at FROM access_tokens WHERE id=?",
         (token_id,),
     )
     if not row:
@@ -558,9 +560,7 @@ async def update_token(
     if not sets:
         return
     params.append(token_id)
-    await s.execute(
-        f"UPDATE access_tokens SET {','.join(sets)} WHERE id=?", tuple(params)
-    )
+    await s.execute(f"UPDATE access_tokens SET {','.join(sets)} WHERE id=?", tuple(params))
 
 
 async def deduct_token_quota(s: Store, token_id: int, tokens: int) -> None:

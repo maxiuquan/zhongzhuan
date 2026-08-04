@@ -1,4 +1,5 @@
 """T20 tests: idempotency_records persistence (8th category, R-P1-29) + TiDB (R-P0-11 ⑥)."""
+
 from __future__ import annotations
 
 import os
@@ -51,12 +52,8 @@ async def test_tidb_idempotency_unique_constraint():
     store = await create_store(default_config())
     try:
         rs = ResponseStore(store)
-        await rs.save_idempotency_record(
-            workspace_id="t1", idempotency_key="dup", state="in_flight"
-        )
+        await rs.save_idempotency_record(workspace_id="t1", idempotency_key="dup", state="in_flight")
         with pytest.raises(Exception):
-            await rs.save_idempotency_record(
-                workspace_id="t1", idempotency_key="dup", state="in_flight"
-            )
+            await rs.save_idempotency_record(workspace_id="t1", idempotency_key="dup", state="in_flight")
     finally:
         await store.close()

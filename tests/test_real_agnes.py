@@ -1,4 +1,5 @@
 """Test against real AgnesAI to see if we get 502 there too."""
+
 import asyncio
 import json
 import os
@@ -63,14 +64,19 @@ async def call_via_proxy(api_key: str):
     await upstream.start()
     keys = [
         KeyHealth(
-            key_id=1, api_key=api_key, window=SlidingWindow(60, 1000),
-            rpm_limit=1000, upstream_base="https://apihub.agnes-ai.com/v1",
-            upstream_model="agnes-2.0-flash", model_name="agens",
+            key_id=1,
+            api_key=api_key,
+            window=SlidingWindow(60, 1000),
+            rpm_limit=1000,
+            upstream_base="https://apihub.agnes-ai.com/v1",
+            upstream_model="agnes-2.0-flash",
+            model_name="agens",
         ),
     ]
     proxy = ProxyServer(
         upstream_clients={"https://apihub.agnes-ai.com/v1": upstream},
-        keys=keys, proxy_timeout=30.0,
+        keys=keys,
+        proxy_timeout=30.0,
     )
     port = _free_port()
     runner = web.AppRunner(proxy.app())

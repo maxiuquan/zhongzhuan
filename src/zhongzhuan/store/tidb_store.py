@@ -1,4 +1,5 @@
 """TiDB async store implementation using aiomysql."""
+
 from __future__ import annotations
 
 import aiomysql
@@ -28,6 +29,7 @@ class TiDBStore(Store):
         ssl_ctx = None
         if ssl:
             import ssl as _ssl
+
             ssl_ctx = _ssl.create_default_context()
 
         pool = await aiomysql.create_pool(
@@ -53,19 +55,19 @@ class TiDBStore(Store):
     async def execute(self, sql: str, params: tuple | None = None) -> int:
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql.replace('?', '%s'), params or ())
+                await cur.execute(sql.replace("?", "%s"), params or ())
                 return cur.lastrowid or 0
 
     async def fetchone(self, sql: str, params: tuple | None = None) -> tuple | None:
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql.replace('?', '%s'), params or ())
+                await cur.execute(sql.replace("?", "%s"), params or ())
                 return await cur.fetchone()
 
     async def fetchall(self, sql: str, params: tuple | None = None) -> list[tuple]:
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(sql.replace('?', '%s'), params or ())
+                await cur.execute(sql.replace("?", "%s"), params or ())
                 return await cur.fetchall()
 
     async def close(self) -> None:

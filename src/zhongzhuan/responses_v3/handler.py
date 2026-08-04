@@ -13,6 +13,7 @@ methods / unknown sub-resources yield ``405`` (official matrix, T15).
 T22 wires the :class:`~.chain.ChainResolver` in here so every ``create`` shares
 one (optionally tenant-narrowed) instance of the R-P0-29 guards.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -39,7 +40,10 @@ class ResponsesV3Handler:
         self._chain = chain or ChainResolver(store)
 
     async def resolve_chain(
-        self, previous_response_id: str, *, workspace_id: str = "",
+        self,
+        previous_response_id: str,
+        *,
+        workspace_id: str = "",
     ) -> ChainResolution:
         """Expose chain recovery to the request builder (T24 upstream wiring)."""
         return await self._chain.resolve_chain(previous_response_id, workspace_id)
@@ -73,7 +77,10 @@ class ResponsesV3Handler:
         rid = match.response_id
         if ep is ResponsesEndpoint.CREATE:
             return await endpoints.create(
-                self._store, workspace_id=workspace_id, body=body, chain=self._chain,
+                self._store,
+                workspace_id=workspace_id,
+                body=body,
+                chain=self._chain,
             )
         if ep is ResponsesEndpoint.RETRIEVE:
             return await endpoints.retrieve(self._store, workspace_id=workspace_id, response_id=rid)
@@ -87,11 +94,17 @@ class ResponsesV3Handler:
             after = int(body.get("after", -1)) if isinstance(body.get("after"), (int, str)) else -1
             limit = int(body.get("limit", 20)) if isinstance(body.get("limit"), (int, str)) else 20
             return await endpoints.input_items(
-                self._store, workspace_id=workspace_id, response_id=rid, after=after, limit=limit,
+                self._store,
+                workspace_id=workspace_id,
+                response_id=rid,
+                after=after,
+                limit=limit,
             )
         # Defensive: every enum value is handled above.
         return to_error_object(
-            message=f"unhandled endpoint: {ep}", code="not_implemented", status=501,
+            message=f"unhandled endpoint: {ep}",
+            code="not_implemented",
+            status=501,
         )
 
 

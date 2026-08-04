@@ -15,6 +15,7 @@ Two responsibilities, both mandated by §10.2 of the architecture document:
 This module imports only from :mod:`.responses_models` -- keep it that way so
 it can be used from the config layer, the store layer and the handlers alike.
 """
+
 from __future__ import annotations
 
 import re
@@ -40,28 +41,39 @@ MAX_MESSAGE_CHARS: int = 512
 #: one step instead of leaving a dangling ``Authorization:``.
 _REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # -- credential-bearing headers (value = rest of the header line) --
-    (re.compile(r"(?i)\b(authorization)\b\s*[:=]\s*(?:\"|')?[^\r\n\"',}]+"),
-     r"\1: " + REDACTED),
-    (re.compile(r"(?i)\b(x-api-key|api-key|x-goog-api-key|anthropic-api-key)\b"
-                r"\s*[:=]\s*(?:\"|')?[^\r\n\"',}]+"),
-     r"\1: " + REDACTED),
+    (re.compile(r"(?i)\b(authorization)\b\s*[:=]\s*(?:\"|')?[^\r\n\"',}]+"), r"\1: " + REDACTED),
+    (
+        re.compile(
+            r"(?i)\b(x-api-key|api-key|x-goog-api-key|anthropic-api-key)\b"
+            r"\s*[:=]\s*(?:\"|')?[^\r\n\"',}]+"
+        ),
+        r"\1: " + REDACTED,
+    ),
     # -- JSON/kv shaped secrets: "api_key": "...", access_token=... --
-    (re.compile(r"(?i)(\"?(?:api[_-]?key|access[_-]?token|secret[_-]?key|"
-                r"client[_-]?secret|refresh[_-]?token)\"?)\s*[:=]\s*"
-                r"(?:\"|')?[A-Za-z0-9_\-.~+/=]{6,}(?:\"|')?"),
-     r"\1: " + REDACTED),
+    (
+        re.compile(
+            r"(?i)(\"?(?:api[_-]?key|access[_-]?token|secret[_-]?key|"
+            r"client[_-]?secret|refresh[_-]?token)\"?)\s*[:=]\s*"
+            r"(?:\"|')?[A-Za-z0-9_\-.~+/=]{6,}(?:\"|')?"
+        ),
+        r"\1: " + REDACTED,
+    ),
     # -- bearer tokens --
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-.~+/=]{6,}"), "Bearer " + REDACTED),
     (re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=]{8,}"), "Basic " + REDACTED),
     # -- JWT (three base64url segments) --
-    (re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]*"),
-     REDACTED),
+    (re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]*"), REDACTED),
     # -- OpenAI / Anthropic style keys: sk-..., sk-proj-..., sk-ant-... --
     (re.compile(r"\bsk-[A-Za-z0-9_\-]{6,}"), REDACTED),
     # -- other common vendor prefixes --
     (re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"), REDACTED),
-    (re.compile(r"\b(?:gsk|xai|ghp|gho|ghu|ghs|ghr|glpat|hf|pplx|dop_v1)"
-                r"[-_][A-Za-z0-9_\-]{8,}"), REDACTED),
+    (
+        re.compile(
+            r"\b(?:gsk|xai|ghp|gho|ghu|ghs|ghr|glpat|hf|pplx|dop_v1)"
+            r"[-_][A-Za-z0-9_\-]{8,}"
+        ),
+        REDACTED,
+    ),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), REDACTED),
 )
 
@@ -102,11 +114,20 @@ def sanitize_message(text: str, *, max_chars: int = MAX_MESSAGE_CHARS) -> str:
 
 
 #: Header names whose value is replaced wholesale by :func:`redact_headers`.
-_SENSITIVE_HEADERS: frozenset[str] = frozenset({
-    "authorization", "proxy-authorization", "x-api-key", "api-key",
-    "anthropic-api-key", "x-goog-api-key", "openai-api-key", "cookie",
-    "set-cookie", "x-auth-token",
-})
+_SENSITIVE_HEADERS: frozenset[str] = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "anthropic-api-key",
+        "x-goog-api-key",
+        "openai-api-key",
+        "cookie",
+        "set-cookie",
+        "x-auth-token",
+    }
+)
 
 
 def redact_headers(headers: Mapping[str, Any] | None) -> dict[str, str]:
@@ -134,10 +155,10 @@ class ErrorSpec:
 
     error_class: ErrorClass
     http_status: int
-    error_type: str            # official ``error.type``; "" when no body is sent
-    code: str                  # official ``error.code``
-    emits_body: bool = True    # False -> reported via SSE / no body at all
-    retryable: bool = False    # upstream retry whitelist (T23 owns final policy)
+    error_type: str  # official ``error.type``; "" when no body is sent
+    code: str  # official ``error.code``
+    emits_body: bool = True  # False -> reported via SSE / no body at all
+    retryable: bool = False  # upstream retry whitelist (T23 owns final policy)
 
 
 #: HTTP 499 is the nginx "client closed request" convention.  There is no
@@ -146,49 +167,54 @@ HTTP_CLIENT_CLOSED_REQUEST: int = 499
 
 ERROR_SPECS: dict[ErrorClass, ErrorSpec] = {
     ErrorClass.INVALID_CLIENT_REQUEST: ErrorSpec(
-        ErrorClass.INVALID_CLIENT_REQUEST, 400,
-        "invalid_request_error", "invalid_request"),
+        ErrorClass.INVALID_CLIENT_REQUEST, 400, "invalid_request_error", "invalid_request"
+    ),
     ErrorClass.UNSUPPORTED_INPUT_BLOCK: ErrorSpec(
-        ErrorClass.UNSUPPORTED_INPUT_BLOCK, 400,
-        "invalid_request_error", "unsupported_input_block"),
+        ErrorClass.UNSUPPORTED_INPUT_BLOCK, 400, "invalid_request_error", "unsupported_input_block"
+    ),
     ErrorClass.UNSUPPORTED_TOOL_CAPABILITY: ErrorSpec(
-        ErrorClass.UNSUPPORTED_TOOL_CAPABILITY, 400,
-        "invalid_request_error", "unsupported_tool"),
+        ErrorClass.UNSUPPORTED_TOOL_CAPABILITY, 400, "invalid_request_error", "unsupported_tool"
+    ),
     ErrorClass.CAPABILITY_ROUTE_UNAVAILABLE: ErrorSpec(
-        ErrorClass.CAPABILITY_ROUTE_UNAVAILABLE, 503,
-        "server_error", "capability_route_unavailable"),
+        ErrorClass.CAPABILITY_ROUTE_UNAVAILABLE, 503, "server_error", "capability_route_unavailable"
+    ),
     ErrorClass.INVALID_TOOL_ARGUMENTS: ErrorSpec(
-        ErrorClass.INVALID_TOOL_ARGUMENTS, 400,
-        "invalid_request_error", "invalid_tool_arguments"),
+        ErrorClass.INVALID_TOOL_ARGUMENTS, 400, "invalid_request_error", "invalid_tool_arguments"
+    ),
     ErrorClass.UPSTREAM_CONNECT_ERROR: ErrorSpec(
-        ErrorClass.UPSTREAM_CONNECT_ERROR, 502,
-        "server_error", "upstream_connect_error", retryable=True),
+        ErrorClass.UPSTREAM_CONNECT_ERROR, 502, "server_error", "upstream_connect_error", retryable=True
+    ),
     ErrorClass.UPSTREAM_RATE_LIMITED: ErrorSpec(
-        ErrorClass.UPSTREAM_RATE_LIMITED, 429,
-        "rate_limit_error", "rate_limit_exceeded", retryable=True),
+        ErrorClass.UPSTREAM_RATE_LIMITED, 429, "rate_limit_error", "rate_limit_exceeded", retryable=True
+    ),
     ErrorClass.UPSTREAM_SERVER_ERROR: ErrorSpec(
-        ErrorClass.UPSTREAM_SERVER_ERROR, 502,
-        "server_error", "upstream_error", retryable=True),
+        ErrorClass.UPSTREAM_SERVER_ERROR, 502, "server_error", "upstream_error", retryable=True
+    ),
     ErrorClass.FIRST_TOKEN_TIMEOUT: ErrorSpec(
-        ErrorClass.FIRST_TOKEN_TIMEOUT, 504,
-        "server_error", "first_token_timeout", retryable=True),
+        ErrorClass.FIRST_TOKEN_TIMEOUT, 504, "server_error", "first_token_timeout", retryable=True
+    ),
     ErrorClass.READ_IDLE_TIMEOUT: ErrorSpec(
         # Not retryable: deltas were already written downstream (R-P0-34).
-        ErrorClass.READ_IDLE_TIMEOUT, 504,
-        "server_error", "read_idle_timeout"),
+        ErrorClass.READ_IDLE_TIMEOUT,
+        504,
+        "server_error",
+        "read_idle_timeout",
+    ),
     ErrorClass.UPSTREAM_TRUNCATED: ErrorSpec(
         # 200 + SSE: surfaced through incomplete_details.reason, never a body.
-        ErrorClass.UPSTREAM_TRUNCATED, 200,
-        "", "upstream_truncated", emits_body=False),
-    ErrorClass.INVALID_SSE_FRAME: ErrorSpec(
-        ErrorClass.INVALID_SSE_FRAME, 502,
-        "server_error", "invalid_sse_frame"),
+        ErrorClass.UPSTREAM_TRUNCATED,
+        200,
+        "",
+        "upstream_truncated",
+        emits_body=False,
+    ),
+    ErrorClass.INVALID_SSE_FRAME: ErrorSpec(ErrorClass.INVALID_SSE_FRAME, 502, "server_error", "invalid_sse_frame"),
     ErrorClass.CLIENT_DISCONNECTED: ErrorSpec(
-        ErrorClass.CLIENT_DISCONNECTED, HTTP_CLIENT_CLOSED_REQUEST,
-        "", "", emits_body=False),
+        ErrorClass.CLIENT_DISCONNECTED, HTTP_CLIENT_CLOSED_REQUEST, "", "", emits_body=False
+    ),
     ErrorClass.INTERNAL_TRANSLATION_ERROR: ErrorSpec(
-        ErrorClass.INTERNAL_TRANSLATION_ERROR, 500,
-        "server_error", "internal_error"),
+        ErrorClass.INTERNAL_TRANSLATION_ERROR, 500, "server_error", "internal_error"
+    ),
 }
 
 #: The four retryable upstream failures (T23 acceptance criterion 6).
@@ -205,8 +231,7 @@ NO_BODY_ERROR_CLASSES: frozenset[ErrorClass] = frozenset(
 #: ``NORMAL_FINISH``) are intentionally absent.
 TERMINAL_REASON_TO_ERROR_CLASS: dict[TerminalReason, ErrorClass] = {
     TerminalReason.UPSTREAM_TRUNCATED: ErrorClass.UPSTREAM_TRUNCATED,
-    TerminalReason.CAPABILITY_ROUTE_UNAVAILABLE:
-        ErrorClass.CAPABILITY_ROUTE_UNAVAILABLE,
+    TerminalReason.CAPABILITY_ROUTE_UNAVAILABLE: ErrorClass.CAPABILITY_ROUTE_UNAVAILABLE,
     TerminalReason.CLIENT_DISCONNECTED: ErrorClass.CLIENT_DISCONNECTED,
     TerminalReason.CANCELLED_BY_CLIENT: ErrorClass.CLIENT_DISCONNECTED,
     TerminalReason.UPSTREAM_ERROR: ErrorClass.UPSTREAM_SERVER_ERROR,

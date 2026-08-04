@@ -1,4 +1,5 @@
 """Sticky session 测试：验证会话指纹提取和粘性路由逻辑。"""
+
 import json
 import time
 
@@ -12,7 +13,8 @@ from zhongzhuan.proxy.ratelimit import KeyHealth, SlidingWindow
 def _make_keys(n: int = 3) -> list[KeyHealth]:
     return [
         KeyHealth(
-            key_id=i, api_key=f"sk-{i}",
+            key_id=i,
+            api_key=f"sk-{i}",
             window=SlidingWindow(60, 1000),
             rpm_limit=1000,
             model_name=f"model-{i}",
@@ -32,9 +34,11 @@ def _make_handler(keys: list[KeyHealth] | None = None) -> ProxyHandler:
 
 def _make_request(headers: dict | None = None) -> web.Request:
     """构造一个最小化的 aiohttp Request mock。"""
+
     class _MockRequest:
         def __init__(self, hdrs: dict | None = None) -> None:
             self.headers = hdrs or {}
+
     return _MockRequest(headers)
 
 
@@ -56,11 +60,13 @@ class TestSessionKeyExtraction:
 
     def test_header_priority(self):
         """x-session-id 优先于 x-zhongzhuan-session 和 x-request-id。"""
-        req = _make_request({
-            "x-session-id": "first",
-            "x-zhongzhuan-session": "second",
-            "x-request-id": "third",
-        })
+        req = _make_request(
+            {
+                "x-session-id": "first",
+                "x-zhongzhuan-session": "second",
+                "x-request-id": "third",
+            }
+        )
         key = ProxyHandler._session_key(req, None)
         assert key == "hdr:first"
 
@@ -112,12 +118,15 @@ class TestSessionKeyExtraction:
         只要第一条 user 消息不变，后续追加的 assistant/user 轮次都不影响指纹。
         """
         req = _make_request()
-        first = ProxyHandler._session_key(req, {
-            "messages": [
-                {"role": "user", "content": "帮我写一个冒泡排序"},
-                {"role": "assistant", "content": "好的"},
-            ]
-        })
+        first = ProxyHandler._session_key(
+            req,
+            {
+                "messages": [
+                    {"role": "user", "content": "帮我写一个冒泡排序"},
+                    {"role": "assistant", "content": "好的"},
+                ]
+            },
+        )
         for i in range(10):
             body = {
                 "messages": [
@@ -151,18 +160,24 @@ class TestSessionKeyExtraction:
     def test_input_reasoning_items_skipped(self):
         """Responses 输入里 ``role=reasoning`` 的项被跳过（R-P0-14）。"""
         req = _make_request()
-        key1 = ProxyHandler._session_key(req, {
-            "input": [
-                {"role": "user", "content": "你好"},
-                {"role": "reasoning", "content": "推理内容A"},
-            ]
-        })
-        key2 = ProxyHandler._session_key(req, {
-            "input": [
-                {"role": "user", "content": "你好"},
-                {"role": "reasoning", "content": "推理内容B"},
-            ]
-        })
+        key1 = ProxyHandler._session_key(
+            req,
+            {
+                "input": [
+                    {"role": "user", "content": "你好"},
+                    {"role": "reasoning", "content": "推理内容A"},
+                ]
+            },
+        )
+        key2 = ProxyHandler._session_key(
+            req,
+            {
+                "input": [
+                    {"role": "user", "content": "你好"},
+                    {"role": "reasoning", "content": "推理内容B"},
+                ]
+            },
+        )
         assert key1 == key2
 
     def test_conversation_field_priority(self):
@@ -205,6 +220,7 @@ class TestStickyRouting:
     def test_sticky_key_unavailable_returns_none(self):
         """如果 sticky key 已不可用（如 invalid），返回 None 让调度器选其他 key。"""
         from zhongzhuan.proxy.retry import mark_auth_failure
+
         handler = _make_handler()
         keys = handler._keys
         handler._set_sticky("hdr:session1", keys[0].key_id)
@@ -240,15 +256,19 @@ class TestStickyRouting:
 
 class TestSchedulerFallbackPenalty:
     """验证兜底 key 在调度器中被降权。"""
+
     def test_fallback_key_score_lower_than_normal(self):
         from zhongzhuan.proxy.scheduler import score
+
         normal = KeyHealth(
-            key_id=1, api_key="sk-1",
+            key_id=1,
+            api_key="sk-1",
             window=SlidingWindow(60, 1000),
             rpm_limit=1000,
         )
         fallback = KeyHealth(
-            key_id=-1, api_key="public",
+            key_id=-1,
+            api_key="public",
             window=SlidingWindow(60, 0),
             is_fallback=True,
             fallback_penalty=0.1,  # 可配置降权系数，默认 0.1
@@ -262,13 +282,16 @@ class TestSchedulerFallbackPenalty:
     def test_fallback_penalty_configurable_no_penalty(self):
         """fallback_penalty=1.0 时不降权，兜底 key 与普通 key 同等评分。"""
         from zhongzhuan.proxy.scheduler import score
+
         normal = KeyHealth(
-            key_id=1, api_key="sk-1",
+            key_id=1,
+            api_key="sk-1",
             window=SlidingWindow(60, 1000),
             rpm_limit=1000,
         )
         fallback = KeyHealth(
-            key_id=-1, api_key="public",
+            key_id=-1,
+            api_key="public",
             window=SlidingWindow(60, 0),
             is_fallback=True,
             fallback_penalty=1.0,  # 不降权

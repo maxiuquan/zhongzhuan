@@ -49,6 +49,7 @@ path: persistence + object mapping + routing are real and tested; the live
 upstream streaming pipeline is wired in T24/T28 and the SDK contract is sealed
 in T37.
 """
+
 from __future__ import annotations
 
 from ..proxy.protocol.responses_models import TerminalReason

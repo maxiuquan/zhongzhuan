@@ -33,6 +33,7 @@ completeness.
 ``instructions`` is deliberately **not** inherited from ancestors (R-P1-31):
 only conversation *items* are recovered, never request-level knobs.
 """
+
 from __future__ import annotations
 
 import json
@@ -242,7 +243,10 @@ class ChainResolver:
     # -- internals -----------------------------------------------------------
 
     async def _visible_items(
-        self, record: ResponseRecord, *, limit: int = DEFAULT_MAX_CHAIN_ITEMS,
+        self,
+        record: ResponseRecord,
+        *,
+        limit: int = DEFAULT_MAX_CHAIN_ITEMS,
     ) -> list[NormalizedItem]:
         """Items of one turn that the model may see again, reasoning excluded.
 
@@ -254,7 +258,9 @@ class ChainResolver:
         limit = max(1, int(limit))
         raw: list[Any] = []
         stored_inputs = await self._store.list_input_items(
-            record.response_id, after_seq=-1, limit=limit,
+            record.response_id,
+            after_seq=-1,
+            limit=limit,
         )
         if stored_inputs:
             raw.extend(stored_inputs)
@@ -266,7 +272,8 @@ class ChainResolver:
         outputs = record.output
         if not outputs:
             outputs = await self._store.list_output_items(
-                record.response_id, limit=limit,
+                record.response_id,
+                limit=limit,
             )
         raw.extend(outputs or [])
 
@@ -298,7 +305,8 @@ def normalize_history(raw_items: list[Any]) -> list[NormalizedItem]:
 
 
 def build_upstream_input(
-    resolution: ChainResolution, current_input: Any = None,
+    resolution: ChainResolution,
+    current_input: Any = None,
 ) -> list[dict[str, Any]]:
     """Flatten a resolved chain plus this turn's input into one wire array.
 
@@ -306,11 +314,7 @@ def build_upstream_input(
     is guaranteed reasoning-free on both halves (R-P1-31 / R-P1-40) and it
     carries **no** inherited ``instructions``: only items travel down a chain.
     """
-    wire: list[dict[str, Any]] = [
-        serialize_item(it)
-        for it in resolution.items
-        if it.item_type != REASONING_ITEM_TYPE
-    ]
+    wire: list[dict[str, Any]] = [serialize_item(it) for it in resolution.items if it.item_type != REASONING_ITEM_TYPE]
     for item in parse_input_items(current_input, start_seq=len(wire)):
         if item.item_type == REASONING_ITEM_TYPE:
             continue
@@ -364,11 +368,13 @@ def _normalize_input(input_val: Any) -> list[Any]:
     if isinstance(input_val, list):
         return list(input_val)
     if isinstance(input_val, str) and input_val.strip():
-        return [{
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": input_val}],
-        }]
+        return [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": input_val}],
+            }
+        ]
     return []
 
 

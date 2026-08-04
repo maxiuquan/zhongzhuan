@@ -1,4 +1,5 @@
 """Group CRUD (async)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -34,20 +35,23 @@ async def create_group(s: Store, g: GroupData) -> GroupData:
 
 
 async def list_groups(s: Store) -> list[dict]:
-    rows = await s.fetchall(
-        "SELECT id, name, strategy, fallback_enabled, created_at FROM model_groups ORDER BY id"
-    )
+    rows = await s.fetchall("SELECT id, name, strategy, fallback_enabled, created_at FROM model_groups ORDER BY id")
     result = []
     for r in rows:
         members = await s.fetchall(
             "SELECT model_id, weight, ord FROM group_models WHERE group_id=? ORDER BY ord",
             (r[0],),
         )
-        result.append({
-            "id": r[0], "name": r[1], "strategy": r[2],
-            "fallback_enabled": bool(r[3]), "created_at": r[4],
-            "members": [{"model_id": m[0], "weight": m[1], "ord": m[2]} for m in members],
-        })
+        result.append(
+            {
+                "id": r[0],
+                "name": r[1],
+                "strategy": r[2],
+                "fallback_enabled": bool(r[3]),
+                "created_at": r[4],
+                "members": [{"model_id": m[0], "weight": m[1], "ord": m[2]} for m in members],
+            }
+        )
     return result
 
 
@@ -63,8 +67,11 @@ async def get_group(s: Store, name: str) -> dict | None:
         (r[0],),
     )
     return {
-        "id": r[0], "name": r[1], "strategy": r[2],
-        "fallback_enabled": bool(r[3]), "created_at": r[4],
+        "id": r[0],
+        "name": r[1],
+        "strategy": r[2],
+        "fallback_enabled": bool(r[3]),
+        "created_at": r[4],
         "members": [{"model_id": m[0], "weight": m[1], "ord": m[2]} for m in members],
     }
 

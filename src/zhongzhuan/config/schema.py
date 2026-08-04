@@ -16,6 +16,7 @@ The ``timeouts`` section is intentionally kept as a raw mapping here: it is
 validated separately by :func:`~zhongzhuan.config.timeouts.resolve_timeouts`
 which already enforces the 300s floors (T01 / R-P0-01).
 """
+
 from __future__ import annotations
 
 import os
@@ -360,9 +361,7 @@ def env_mode(env: str | None = None) -> EnvMode:
         return "production"
     if value in ("development", "dev", "development=", "开发"):
         return "development"
-    raise ConfigValidationError(
-        f"{ENV_VAR} must be 'development' or 'production', got {value!r}"
-    )
+    raise ConfigValidationError(f"{ENV_VAR} must be 'development' or 'production', got {value!r}")
 
 
 def compat_mode(enabled: bool | None = None) -> bool:

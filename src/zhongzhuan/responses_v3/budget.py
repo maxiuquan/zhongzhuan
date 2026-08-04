@@ -38,6 +38,7 @@ T21 skeleton).  Everything here is therefore **self-contained and injectable**:
 imports the pipeline.  Real side-effect rollback (step 3) and the real audit
 sink (step 6) are wired in T24/T28; see the ``HONEST STUB`` markers below.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -229,14 +230,9 @@ class ExecutionBudget:
     def __post_init__(self) -> None:
         wall = self.max_wall_time_seconds
         if wall is None or isinstance(wall, bool) or not isinstance(wall, int):
-            raise ValueError(
-                "max_wall_time_seconds must be a positive int, got {0!r}".format(wall)
-            )
+            raise ValueError("max_wall_time_seconds must be a positive int, got {0!r}".format(wall))
         if wall <= 0:
-            raise ValueError(
-                "max_wall_time_seconds must be > 0 (no unlimited budget, Q8), "
-                "got {0!r}".format(wall)
-            )
+            raise ValueError("max_wall_time_seconds must be > 0 (no unlimited budget, Q8), got {0!r}".format(wall))
 
 
 #: Synchronous request profile: the §3.10 defaults (15 min wall clock).
@@ -248,7 +244,7 @@ BACKGROUND_BUDGET: ExecutionBudget = ExecutionBudget(max_wall_time_seconds=3600)
 # Exposed as class attributes too, so ``ExecutionBudget.SYNC_BUDGET`` reads
 # naturally at call sites.  Assigned after the class body because a value of
 # the dataclass's own type inside it would become a *field*.
-ExecutionBudget.SYNC_BUDGET = SYNC_BUDGET          # type: ignore[attr-defined]
+ExecutionBudget.SYNC_BUDGET = SYNC_BUDGET  # type: ignore[attr-defined]
 ExecutionBudget.BACKGROUND_BUDGET = BACKGROUND_BUDGET  # type: ignore[attr-defined]
 
 
@@ -293,7 +289,9 @@ class BudgetLedger:
     # -- tool calls ----------------------------------------------------------
 
     def charge_tool_call(
-        self, name: str, args_canonical: Any = "",
+        self,
+        name: str,
+        args_canonical: Any = "",
     ) -> TerminalReason | None:
         """Charge one tool call and report the first ceiling it crosses.
 
@@ -318,7 +316,9 @@ class BudgetLedger:
         return None
 
     def charge_tool_result(
-        self, signature: str, failed: bool,
+        self,
+        signature: str,
+        failed: bool,
     ) -> TerminalReason | None:
         """Charge one tool *result* (``REPEATED_TOOL_FAILURE``).
 
@@ -493,7 +493,10 @@ class CircuitBreaker:
             hook()
 
     def _rollback_side_effects(
-        self, ctx: Any, reason: TerminalReason, store: Any,
+        self,
+        ctx: Any,
+        reason: TerminalReason,
+        store: Any,
     ) -> None:
         """Step 3: account for uncommitted side effects.
 
@@ -526,7 +529,9 @@ class CircuitBreaker:
 
     @staticmethod
     def _emit_terminal(
-        reason: TerminalReason, message: str, emitter: ResponsesEventEmitter,
+        reason: TerminalReason,
+        message: str,
+        emitter: ResponsesEventEmitter,
     ) -> list[bytes]:
         """Step 5: the single terminal event + ``[DONE]`` (exactly once)."""
         return emitter.terminate(
@@ -536,7 +541,11 @@ class CircuitBreaker:
         )
 
     def _write_audit(
-        self, ctx: Any, reason: TerminalReason, message: str, store: Any,
+        self,
+        ctx: Any,
+        reason: TerminalReason,
+        message: str,
+        store: Any,
     ) -> None:
         """Step 6: structured log line + durable audit event."""
         event = {
@@ -550,7 +559,9 @@ class CircuitBreaker:
         }
         LOGGER.info(
             "circuit breaker tripped reason=%s request_id=%s workspace_id=%s",
-            event["reason"], event["request_id"], event["workspace_id"],
+            event["reason"],
+            event["request_id"],
+            event["workspace_id"],
             extra={"circuit_breaker": event},
         )
         _record_audit(store, event)

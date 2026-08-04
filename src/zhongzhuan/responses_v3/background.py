@@ -44,6 +44,7 @@ HONEST STUB
 * Step 3 of the circuit breaker (side-effect rollback) is still the T23 stub:
   transactional tool rollback / idempotency replay is T26.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -150,9 +151,7 @@ class BackgroundWorker:
         self._heartbeat_seconds = float(heartbeat_seconds)
         #: Background-only envelope on total tool calls (see module docstring).
         self.max_background_calls = (
-            int(budget.max_total_tool_calls)
-            if max_background_calls is None
-            else int(max_background_calls)
+            int(budget.max_total_tool_calls) if max_background_calls is None else int(max_background_calls)
         )
         self._clock = clock
         self._runs: dict[str, _JobRun] = {}
@@ -241,7 +240,9 @@ class BackgroundWorker:
                 return "expired"
 
         claimed = await self._jobs.claim_job(
-            self._lease_seconds, now=wall_now, task_id=task_id,
+            self._lease_seconds,
+            now=wall_now,
+            task_id=task_id,
         )
         if claimed is None:
             existing = await self._jobs.get_job_any_tenant(task_id) or {}
@@ -263,7 +264,10 @@ class BackgroundWorker:
             reason = await self._execute(run, upstream, ledger, emitter)
             if reason is not None:
                 status = await self._trip(
-                    run, reason, emitter, workspace_id=workspace_id,
+                    run,
+                    reason,
+                    emitter,
+                    workspace_id=workspace_id,
                 )
             elif run.cancelled or await self._jobs.is_cancel_requested(task_id):
                 status = await self._finish_cancelled(run, emitter)
@@ -307,14 +311,22 @@ class BackgroundWorker:
         # ``start()`` drives the emitter's own created/in_progress pair; the
         # store copies below are what a catch-up reader replays.
         emitter.start()
-        await self._store.append_event(run.response_id, "response.created", {
-            "type": "response.created",
-            "response": {"id": run.response_id, "status": "in_progress"},
-        })
-        await self._store.append_event(run.response_id, "response.in_progress", {
-            "type": "response.in_progress",
-            "response": {"id": run.response_id, "status": "in_progress"},
-        })
+        await self._store.append_event(
+            run.response_id,
+            "response.created",
+            {
+                "type": "response.created",
+                "response": {"id": run.response_id, "status": "in_progress"},
+            },
+        )
+        await self._store.append_event(
+            run.response_id,
+            "response.in_progress",
+            {
+                "type": "response.in_progress",
+                "response": {"id": run.response_id, "status": "in_progress"},
+            },
+        )
         return await self._stream(run, upstream, ledger, emitter)
 
     async def _stream(
@@ -386,16 +398,22 @@ class BackgroundWorker:
             run.bg_tool_calls += 1
             if run.bg_tool_calls > self.max_background_calls:
                 return TerminalReason.BACKGROUND_BUDGET_EXHAUSTED
-            await self._emit(run, emitter, "response.function_call.persisted", {
-                "type": "response.function_call.persisted",
-                "output_index": index,
-                "name": name,
-            })
+            await self._emit(
+                run,
+                emitter,
+                "response.function_call.persisted",
+                {
+                    "type": "response.function_call.persisted",
+                    "output_index": index,
+                    "name": name,
+                },
+            )
             return None
 
         if kind == "tool_result":
             return ledger.charge_tool_result(
-                str(chunk.get("signature") or ""), bool(chunk.get("failed")),
+                str(chunk.get("signature") or ""),
+                bool(chunk.get("failed")),
             )
 
         text = str(chunk.get("delta", chunk.get("text", "")) or "")
@@ -414,11 +432,16 @@ class BackgroundWorker:
         reason = ledger.charge_output_tokens(tokens)
         if reason is not None:
             return reason
-        await self._emit(run, emitter, "response.output_text.delta", {
-            "type": "response.output_text.delta",
-            "output_index": index,
-            "delta": text,
-        })
+        await self._emit(
+            run,
+            emitter,
+            "response.output_text.delta",
+            {
+                "type": "response.output_text.delta",
+                "output_index": index,
+                "delta": text,
+            },
+        )
         return None
 
     async def _emit(
@@ -458,26 +481,38 @@ class BackgroundWorker:
             self._store,
         )
         details = to_incomplete_details(
-            reason, "background job terminated: {0}".format(reason.value),
+            reason,
+            "background job terminated: {0}".format(reason.value),
         )
         await self._store.update_status(
-            run.response_id, "incomplete",
-            terminal_reason=reason.value, incomplete_details=details,
+            run.response_id,
+            "incomplete",
+            terminal_reason=reason.value,
+            incomplete_details=details,
         )
-        await self._persist_terminal(run, "incomplete", {
-            "terminal_reason": reason.value,
-            "incomplete_details": details,
-        })
+        await self._persist_terminal(
+            run,
+            "incomplete",
+            {
+                "terminal_reason": reason.value,
+                "incomplete_details": details,
+            },
+        )
         await self._jobs.mark_terminal(run.task_id, "incomplete")
         return "incomplete"
 
     async def _finish_completed(
-        self, run: _JobRun, emitter: ResponsesEventEmitter, ledger: BudgetLedger,
+        self,
+        run: _JobRun,
+        emitter: ResponsesEventEmitter,
+        ledger: BudgetLedger,
     ) -> str:
         usage = {"output_tokens": ledger.output_tokens}
         await self._store.update_status(
-            run.response_id, "completed",
-            terminal_reason=TerminalReason.NORMAL_FINISH.value, usage=usage,
+            run.response_id,
+            "completed",
+            terminal_reason=TerminalReason.NORMAL_FINISH.value,
+            usage=usage,
         )
         emitter.terminate(
             ResponseStatus.COMPLETED,
@@ -488,12 +523,16 @@ class BackgroundWorker:
         return "completed"
 
     async def _finish_cancelled(
-        self, run: _JobRun, emitter: ResponsesEventEmitter,
+        self,
+        run: _JobRun,
+        emitter: ResponsesEventEmitter,
     ) -> str:
         await run.cancel_upstream()
         reason = TerminalReason.CANCELLED_BY_CLIENT.value
         await self._store.update_status(
-            run.response_id, "cancelled", terminal_reason=reason,
+            run.response_id,
+            "cancelled",
+            terminal_reason=reason,
         )
         emitter.terminate(ResponseStatus.CANCELLED, terminal_reason=reason)
         await self._persist_terminal(run, "cancelled", {"terminal_reason": reason})
@@ -501,13 +540,17 @@ class BackgroundWorker:
         return "cancelled"
 
     async def _finish_failed(
-        self, run: _JobRun, emitter: ResponsesEventEmitter, exc: BaseException,
+        self,
+        run: _JobRun,
+        emitter: ResponsesEventEmitter,
+        exc: BaseException,
     ) -> str:
         """R-P0-32: an exception is attributed, never laundered into success."""
         await run.cancel_upstream()
         error = {"type": "server_error", "message": "background job failed"}
         await self._store.update_status(
-            run.response_id, "failed",
+            run.response_id,
+            "failed",
             terminal_reason=TerminalReason.UPSTREAM_ERROR.value,
             error=type(exc).__name__,
         )
@@ -525,16 +568,25 @@ class BackgroundWorker:
         job = await self._jobs.get_job_any_tenant(task_id) or {}
         response_id = str(job.get("response_id") or task_id)
         await self._store.update_status(
-            response_id, "expired", terminal_reason="expired",
+            response_id,
+            "expired",
+            terminal_reason="expired",
         )
-        await self._store.append_event(response_id, "response.incomplete", {
-            "type": "response.incomplete",
-            "response": {"id": response_id, "status": "expired"},
-            "incomplete_details": {"reason": "expired"},
-        })
+        await self._store.append_event(
+            response_id,
+            "response.incomplete",
+            {
+                "type": "response.incomplete",
+                "response": {"id": response_id, "status": "expired"},
+                "incomplete_details": {"reason": "expired"},
+            },
+        )
 
     async def _persist_terminal(
-        self, run: _JobRun, status: str, extra: dict[str, Any],
+        self,
+        run: _JobRun,
+        status: str,
+        extra: dict[str, Any],
     ) -> None:
         """Write the terminal event to the log so catch-up can replay it."""
         event_type = _TERMINAL_EVENT.get(status, "response.completed")

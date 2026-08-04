@@ -1,4 +1,5 @@
 """T32 判据③ — CORS allowlist 内/外来源各 1 例（R-P2-01）。"""
+
 from __future__ import annotations
 
 import pytest

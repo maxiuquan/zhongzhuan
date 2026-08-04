@@ -15,6 +15,7 @@ R-P2-01 将默认 ``*`` 改为可配置 allowlist：
 
 判据③：allowlist 内/外来源各 1 例。
 """
+
 from __future__ import annotations
 
 import os

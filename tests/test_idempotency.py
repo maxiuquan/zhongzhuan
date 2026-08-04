@@ -3,6 +3,7 @@
 判据映射见各测试 docstring：缺失 / 命中 / in_flight / done / conflict / TTL 过期 /
 租户隔离 / 空 key。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -120,8 +121,11 @@ async def test_ttl_expiry_unblocks_after_window(tmp_path):
         base = 1_000_000
         # 窗口 10s。
         await store.mark_executed(
-            "k6", workspace_id="ws", response_id="resp_6",
-            ttl_seconds=10, now=base,
+            "k6",
+            workspace_id="ws",
+            response_id="resp_6",
+            ttl_seconds=10,
+            now=base,
         )
         assert await store.seen("k6", workspace_id="ws", now=base) is True
         # 跨越过期点。

@@ -15,6 +15,7 @@ R-P2-08：公开健康接口不泄露 key、内部 URL 或敏感拓扑。所有�
 * readiness -> ``{"status", "checks": {migration: {...}, routes: {...}, worker: {...}}}``
 * deps      -> ``{"status", "dependencies": [{"name", "status", "detail"}]}``
 """
+
 from __future__ import annotations
 
 import re
@@ -53,6 +54,7 @@ async def migration_status(store: Any | None) -> tuple[bool, str]:
     if not rows:
         return False, "no migrations applied"
     from ..store.migrations import MIGRATIONS
+
     expected = max(m.version for m in MIGRATIONS)
     applied = max(int(r[0]) for r in rows)
     if applied < expected:
@@ -90,8 +92,10 @@ def sanitize_health_payload(payload: dict[str, Any]) -> dict[str, Any]:
             out[key] = sanitize_health_payload(value)
         elif isinstance(value, list):
             out[key] = [
-                sanitize_health_payload(v) if isinstance(v, dict)
-                else sanitize_health_text(v) if isinstance(v, str)
+                sanitize_health_payload(v)
+                if isinstance(v, dict)
+                else sanitize_health_text(v)
+                if isinstance(v, str)
                 else v
                 for v in value
             ]

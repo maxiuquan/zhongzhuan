@@ -1,4 +1,5 @@
 """T20 tests: BatchWriter commit-bounding (R-P1-64 / R-P0-11)."""
+
 from __future__ import annotations
 
 import pytest
@@ -8,7 +9,13 @@ from zhongzhuan.store.store import create_store
 from zhongzhuan.store.writer_queue import BatchWriter
 
 RESPONSE_EVENTS_COLS = (
-    "response_id", "seq", "workspace_id", "event_type", "data", "ts", "expires_at",
+    "response_id",
+    "seq",
+    "workspace_id",
+    "event_type",
+    "data",
+    "ts",
+    "expires_at",
 )
 
 
@@ -26,9 +33,7 @@ async def store(tmp_path):
 @pytest.mark.asyncio
 async def test_batch_commit_le_batches(store):
     """Criterion ③: 1000 rows / max_batch 200 -> flush_count == 5 (<= batches)."""
-    w = BatchWriter(
-        store, table="response_events", columns=RESPONSE_EVENTS_COLS, max_batch=200
-    )
+    w = BatchWriter(store, table="response_events", columns=RESPONSE_EVENTS_COLS, max_batch=200)
     for i in range(1000):
         await w.add(
             {
@@ -44,17 +49,13 @@ async def test_batch_commit_le_batches(store):
     await w.close()
     assert w.written == 1000
     assert w.flush_count == 5  # 1000 / 200 == 5 batches, one commit each
-    rows = await store.fetchall(
-        "SELECT COUNT(*) FROM response_events WHERE response_id = ?", ("r1",)
-    )
+    rows = await store.fetchall("SELECT COUNT(*) FROM response_events WHERE response_id = ?", ("r1",))
     assert rows[0][0] == 1000
 
 
 @pytest.mark.asyncio
 async def test_partial_flush_on_close(store):
-    w = BatchWriter(
-        store, table="response_events", columns=RESPONSE_EVENTS_COLS, max_batch=200
-    )
+    w = BatchWriter(store, table="response_events", columns=RESPONSE_EVENTS_COLS, max_batch=200)
     for i in range(250):  # one full flush (200) + 50 left buffered
         await w.add(
             {

@@ -322,10 +322,10 @@ def test_truncated_bom_only_stream_terminates() -> None:
 def test_malformed_json_counted_and_stream_still_terminates() -> None:
     stream = (
         b'data: {"ok":1}\n\n'
-        b'data: {"broken": \n\n'          # 畸形 JSON
-        b"data: not json at all\n\n"       # 畸形 JSON
+        b'data: {"broken": \n\n'  # 畸形 JSON
+        b"data: not json at all\n\n"  # 畸形 JSON
         b'data: {"ok":2}\n\n'
-        b"data: [DONE]\n\n"                # 哨兵豁免
+        b"data: [DONE]\n\n"  # 哨兵豁免
     )
     parser = SSEParser(validate_json=True)
     frames = parser.feed(stream)
@@ -334,7 +334,7 @@ def test_malformed_json_counted_and_stream_still_terminates() -> None:
     assert len(frames) == 5, "坏帧也必须照常产出，绝不吞数据"
     assert parser.malformed_count == 2
     assert parser.malformed_reasons[MALFORMED_BAD_JSON] == 2
-    assert frames[-1].is_done_sentinel() is True   # 流正确终止
+    assert frames[-1].is_done_sentinel() is True  # 流正确终止
     assert json.loads(frames[0].data) == {"ok": 1}
     assert json.loads(frames[3].data) == {"ok": 2}
 

@@ -11,6 +11,7 @@ handler 收尾逻辑单一、无分支，这里统一为 :func:`finish_translato
 * 任何异常都被吞掉并记日志（日志含 ``terminal_reason=upstream_truncated``），
   最低限度返回 ``[b"data: [DONE]\\n\\n"]``，保证下游不会挂起。
 """
+
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
@@ -57,8 +58,7 @@ async def finish_translator(tr: object) -> list[bytes]:
             return await afinish()
         except Exception as exc:  # noqa: BLE001 - 收尾兜底，任何异常都不外抛
             logger.warning(
-                "finish_translator: afinish() failed, falling back to [DONE] "
-                "terminal_reason=upstream_truncated err={}",
+                "finish_translator: afinish() failed, falling back to [DONE] terminal_reason=upstream_truncated err={}",
                 exc,
             )
             return [b"data: [DONE]\n\n"]

@@ -20,6 +20,7 @@ Design rules
   redacted payloads (``item_registry``).  This module stores exactly what it is
   given and never injects reasoning text.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -90,32 +91,29 @@ class EventLog:
                     "INSERT INTO response_events "
                     "(response_id, seq, workspace_id, event_type, data, ts, expires_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (response_id, seq, workspace_id, event_type, _dumps(data),
-                     int(time.time()), expires_at),
+                    (response_id, seq, workspace_id, event_type, _dumps(data), int(time.time()), expires_at),
                 )
                 return seq
         await self._store.execute(
             "INSERT INTO response_events "
             "(response_id, seq, workspace_id, event_type, data, ts, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (response_id, seq, workspace_id, event_type, _dumps(data),
-             int(time.time()), expires_at),
+            (response_id, seq, workspace_id, event_type, _dumps(data), int(time.time()), expires_at),
         )
         return seq
 
     async def read_events(
-        self, response_id: str, *, after_seq: int = -1,
+        self,
+        response_id: str,
+        *,
+        after_seq: int = -1,
     ) -> list[dict[str, Any]]:
         """Return events for ``response_id`` ordered by ``seq`` after ``after_seq``."""
         rows = await self._store.fetchall(
-            "SELECT seq, event_type, data FROM response_events "
-            "WHERE response_id = ? AND seq > ? ORDER BY seq",
+            "SELECT seq, event_type, data FROM response_events WHERE response_id = ? AND seq > ? ORDER BY seq",
             (response_id, after_seq),
         )
-        return [
-            {"seq": r[0], "event_type": r[1], "data": _loads(r[2], {})}
-            for r in rows
-        ]
+        return [{"seq": r[0], "event_type": r[1], "data": _loads(r[2], {})} for r in rows]
 
 
 __all__ = ["EventLog"]

@@ -1,4 +1,5 @@
 """Scheduler: pick model / pick key."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ def score(k: KeyHealth) -> float:
     - 随机扰动（5%）：避免相同分数时总选同一个
     """
     import random
+
     if not k.is_available():
         return -1.0
     total = k.success_count + k.total_failures

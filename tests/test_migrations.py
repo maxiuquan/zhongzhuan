@@ -1,4 +1,5 @@
 """Tests for the versioned migration engine (T03 / R-P0-04 / R-P0-05)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -53,10 +54,15 @@ def test_migrations_apply_in_order(tmp_db):
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         rows = _run(db.execute_fetchall("SELECT version FROM schema_migrations ORDER BY version"))
         names = _run(db.execute_fetchall("SELECT name FROM schema_migrations ORDER BY version"))
-        assert [v for v, in rows] == [1, 3, 4, 5, 6, 7, 8]
-        assert [n for n, in names] == [
-            "baseline", "token_hash", "response_store", "model_capabilities",
-            "tool_executions", "schema_realign", "route_bindings",
+        assert [v for (v,) in rows] == [1, 3, 4, 5, 6, 7, 8]
+        assert [n for (n,) in names] == [
+            "baseline",
+            "token_hash",
+            "response_store",
+            "model_capabilities",
+            "tool_executions",
+            "schema_realign",
+            "route_bindings",
         ]
     finally:
         _run(db.close())
@@ -79,17 +85,32 @@ def test_v001_creates_tables(tmp_db):
     db, ex = _executor(tmp_db)
     try:
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
-        rows = _run(db.execute_fetchall(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        ))
+        rows = _run(
+            db.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        )
         names = {r[0] for r in rows}
-        for t in ("models", "api_keys", "request_logs", "access_tokens", "admin_users",
-                  "system_config", "key_health", "schema_migrations"):
+        for t in (
+            "models",
+            "api_keys",
+            "request_logs",
+            "access_tokens",
+            "admin_users",
+            "system_config",
+            "key_health",
+            "schema_migrations",
+        ):
             assert t in names, f"missing table {t}"
         # v004 response-store tables.
-        for t in ("responses", "response_input_items", "response_output_items",
-                  "response_events", "response_state_chain", "background_jobs",
-                  "tool_executions", "idempotency_records"):
+        for t in (
+            "responses",
+            "response_input_items",
+            "response_output_items",
+            "response_events",
+            "response_state_chain",
+            "background_jobs",
+            "tool_executions",
+            "idempotency_records",
+        ):
             assert t in names, f"missing v004 table {t}"
     finally:
         _run(db.close())
@@ -106,11 +127,13 @@ def test_migration_failure_exits(tmp_db):
     db, ex = _executor(tmp_db)
     try:
         with pytest.raises(SystemExit) as ei:
-            _run(run_migrations_or_exit(
-                ex,
-                list(MIGRATIONS) + [bad],
-                sqlite_db_path=tmp_db,
-            ))
+            _run(
+                run_migrations_or_exit(
+                    ex,
+                    list(MIGRATIONS) + [bad],
+                    sqlite_db_path=tmp_db,
+                )
+            )
         assert ei.value.code == MIGRATION_EXIT_CODE
     finally:
         _run(db.close())
@@ -136,9 +159,7 @@ def test_v006_survives_legacy_tool_executions_without_workspace_id(tmp_db):
     # 2) 把 workspace_id 退化成旧 v004 的 tenant_id（移除 workspace_id 列）。
     db2, _ = _executor(tmp_db)
     try:
-        _run(db2.execute(
-            "ALTER TABLE tool_executions RENAME COLUMN workspace_id TO tenant_id"
-        ))
+        _run(db2.execute("ALTER TABLE tool_executions RENAME COLUMN workspace_id TO tenant_id"))
         # expires_at 在旧形态里也可能缺失：尽量删掉以贴近真实场景；
         # 不支持 DROP COLUMN 的旧 SQLite 上跳过（不影响 workspace_id 验证）。
         try:
@@ -174,10 +195,7 @@ def test_v006_survives_legacy_tool_executions_without_workspace_id(tmp_db):
         assert "expires_at" in col_names, "v006 必须补回 expires_at"
         assert "tool_seq" in col_names
 
-        idx = _run(db4.execute_fetchall(
-            "SELECT name FROM sqlite_master WHERE type='index' "
-            "AND name='idx_te_approval'"
-        ))
+        idx = _run(db4.execute_fetchall("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_te_approval'"))
         assert idx, "v006 必须建出 idx_te_approval"
     finally:
         _run(db4.close())
@@ -288,21 +306,33 @@ _LEGACY_V004_DIGEST = "5e883f07f89feeb0ab6f32a4d7a91da70a792eedc91c26e3e461d70ca
 #: v004 当前形态应当存在的全部业务表（``background_tasks`` 是保留的废弃表，
 #: 不在此列）。``route_bindings`` 由 v008 新增（T35 / R-P1-61）。
 _EXPECTED_TABLES: tuple[str, ...] = (
-    "responses", "response_input_items", "response_output_items",
-    "response_events", "response_state_chain", "background_jobs",
-    "tool_executions", "idempotency_records", "route_bindings",
+    "responses",
+    "response_input_items",
+    "response_output_items",
+    "response_events",
+    "response_state_chain",
+    "background_jobs",
+    "tool_executions",
+    "idempotency_records",
+    "route_bindings",
 )
 
 #: v004 当前形态的 14 条租户 / TTL 索引。老库上一条都没有，而它们是租户过滤和
 #: TTL 清理走索引的全部依赖（``idx_responses_prev`` 老库已有，不在此列）。
 _EXPECTED_INDEXES: tuple[str, ...] = (
-    "idx_responses_ws", "idx_responses_expires",
-    "idx_resp_input_ws", "idx_resp_input_expires",
-    "idx_resp_output_ws", "idx_resp_output_expires",
-    "idx_resp_events_ws", "idx_resp_events_expires",
+    "idx_responses_ws",
+    "idx_responses_expires",
+    "idx_resp_input_ws",
+    "idx_resp_input_expires",
+    "idx_resp_output_ws",
+    "idx_resp_output_expires",
+    "idx_resp_events_ws",
+    "idx_resp_events_expires",
     "idx_state_chain_ws",
-    "idx_bt_ws", "idx_bt_expires",
-    "idx_te_ws", "idx_te_expires",
+    "idx_bt_ws",
+    "idx_bt_expires",
+    "idx_te_ws",
+    "idx_te_expires",
     "idx_idem_expires",
 )
 
@@ -320,50 +350,56 @@ def _seed_legacy_v004_database(path: str) -> None:
         _run(run_migrations_or_exit(ex, list(MIGRATIONS[:2]), sqlite_db_path=path))
         for sql in _LEGACY_V004_SQLITE:
             _run(db.execute(sql))
-        _run(db.execute(
-            "INSERT INTO schema_migrations "
-            "(version, name, sql_digest, applied_at, duration_ms, status) "
-            "VALUES (4, 'response_store', ?, 1, 0, 'applied')",
-            (_LEGACY_V004_DIGEST,),
-        ))
+        _run(
+            db.execute(
+                "INSERT INTO schema_migrations "
+                "(version, name, sql_digest, applied_at, duration_ms, status) "
+                "VALUES (4, 'response_store', ?, 1, 0, 'applied')",
+                (_LEGACY_V004_DIGEST,),
+            )
+        )
         # 带真实租户身份的历史数据行。
-        _run(db.execute(
-            "INSERT INTO responses (response_id, tenant_id, status, model, "
-            "created_at, updated_at) VALUES ('resp_legacy', 't1', 'completed', 'm', 1, 1)"
-        ))
-        _run(db.execute(
-            "INSERT INTO response_state_chain "
-            "(response_id, tenant_id, previous_response_id, depth) "
-            "VALUES ('resp_legacy', 't1', 'resp_parent', 1)"
-        ))
-        _run(db.execute(
-            "INSERT INTO tool_executions (execution_id, response_id, tenant_id, "
-            "call_id, tool_name, status, created_at, updated_at) "
-            "VALUES ('exec_legacy', 'resp_legacy', 't1', 'call_1', 'f', 'done', 1, 1)"
-        ))
-        _run(db.execute(
-            "INSERT INTO background_tasks (task_id, response_id, tenant_id, status, "
-            "created_at, updated_at, lease_until, cancel_requested, "
-            "max_wall_seconds, max_tool_rounds, attempt) "
-            "VALUES ('task_legacy', 'resp_legacy', 't1', 'in_progress', "
-            "1785740412, 1785740412, 1785740472, 1, 900, 32, 0)"
-        ))
+        _run(
+            db.execute(
+                "INSERT INTO responses (response_id, tenant_id, status, model, "
+                "created_at, updated_at) VALUES ('resp_legacy', 't1', 'completed', 'm', 1, 1)"
+            )
+        )
+        _run(
+            db.execute(
+                "INSERT INTO response_state_chain "
+                "(response_id, tenant_id, previous_response_id, depth) "
+                "VALUES ('resp_legacy', 't1', 'resp_parent', 1)"
+            )
+        )
+        _run(
+            db.execute(
+                "INSERT INTO tool_executions (execution_id, response_id, tenant_id, "
+                "call_id, tool_name, status, created_at, updated_at) "
+                "VALUES ('exec_legacy', 'resp_legacy', 't1', 'call_1', 'f', 'done', 1, 1)"
+            )
+        )
+        _run(
+            db.execute(
+                "INSERT INTO background_tasks (task_id, response_id, tenant_id, status, "
+                "created_at, updated_at, lease_until, cancel_requested, "
+                "max_wall_seconds, max_tool_rounds, attempt) "
+                "VALUES ('task_legacy', 'resp_legacy', 't1', 'in_progress', "
+                "1785740412, 1785740412, 1785740472, 1, 900, 32, 0)"
+            )
+        )
         _run(db.commit())
     finally:
         _run(db.close())
 
 
 def _table_names(db) -> set[str]:
-    rows = _run(db.execute_fetchall(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-    ))
+    rows = _run(db.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"))
     return {r[0] for r in rows}
 
 
 def _index_names(db) -> set[str]:
-    rows = _run(db.execute_fetchall(
-        "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
-    ))
+    rows = _run(db.execute_fetchall("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"))
     return {r[0] for r in rows}
 
 
@@ -373,9 +409,7 @@ def _columns(db, table: str) -> set[str]:
 
 
 def _schema_snapshot(db) -> dict:
-    rows = _run(db.execute_fetchall(
-        "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
-    ))
+    rows = _run(db.execute_fetchall("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"))
     return {(r[0], r[1]): r[2] for r in rows}
 
 
@@ -411,8 +445,14 @@ def test_v007_realigns_a_legacy_pre_rename_database(tmp_db):
             assert t in tables, f"v007 未补齐表 {t}"
 
         # 2) workspace_id / expires_at 两列在 6 张表上齐全。
-        for t in ("responses", "response_input_items", "response_output_items",
-                  "response_events", "response_state_chain", "tool_executions"):
+        for t in (
+            "responses",
+            "response_input_items",
+            "response_output_items",
+            "response_events",
+            "response_state_chain",
+            "tool_executions",
+        ):
             cols = _columns(db, t)
             assert "workspace_id" in cols, f"{t} 缺 workspace_id"
             assert "expires_at" in cols, f"{t} 缺 expires_at"
@@ -424,37 +464,43 @@ def test_v007_realigns_a_legacy_pre_rename_database(tmp_db):
 
         # 4) 租户回填正确 —— 老行的真实租户 t1 必须落到 workspace_id 上，
         #    而不是留在空租户里被任何走默认参数的调用一网打尽。
-        row = _run(db.execute_fetchall(
-            "SELECT workspace_id, tenant_id FROM responses WHERE response_id='resp_legacy'"
-        ))
+        row = _run(db.execute_fetchall("SELECT workspace_id, tenant_id FROM responses WHERE response_id='resp_legacy'"))
         assert row[0] == ("t1", "t1")
-        row = _run(db.execute_fetchall(
-            "SELECT workspace_id FROM response_state_chain WHERE response_id='resp_legacy'"
-        ))
+        row = _run(db.execute_fetchall("SELECT workspace_id FROM response_state_chain WHERE response_id='resp_legacy'"))
         assert row[0][0] == "t1"
-        row = _run(db.execute_fetchall(
-            "SELECT workspace_id FROM tool_executions WHERE execution_id='exec_legacy'"
-        ))
+        row = _run(db.execute_fetchall("SELECT workspace_id FROM tool_executions WHERE execution_id='exec_legacy'"))
         assert row[0][0] == "t1", "T26 遗留的孤儿行必须被 v007 回填"
 
         # 5) background_tasks 的数据出现在 background_jobs 里，字段逐一对应。
-        row = _run(db.execute_fetchall(
-            "SELECT task_id, response_id, workspace_id, status, created_at, "
-            "updated_at, lease_until, cancel_requested, max_wall_seconds, "
-            "max_tool_rounds, attempt, expires_at FROM background_jobs"
-        ))
-        assert row == [(
-            "task_legacy", "resp_legacy", "t1", "in_progress",
-            1785740412, 1785740412, 1785740472, 1, 900, 32, 0, 0,
-        )]
+        row = _run(
+            db.execute_fetchall(
+                "SELECT task_id, response_id, workspace_id, status, created_at, "
+                "updated_at, lease_until, cancel_requested, max_wall_seconds, "
+                "max_tool_rounds, attempt, expires_at FROM background_jobs"
+            )
+        )
+        assert row == [
+            (
+                "task_legacy",
+                "resp_legacy",
+                "t1",
+                "in_progress",
+                1785740412,
+                1785740412,
+                1785740472,
+                1,
+                900,
+                32,
+                0,
+                0,
+            )
+        ]
         # 老表保留，给运维留回退余地。
         assert "background_tasks" in tables
         assert _run(db.execute_fetchall("SELECT COUNT(*) FROM background_tasks"))[0][0] == 1
 
         # 6) 被原地重写的 v004 必须在版本表里留下痕迹（可观测性，非阻断）。
-        status = _run(db.execute_fetchall(
-            "SELECT status FROM schema_migrations WHERE version = 4"
-        ))
+        status = _run(db.execute_fetchall("SELECT status FROM schema_migrations WHERE version = 4"))
         assert status[0][0] == migration_engine.STATUS_DIGEST_MISMATCH
     finally:
         _run(db.close())
@@ -477,8 +523,7 @@ def test_v007_rerun_on_realigned_database_is_stable(tmp_db):
     try:
         _run(run_migrations_or_exit(ex2, MIGRATIONS, sqlite_db_path=tmp_db))
         assert _schema_snapshot(db2) == before_schema
-        assert _run(db2.execute_fetchall(
-            "SELECT * FROM background_jobs ORDER BY task_id")) == before_jobs
+        assert _run(db2.execute_fetchall("SELECT * FROM background_jobs ORDER BY task_id")) == before_jobs
     finally:
         _run(db2.close())
 
@@ -493,14 +538,18 @@ def test_v007_is_noop_on_healthy_database(tmp_db):
     db, ex = _executor(tmp_db)
     _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
     # 塞入正常的新租户数据：若回填 hook 误伤，workspace_id 会被 '' 覆盖。
-    _run(db.execute(
-        "INSERT INTO responses (response_id, workspace_id, status, model, "
-        "created_at, updated_at) VALUES ('resp_new', 'ws1', 'queued', 'm', 1, 1)"
-    ))
-    _run(db.execute(
-        "INSERT INTO background_jobs (task_id, response_id, workspace_id, status, "
-        "created_at, updated_at) VALUES ('task_new', 'resp_new', 'ws1', 'queued', 1, 1)"
-    ))
+    _run(
+        db.execute(
+            "INSERT INTO responses (response_id, workspace_id, status, model, "
+            "created_at, updated_at) VALUES ('resp_new', 'ws1', 'queued', 'm', 1, 1)"
+        )
+    )
+    _run(
+        db.execute(
+            "INSERT INTO background_jobs (task_id, response_id, workspace_id, status, "
+            "created_at, updated_at) VALUES ('task_new', 'resp_new', 'ws1', 'queued', 1, 1)"
+        )
+    )
     _run(db.commit())
     before_schema = _schema_snapshot(db)
     before_responses = _run(db.execute_fetchall("SELECT * FROM responses"))
@@ -534,17 +583,13 @@ def test_digest_drift_warns_without_blocking_startup(tmp_db):
     db, ex = _executor(tmp_db)
     try:
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
-        _run(db.execute(
-            "UPDATE schema_migrations SET sql_digest = 'deadbeef' WHERE version = 4"
-        ))
+        _run(db.execute("UPDATE schema_migrations SET sql_digest = 'deadbeef' WHERE version = 4"))
         _run(db.commit())
 
         # 不抛 SystemExit == 服务照常启动。
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
 
-        rows = _run(db.execute_fetchall(
-            "SELECT version, status FROM schema_migrations ORDER BY version"
-        ))
+        rows = _run(db.execute_fetchall("SELECT version, status FROM schema_migrations ORDER BY version"))
         by_version = dict(rows)
         assert by_version[4] == migration_engine.STATUS_DIGEST_MISMATCH
         # 未漂移的版本不能被误标。
@@ -558,8 +603,12 @@ def test_v003_hashes_legacy_tokens(tmp_db):
     # Seed a database with the baseline schema + a legacy plaintext token.
     db1, ex1 = _executor(tmp_db)
     _run(run_migrations_or_exit(ex1, [MIGRATIONS[0]], sqlite_db_path=tmp_db))
-    _run(db1.execute("INSERT INTO access_tokens (token, label, enabled, created_at) VALUES (?, ?, 1, ?)",
-                     ("zz-legacy-plaintext-token", "legacy", 1)))
+    _run(
+        db1.execute(
+            "INSERT INTO access_tokens (token, label, enabled, created_at) VALUES (?, ?, 1, ?)",
+            ("zz-legacy-plaintext-token", "legacy", 1),
+        )
+    )
     _run(db1.commit())
     _run(db1.close())
 
@@ -567,11 +616,11 @@ def test_v003_hashes_legacy_tokens(tmp_db):
     db2, ex2 = _executor(tmp_db)
     try:
         _run(run_migrations_or_exit(ex2, MIGRATIONS, sqlite_db_path=tmp_db))
+
         async def _query():
-            cur = await db2.execute(
-                "SELECT token, token_prefix, token_hash FROM access_tokens WHERE label='legacy'"
-            )
+            cur = await db2.execute("SELECT token, token_prefix, token_hash FROM access_tokens WHERE label='legacy'")
             return await cur.fetchone()
+
         row = _run(_query())
         assert row is not None
         token, prefix, digest = row

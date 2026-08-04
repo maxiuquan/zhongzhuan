@@ -5,6 +5,7 @@ the official OpenAI Responses ``response`` object, and builds the paginated
 ``list`` object for ``input_items``.  Keeping the mapping here (separate from
 the handler) means the contract is unit-testable without a store or server.
 """
+
 from __future__ import annotations
 
 from typing import Any

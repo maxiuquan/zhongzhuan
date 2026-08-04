@@ -3,6 +3,7 @@
 Covers acceptance criterion (2) of T09 -- the terminal-reason enum is complete
 -- plus signature-stability guards for every symbol later tasks import.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -60,9 +61,18 @@ from zhongzhuan.proxy.protocol.responses_models import (
 # ---------------------------------------------------------------------------
 
 ALL_ENUMS = [
-    InboundProtocol, ResponsesEndpoint, ResponseStatus, ExecutionMode,
-    ReasoningEventMode, EmitterState, DeltaKind, Capability, ErrorClass,
-    TerminalReason, ItemType, ItemStatus,
+    InboundProtocol,
+    ResponsesEndpoint,
+    ResponseStatus,
+    ExecutionMode,
+    ReasoningEventMode,
+    EmitterState,
+    DeltaKind,
+    Capability,
+    ErrorClass,
+    TerminalReason,
+    ItemType,
+    ItemStatus,
 ]
 
 
@@ -91,19 +101,32 @@ def test_inbound_protocol_matches_detect_return_values():
 
 def test_responses_endpoint_has_six_members():
     assert enum_values(ResponsesEndpoint) == {
-        "create", "retrieve", "delete", "cancel", "compact", "input_items",
+        "create",
+        "retrieve",
+        "delete",
+        "cancel",
+        "compact",
+        "input_items",
     }
 
 
 def test_response_status_and_terminal_set():
     assert enum_values(ResponseStatus) == {
-        "queued", "in_progress", "completed", "failed", "incomplete",
+        "queued",
+        "in_progress",
+        "completed",
+        "failed",
+        "incomplete",
         "cancelled",
     }
-    assert TERMINAL_RESPONSE_STATUSES == frozenset({
-        ResponseStatus.COMPLETED, ResponseStatus.FAILED,
-        ResponseStatus.INCOMPLETE, ResponseStatus.CANCELLED,
-    })
+    assert TERMINAL_RESPONSE_STATUSES == frozenset(
+        {
+            ResponseStatus.COMPLETED,
+            ResponseStatus.FAILED,
+            ResponseStatus.INCOMPLETE,
+            ResponseStatus.CANCELLED,
+        }
+    )
 
 
 def test_execution_mode_three_members():
@@ -132,8 +155,7 @@ EXPECTED_CIRCUIT_BREAKER_REASONS = {
 def test_ten_circuit_breaker_terminal_reasons_are_complete():
     """T09 criterion (2): exactly the ten R-P0-32 circuit-breaker reasons."""
     assert len(CIRCUIT_BREAKER_REASONS) == 10
-    assert {r.value for r in CIRCUIT_BREAKER_REASONS} == \
-        EXPECTED_CIRCUIT_BREAKER_REASONS
+    assert {r.value for r in CIRCUIT_BREAKER_REASONS} == EXPECTED_CIRCUIT_BREAKER_REASONS
     for value in EXPECTED_CIRCUIT_BREAKER_REASONS:
         assert TerminalReason(value) in CIRCUIT_BREAKER_REASONS
 
@@ -143,15 +165,26 @@ def test_terminal_reason_full_value_set():
     assert enum_values(TerminalReason) == {
         "normal_finish",
         # ten circuit breakers
-        "max_tool_rounds", "max_total_tool_calls", "repeated_tool_call",
-        "repeated_tool_failure", "max_response_time", "max_output_budget",
-        "response_chain_cycle", "response_chain_too_deep",
-        "retry_budget_exhausted", "background_budget_exhausted",
+        "max_tool_rounds",
+        "max_total_tool_calls",
+        "repeated_tool_call",
+        "repeated_tool_failure",
+        "max_response_time",
+        "max_output_budget",
+        "response_chain_cycle",
+        "response_chain_too_deep",
+        "retry_budget_exhausted",
+        "background_budget_exhausted",
         # non circuit-breaker terminations
-        "upstream_truncated", "capability_route_unavailable",
-        "client_disconnected", "upstream_error", "cancelled_by_client",
+        "upstream_truncated",
+        "capability_route_unavailable",
+        "client_disconnected",
+        "upstream_error",
+        "cancelled_by_client",
         # timeout classification (deviation, see module docstring)
-        "upstream_connect", "first_token_timeout", "read_idle_timeout",
+        "upstream_connect",
+        "first_token_timeout",
+        "read_idle_timeout",
     }
     assert len(list(TerminalReason)) == 19
 
@@ -160,7 +193,9 @@ def test_four_timeout_reasons_are_mutually_distinct():
     """R-P1-26 / T28-4: connect / first-token / read-idle / total differ."""
     assert len(TIMEOUT_REASONS) == 4
     assert {r.value for r in TIMEOUT_REASONS} == {
-        "upstream_connect", "first_token_timeout", "read_idle_timeout",
+        "upstream_connect",
+        "first_token_timeout",
+        "read_idle_timeout",
         "max_response_time",
     }
 
@@ -225,13 +260,11 @@ def test_response_status_maps_onto_emitter_state():
     for status, state in RESPONSE_STATUS_TO_EMITTER_STATE.items():
         assert status.value == state.value
     for status in TERMINAL_RESPONSE_STATUSES:
-        assert RESPONSE_STATUS_TO_EMITTER_STATE[status] in \
-            TERMINAL_EMITTER_STATES
+        assert RESPONSE_STATUS_TO_EMITTER_STATE[status] in TERMINAL_EMITTER_STATES
 
 
 def test_transition_label_format():
-    assert transition_label(EmitterState.INIT, EmitterState.COMPLETED) == \
-        "init->completed"
+    assert transition_label(EmitterState.INIT, EmitterState.COMPLETED) == "init->completed"
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +275,14 @@ def test_transition_label_format():
 def test_capability_has_nine_members_including_tool_search():
     assert len(list(Capability)) == 9
     assert enum_values(Capability) == {
-        "stateful_responses", "background", "web_search", "file_search",
-        "computer", "code_interpreter", "image_generation", "remote_mcp",
+        "stateful_responses",
+        "background",
+        "web_search",
+        "file_search",
+        "computer",
+        "code_interpreter",
+        "image_generation",
+        "remote_mcp",
         "tool_search",
     }
     assert Capability.TOOL_SEARCH == "tool_search"
@@ -261,7 +300,10 @@ def test_hosted_tool_capability_values_are_capabilities():
 
 def test_delta_kind_contains_the_five_documented_families():
     assert {
-        "output_text", "refusal", "reasoning_summary_text", "reasoning_text",
+        "output_text",
+        "refusal",
+        "reasoning_summary_text",
+        "reasoning_text",
         "function_call_arguments",
     } <= enum_values(DeltaKind)
 
@@ -276,7 +318,9 @@ def test_item_type_has_eighteen_official_members():
 
 def test_item_status_values():
     assert enum_values(ItemStatus) == {
-        "in_progress", "completed", "incomplete",
+        "in_progress",
+        "completed",
+        "incomplete",
     }
 
 
@@ -284,8 +328,7 @@ def test_item_status_values():
 # Dataclasses
 # ---------------------------------------------------------------------------
 
-FROZEN_DATACLASSES = [NormalizedItem, OutputItem, HostedToolSpec,
-                      SanitizedRequest]
+FROZEN_DATACLASSES = [NormalizedItem, OutputItem, HostedToolSpec, SanitizedRequest]
 
 
 @pytest.mark.parametrize("cls", FROZEN_DATACLASSES)
@@ -312,8 +355,7 @@ def test_normalized_item_default_payload_not_shared():
 
 
 def test_output_item_defaults():
-    item = OutputItem(id="fc_call_1", output_index=2,
-                      item_type=ItemType.FUNCTION_CALL)
+    item = OutputItem(id="fc_call_1", output_index=2, item_type=ItemType.FUNCTION_CALL)
     assert item.status is ItemStatus.IN_PROGRESS
     assert item.role == "" and item.call_id == "" and item.name == ""
     assert item.extra == {}
@@ -362,11 +404,22 @@ def test_sanitized_request_lists_stay_mutable_for_the_sanitizer():
 
 
 def test_chat_base_allowed_exact_set():
-    assert CHAT_BASE_ALLOWED == frozenset({
-        "model", "temperature", "top_p", "max_tokens", "stop", "stream",
-        "tools", "tool_choice", "response_format", "seed", "user",
-        "reasoning_effort",
-    })
+    assert CHAT_BASE_ALLOWED == frozenset(
+        {
+            "model",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "stop",
+            "stream",
+            "tools",
+            "tool_choice",
+            "response_format",
+            "seed",
+            "user",
+            "reasoning_effort",
+        }
+    )
 
 
 def test_providers_may_only_narrow_the_base_allowlist():
@@ -375,22 +428,28 @@ def test_providers_may_only_narrow_the_base_allowlist():
 
 
 def test_resolve_provider_allowlist_falls_back_safely():
-    assert resolve_provider_allowlist("deepseek") == \
-        PROVIDER_CAPABILITIES["deepseek"]
-    assert resolve_provider_allowlist("  DeepSeek ") == \
-        PROVIDER_CAPABILITIES["deepseek"]
-    assert resolve_provider_allowlist("unknown-vendor") == \
-        PROVIDER_CAPABILITIES[DEFAULT_PROVIDER]
-    assert resolve_provider_allowlist("") == \
-        PROVIDER_CAPABILITIES[DEFAULT_PROVIDER]
+    assert resolve_provider_allowlist("deepseek") == PROVIDER_CAPABILITIES["deepseek"]
+    assert resolve_provider_allowlist("  DeepSeek ") == PROVIDER_CAPABILITIES["deepseek"]
+    assert resolve_provider_allowlist("unknown-vendor") == PROVIDER_CAPABILITIES[DEFAULT_PROVIDER]
+    assert resolve_provider_allowlist("") == PROVIDER_CAPABILITIES[DEFAULT_PROVIDER]
 
 
 def test_no_responses_only_field_leaks_into_the_allowlist():
     """13 Responses-only fields must never be forwardable to Chat upstreams."""
     responses_only = {
-        "input", "instructions", "previous_response_id", "store", "background",
-        "reasoning", "text", "include", "truncation", "metadata",
-        "parallel_tool_calls", "max_output_tokens", "service_tier",
+        "input",
+        "instructions",
+        "previous_response_id",
+        "store",
+        "background",
+        "reasoning",
+        "text",
+        "include",
+        "truncation",
+        "metadata",
+        "parallel_tool_calls",
+        "max_output_tokens",
+        "service_tier",
     }
     assert CHAT_BASE_ALLOWED.isdisjoint(responses_only)
 
@@ -428,14 +487,11 @@ def test_synthetic_call_id_is_reproducible():
 
 
 def test_coerce_enum_never_raises():
-    assert coerce_enum(ErrorClass, "invalid_sse_frame") is \
-        ErrorClass.INVALID_SSE_FRAME
-    assert coerce_enum(ErrorClass, ErrorClass.CLIENT_DISCONNECTED) is \
-        ErrorClass.CLIENT_DISCONNECTED
+    assert coerce_enum(ErrorClass, "invalid_sse_frame") is ErrorClass.INVALID_SSE_FRAME
+    assert coerce_enum(ErrorClass, ErrorClass.CLIENT_DISCONNECTED) is ErrorClass.CLIENT_DISCONNECTED
     assert coerce_enum(ErrorClass, "brand_new_class_from_2027") is None
     assert coerce_enum(ErrorClass, None) is None
-    assert coerce_enum(ErrorClass, 42, default=ErrorClass.INVALID_CLIENT_REQUEST) \
-        is ErrorClass.INVALID_CLIENT_REQUEST
+    assert coerce_enum(ErrorClass, 42, default=ErrorClass.INVALID_CLIENT_REQUEST) is ErrorClass.INVALID_CLIENT_REQUEST
 
 
 def test_freeze_mapping_copies():

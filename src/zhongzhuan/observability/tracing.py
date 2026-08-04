@@ -16,6 +16,7 @@ recorder**（span 列表 + 属性），接口与 OTel 形态一致 —— 全量
 ``SpanProcessor`` / exporter。测试始终用可注入的 exporter（内存 recorder）断言，
 不依赖真实 OTLP 端点。
 """
+
 from __future__ import annotations
 
 import threading
@@ -40,6 +41,7 @@ def _load_otel():
             BatchSpanProcessor,
             SimpleSpanProcessor,
         )
+
         return _TracerProvider, BatchSpanProcessor, SimpleSpanProcessor
     except Exception:  # noqa: BLE001 - 可选依赖缺失属预期，绝不在此炸掉
         return None

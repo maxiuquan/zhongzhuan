@@ -1,4 +1,5 @@
 """Inbound protocol detection by path + headers."""
+
 from __future__ import annotations
 
 

@@ -10,6 +10,7 @@
 这两个模块**不得** import ``zhongzhuan`` 下的任何东西，以保证它们可以作为
 「外部观察者」对被测代码做黑盒断言。
 """
+
 from __future__ import annotations
 
 from .sse_assert import (  # noqa: F401

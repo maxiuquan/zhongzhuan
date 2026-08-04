@@ -3,6 +3,7 @@
 Stores the in-memory KeyHealth state to SQLite/TiDB so that learned rate
 limits, cooldown timers, and success/failure counters survive restarts.
 """
+
 from __future__ import annotations
 
 import time
@@ -37,8 +38,17 @@ async def save_health(s: "Store", r: KeyHealthRow) -> None:
              rpm_limit=excluded.rpm_limit, tpm_limit=excluded.tpm_limit,
              success_count=excluded.success_count, failure_count=excluded.failure_count,
              recent_429_count=excluded.recent_429_count, updated_at=excluded.updated_at""",
-        (r.key_id, r.status, r.cooldown_until, r.rpm_limit, r.tpm_limit,
-         r.success_count, r.failure_count, r.recent_429_count, now),
+        (
+            r.key_id,
+            r.status,
+            r.cooldown_until,
+            r.rpm_limit,
+            r.tpm_limit,
+            r.success_count,
+            r.failure_count,
+            r.recent_429_count,
+            now,
+        ),
     )
 
 
@@ -51,9 +61,14 @@ async def load_all_health(s: "Store") -> dict[int, KeyHealthRow]:
     )
     return {
         row[0]: KeyHealthRow(
-            key_id=row[0], status=row[1], cooldown_until=row[2],
-            rpm_limit=row[3], tpm_limit=row[4], success_count=row[5],
-            failure_count=row[6], recent_429_count=row[7],
+            key_id=row[0],
+            status=row[1],
+            cooldown_until=row[2],
+            rpm_limit=row[3],
+            tpm_limit=row[4],
+            success_count=row[5],
+            failure_count=row[6],
+            recent_429_count=row[7],
         )
         for row in rows
     }

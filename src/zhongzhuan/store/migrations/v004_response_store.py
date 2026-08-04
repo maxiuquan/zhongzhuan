@@ -45,6 +45,7 @@ Design rules (T19 alignment with authoritative DDL §4.2 / B2 decision):
 * ``payload`` is stored as JSON text (SQLite-compatible) so both the SQLite
   and TiDB backends can share one schema.
 """
+
 from __future__ import annotations
 
 from ..migration_engine import Migration

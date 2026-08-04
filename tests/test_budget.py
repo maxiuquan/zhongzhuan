@@ -23,6 +23,7 @@ Acceptance criteria -> test functions:
   :func:`test_zero_wall_time_rejected`,
   :func:`test_budget_profiles_wall_time`.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -303,8 +304,11 @@ async def test_circuit_breaker_six_steps_order():
     breaker = CircuitBreaker()
     await breaker.trip(
         TerminalReason.MAX_TOOL_ROUNDS,
-        FakeCtx(), FakePipeline(), make_emitter(),
-        TurnAccumulator(response_id="resp_cb"), FakeStore(),
+        FakeCtx(),
+        FakePipeline(),
+        make_emitter(),
+        TurnAccumulator(response_id="resp_cb"),
+        FakeStore(),
     )
     assert breaker.last_steps == [
         "stop_upstream_read",
@@ -322,14 +326,16 @@ async def test_trip_reaches_terminal_even_if_early_step_raises():
     emitter = make_emitter()
     frames = await breaker.trip(
         TerminalReason.MAX_RESPONSE_TIME,
-        FakeCtx(), FakePipeline(fail_cancel=True), emitter,
-        TurnAccumulator(response_id="resp_cb"), FakeStore(),
+        FakeCtx(),
+        FakePipeline(fail_cancel=True),
+        emitter,
+        TurnAccumulator(response_id="resp_cb"),
+        FakeStore(),
     )
     assert breaker.last_steps == list(TRIP_STEPS)
     assert breaker.step_errors and "stop_upstream_read" in breaker.step_errors[0]
     assert emitter.done is True
-    assert terminal_event(frames)["response"]["incomplete_details"]["reason"] == \
-        "max_response_time"
+    assert terminal_event(frames)["response"]["incomplete_details"]["reason"] == "max_response_time"
 
 
 async def test_second_trip_on_same_emitter_is_a_safe_noop():
@@ -338,12 +344,20 @@ async def test_second_trip_on_same_emitter_is_a_safe_noop():
     emitter = make_emitter()
     turn = TurnAccumulator(response_id="resp_cb")
     first = await breaker.trip(
-        TerminalReason.MAX_OUTPUT_BUDGET, FakeCtx(), FakePipeline(),
-        emitter, turn, FakeStore(),
+        TerminalReason.MAX_OUTPUT_BUDGET,
+        FakeCtx(),
+        FakePipeline(),
+        emitter,
+        turn,
+        FakeStore(),
     )
     second = await breaker.trip(
-        TerminalReason.MAX_OUTPUT_BUDGET, FakeCtx(), FakePipeline(),
-        emitter, turn, FakeStore(),
+        TerminalReason.MAX_OUTPUT_BUDGET,
+        FakeCtx(),
+        FakePipeline(),
+        emitter,
+        turn,
+        FakeStore(),
     )
     assert terminal_event(first)["response"]["status"] == "incomplete"
     assert second == [], "the emitter latch must suppress the duplicate terminal"
@@ -363,20 +377,25 @@ async def test_async_audit_sink_is_not_awaited_inline():
     breaker = CircuitBreaker()
     emitter = make_emitter()
     frames = await breaker.trip(
-        TerminalReason.RESPONSE_CHAIN_CYCLE, FakeCtx(), FakePipeline(),
-        emitter, TurnAccumulator(response_id="r"), AsyncStore(),
+        TerminalReason.RESPONSE_CHAIN_CYCLE,
+        FakeCtx(),
+        FakePipeline(),
+        emitter,
+        TurnAccumulator(response_id="r"),
+        AsyncStore(),
     )
     assert emitter.done is True and breaker.step_errors == []
-    assert terminal_event(frames)["response"]["incomplete_details"]["reason"] == \
-        "response_chain_cycle"
+    assert terminal_event(frames)["response"]["incomplete_details"]["reason"] == "response_chain_cycle"
     await asyncio.sleep(0)  # let the fire-and-forget audit tasks run
     assert {e["event"] for e in written} == {
-        "circuit_breaker.rollback", "circuit_breaker.trip",
+        "circuit_breaker.rollback",
+        "circuit_breaker.trip",
     }
 
 
 async def test_broken_audit_sink_does_not_break_the_trip():
     """Audit is best-effort: a raising sink must not lose the terminal event."""
+
     class ExplodingStore:
         def record_audit(self, event: dict) -> None:
             raise RuntimeError("audit db is down")
@@ -384,13 +403,16 @@ async def test_broken_audit_sink_does_not_break_the_trip():
     breaker = CircuitBreaker()
     emitter = make_emitter()
     frames = await breaker.trip(
-        TerminalReason.REPEATED_TOOL_FAILURE, FakeCtx(), FakePipeline(),
-        emitter, TurnAccumulator(response_id="r"), ExplodingStore(),
+        TerminalReason.REPEATED_TOOL_FAILURE,
+        FakeCtx(),
+        FakePipeline(),
+        emitter,
+        TurnAccumulator(response_id="r"),
+        ExplodingStore(),
     )
     assert breaker.last_steps == list(TRIP_STEPS)
     assert breaker.step_errors == [], "audit failures are swallowed, not step errors"
-    assert terminal_event(frames)["response"]["incomplete_details"]["reason"] == \
-        "repeated_tool_failure"
+    assert terminal_event(frames)["response"]["incomplete_details"]["reason"] == "repeated_tool_failure"
 
 
 async def test_trip_tolerates_a_pipeline_without_hooks():
@@ -399,12 +421,15 @@ async def test_trip_tolerates_a_pipeline_without_hooks():
     emitter = make_emitter()
     frames = await breaker.trip(
         TerminalReason.BACKGROUND_BUDGET_EXHAUSTED,
-        FakeCtx(), object(), emitter, TurnAccumulator(response_id="r"), object(),
+        FakeCtx(),
+        object(),
+        emitter,
+        TurnAccumulator(response_id="r"),
+        object(),
     )
     assert breaker.step_errors == []
     assert emitter.done is True
-    assert terminal_event(frames)["response"]["incomplete_details"]["reason"] == \
-        "background_budget_exhausted"
+    assert terminal_event(frames)["response"]["incomplete_details"]["reason"] == "background_budget_exhausted"
 
 
 async def test_close_open_items_closes_every_open_item():
@@ -422,8 +447,12 @@ async def test_close_open_items_closes_every_open_item():
         emitter.open_item(item)
 
     frames = await breaker.trip(
-        TerminalReason.REPEATED_TOOL_CALL, FakeCtx(), FakePipeline(),
-        emitter, turn, FakeStore(),
+        TerminalReason.REPEATED_TOOL_CALL,
+        FakeCtx(),
+        FakePipeline(),
+        emitter,
+        turn,
+        FakeStore(),
     )
     done_frames = [f for f in frames if b"response.output_item.done" in f]
     assert len(done_frames) == 2
@@ -431,7 +460,7 @@ async def test_close_open_items_closes_every_open_item():
 
 
 def test_open_items_excludes_never_added_and_already_done():
-    """"Open" is *added and not done* -- closing anything else is malformed."""
+    """ "Open" is *added and not done* -- closing anything else is malformed."""
     turn = TurnAccumulator(response_id="resp_cb")
     never_added = turn.new_message()
     already_done = turn.new_message()

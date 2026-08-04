@@ -3,6 +3,7 @@
 Pure functions: translate Anthropic requests to OpenAI requests, and OpenAI
 non-streaming responses back to Anthropic format.
 """
+
 from __future__ import annotations
 
 import json
@@ -39,9 +40,7 @@ def _system_to_text(system: Any) -> str:
     return str(system)
 
 
-def _convert_content_blocks_a2o(
-    blocks: list[dict], role: str
-) -> tuple[Any, list[dict]]:
+def _convert_content_blocks_a2o(blocks: list[dict], role: str) -> tuple[Any, list[dict]]:
     """Convert a list of Anthropic content blocks to OpenAI content + tool_calls.
 
     Returns ``(content, tool_calls)`` where ``content`` is either a string or a
@@ -74,16 +73,16 @@ def _convert_content_blocks_a2o(
                 url = source.get("url", "")
             parts.append({"type": "image_url", "image_url": {"url": url}})
         elif btype == "tool_use" and role == "assistant":
-            tool_calls.append({
-                "id": block.get("id", ""),
-                "type": "function",
-                "function": {
-                    "name": block.get("name", ""),
-                    "arguments": json.dumps(
-                        block.get("input") or {}, ensure_ascii=False
-                    ),
-                },
-            })
+            tool_calls.append(
+                {
+                    "id": block.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name", ""),
+                        "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+                    },
+                }
+            )
         elif btype == "tool_result" and role == "user":
             # tool_result is handled separately by the caller (becomes a
             # dedicated role:"tool" message); skip here.
@@ -118,11 +117,13 @@ def _convert_tool_results_a2o(blocks: list[dict]) -> list[dict]:
                 content = "".join(parts)
             elif not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False) if content is not None else ""
-            out.append({
-                "role": "tool",
-                "tool_call_id": block.get("tool_use_id", ""),
-                "content": content,
-            })
+            out.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": block.get("tool_use_id", ""),
+                    "content": content,
+                }
+            )
     return out
 
 
@@ -310,17 +311,16 @@ def translate_response_o2a(resp: dict, model: str = "") -> dict:
         try:
             args_obj = json.loads(args_str) if args_str else {}
         except (json.JSONDecodeError, ValueError):
-            logger.warning(
-                "translate_response_o2a: failed to parse tool_call arguments, "
-                "falling back to empty object"
-            )
+            logger.warning("translate_response_o2a: failed to parse tool_call arguments, falling back to empty object")
             args_obj = {}
-        content.append({
-            "type": "tool_use",
-            "id": tc.get("id", ""),
-            "name": fn.get("name", ""),
-            "input": args_obj,
-        })
+        content.append(
+            {
+                "type": "tool_use",
+                "id": tc.get("id", ""),
+                "name": fn.get("name", ""),
+                "input": args_obj,
+            }
+        )
 
     stop_reason = MAP_FINISH_REASON_O2A.get(finish_reason, "end_turn")
 

@@ -32,6 +32,7 @@
 * 6~15 流聚合：``ResponsePipeline``（T21/T28 可注入 mock 上游）+ ``ResponseStore`` 事件日志。
 * 16/17 OpenAI SSE 语义：``ResponsesTurnBridge``（T17）。
 """
+
 from __future__ import annotations
 
 import json
@@ -155,9 +156,9 @@ def _parse_events(frames: list[bytes]) -> list[tuple[str, dict]]:
         data_lines: list[str] = []
         for line in text.splitlines():
             if line.startswith("event: "):
-                event_type = line[len("event: "):]
+                event_type = line[len("event: ") :]
             elif line.startswith("data: "):
-                data_lines.append(line[len("data: "):])
+                data_lines.append(line[len("data: ") :])
         if event_type is None:
             continue
         data = json.loads("\n".join(data_lines)) if data_lines else {}
@@ -177,8 +178,9 @@ def _rs(store) -> ResponseStore:
     return ResponseStore(store)
 
 
-async def _run_pipeline(store, chunks: list, *, response_id: str = "resp_s12",
-                        strict: bool = False, **kw) -> tuple[ResponsePipeline, list[tuple[str, dict]]]:
+async def _run_pipeline(
+    store, chunks: list, *, response_id: str = "resp_s12", strict: bool = False, **kw
+) -> tuple[ResponsePipeline, list[tuple[str, dict]]]:
     """把 mock 上游 chunk 序列喂进 pipeline，返回 (pipeline, events)。"""
     upstream = iter(list(chunks))
 
@@ -187,7 +189,9 @@ async def _run_pipeline(store, chunks: list, *, response_id: str = "resp_s12",
             yield c
 
     pipeline = ResponsePipeline(
-        response_id, workspace_id="t1", store=_rs(store),
+        response_id,
+        workspace_id="t1",
+        store=_rs(store),
         config=__import__("zhongzhuan.responses_v3.pipeline", fromlist=["PipelineConfig"]).PipelineConfig(
             strict_terminal=strict,
         ),
@@ -206,12 +210,12 @@ async def test_s12_01_reasoning_all_forms_dropped():
     """reasoning / summary_text / encrypted_content 三种形态在净化和持久化层全部丢弃。"""
     # ① 流侧：ResponsesTurnBridge(DISABLED) 不发出任何 reasoning 事件。
     tr = ResponsesTurnBridge(
-        model="m", reasoning_event_mode=ReasoningEventMode.DISABLED.value,
+        model="m",
+        reasoning_event_mode=ReasoningEventMode.DISABLED.value,
     )
     chunks = [
         _sse({"id": "c1", "choices": [{"index": 0, "delta": {"reasoning_content": "think"}}]}),
-        _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "answer"},
-                                       "finish_reason": "stop"}]}),
+        _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "answer"}, "finish_reason": "stop"}]}),
         b"data: [DONE]\n\n",
     ]
     out: list[bytes] = []
@@ -282,20 +286,24 @@ def test_s12_03_unknown_fields_and_blocks_silently_dropped():
     """未知 item type 被 parse_input_items 跳过；未知顶层字段进 dropped_fields。"""
     from zhongzhuan.proxy.protocol.responses_schema import process_requests_schema
 
-    items = parse_input_items([
-        {"type": "totally_unknown_block", "content": "x"},
-        {"type": "message", "role": "user", "content": "hi"},
-    ])
+    items = parse_input_items(
+        [
+            {"type": "totally_unknown_block", "content": "x"},
+            {"type": "message", "role": "user", "content": "hi"},
+        ]
+    )
     assert len(items) == 1
     assert items[0].item_type == "message"
     assert items[0].payload["content"] == "hi"
 
     # 未知顶层字段：不抛异常、静默记录到 dropped_fields，且不进入上游 payload。
-    processed = process_requests_schema({
-        "model": "gpt-4o",
-        "input": [{"type": "message", "role": "user", "content": "hi"}],
-        "mystery_top_level_field": {"a": 1},
-    })
+    processed = process_requests_schema(
+        {
+            "model": "gpt-4o",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "mystery_top_level_field": {"a": 1},
+        }
+    )
     assert "mystery_top_level_field" in processed.dropped_fields
     assert "mystery_top_level_field" not in processed.payload
 
@@ -313,9 +321,14 @@ def test_s12_04_empty_input_list_does_not_bypass_sanitization():
     assert isinstance(normalized, list) and len(normalized) == 1
     assert normalized[0]["type"] == "message"
 
-    processed = process_requests_schema({
-        "model": "gpt-4o", "input": [], "store": True, "include": ["reasoning"],
-    })
+    processed = process_requests_schema(
+        {
+            "model": "gpt-4o",
+            "input": [],
+            "store": True,
+            "include": ["reasoning"],
+        }
+    )
     # store / include 不进入上游 payload（净化没有被 input=[] 绕过）。
     assert "store" not in processed.payload
     assert "include" not in processed.payload
@@ -333,14 +346,16 @@ def test_s12_05_five_fields_not_passed_through():
     parallel_tool_calls 仅作为 Chat Completions 工具参数透传，绝不作为消息内容。"""
     from zhongzhuan.proxy.protocol.responses_schema import process_requests_schema
 
-    processed = process_requests_schema({
-        "model": "gpt-4o",
-        "previous_response_id": "resp_parent",
-        "input": [{"type": "message", "role": "user", "content": "hi"}],
-        "store": True,
-        "metadata": {"user": "alice"},
-        "parallel_tool_calls": True,
-    })
+    processed = process_requests_schema(
+        {
+            "model": "gpt-4o",
+            "previous_response_id": "resp_parent",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "store": True,
+            "metadata": {"user": "alice"},
+            "parallel_tool_calls": True,
+        }
+    )
     for field in ("previous_response_id", "store", "metadata"):
         assert field not in processed.payload, field
     # parallel_tool_calls 是 Chat Completions 官方工具参数，可以透传为标量，
@@ -358,11 +373,14 @@ def test_s12_05_five_fields_not_passed_through():
 @pytest.mark.asyncio
 async def test_s12_06_tool_name_arguments_arbitrary_fragments(store):
     """name 与 arguments 跨多个 chunk 拼接，最终聚合出完整调用。"""
-    _, events = await _run_pipeline(store, [
-        _tool("call_1", "web_", '{"query": "北', source_index=0),
-        _tool("call_1", "web_search", '京', source_index=0),
-        _tool_done("call_1", '"}'),
-    ])
+    _, events = await _run_pipeline(
+        store,
+        [
+            _tool("call_1", "web_", '{"query": "北', source_index=0),
+            _tool("call_1", "web_search", "京", source_index=0),
+            _tool_done("call_1", '"}'),
+        ],
+    )
     names = _names(events)
     assert "response.function_call_arguments.done" in names
     done = _collect(events, "response.function_call_arguments.done")
@@ -386,11 +404,14 @@ async def test_s12_07_call_id_late_or_missing(store):
     不产生重复执行）——本测试断言「不崩溃 + 参数完整聚合 + 有合成/绑定 ID」。
     """
     # ① 延迟出现：首个 chunk 无 call_id，以 source_index 建立，后续补上 call_id。
-    _, events = await _run_pipeline(store, [
-        {"type": "tool_call", "name": "search", "arguments": '{"q": "', "source_index": 2},
-        _tool("call_late", "search", "x", source_index=2),
-        _tool_done("call_late", '"}'),
-    ])
+    _, events = await _run_pipeline(
+        store,
+        [
+            {"type": "tool_call", "name": "search", "arguments": '{"q": "', "source_index": 2},
+            _tool("call_late", "search", "x", source_index=2),
+            _tool_done("call_late", '"}'),
+        ],
+    )
     item_done = _collect(events, "response.output_item.done")
     fc = [d for d in item_done if d["item"]["type"] == "function_call"]
     assert fc, "expected a function_call item to be safely closed"
@@ -400,10 +421,14 @@ async def test_s12_07_call_id_late_or_missing(store):
     assert fc[0]["item"]["status"] in ("completed", "incomplete")  # 安全收尾
 
     # ② 完全缺失：无 call_id 的调用使用合成 ID 兜底，且不抛异常。
-    _, events2 = await _run_pipeline(store, [
-        {"type": "tool_call", "name": "search", "arguments": '{"q":"x"}', "source_index": 3},
-        {"type": "tool_call_done", "call_id": "", "arguments": ""},
-    ], response_id="resp_s12b")
+    _, events2 = await _run_pipeline(
+        store,
+        [
+            {"type": "tool_call", "name": "search", "arguments": '{"q":"x"}', "source_index": 3},
+            {"type": "tool_call_done", "call_id": "", "arguments": ""},
+        ],
+        response_id="resp_s12b",
+    )
     item_done2 = _collect(events2, "response.output_item.done")
     fc2 = [d for d in item_done2 if d["item"]["type"] == "function_call"]
     assert fc2 and fc2[0]["item"]["call_id"].startswith("call_")  # 合成 ID 兜底
@@ -418,14 +443,17 @@ async def test_s12_07_call_id_late_or_missing(store):
 @pytest.mark.asyncio
 async def test_s12_08_parallel_interleaved_fragments(store):
     """两个并行调用交错分片，各自聚合互不串扰。"""
-    _, events = await _run_pipeline(store, [
-        _tool("call_a", "alpha", '{"n": 1,', source_index=0),
-        _tool("call_b", "beta", '{"m": 2,', source_index=1),
-        _tool("call_a", "alpha", '"more": "北京"', source_index=0),
-        _tool("call_b", "beta", '"more": "上海"', source_index=1),
-        _tool_done("call_a", "}"),
-        _tool_done("call_b", "}"),
-    ])
+    _, events = await _run_pipeline(
+        store,
+        [
+            _tool("call_a", "alpha", '{"n": 1,', source_index=0),
+            _tool("call_b", "beta", '{"m": 2,', source_index=1),
+            _tool("call_a", "alpha", '"more": "北京"', source_index=0),
+            _tool("call_b", "beta", '"more": "上海"', source_index=1),
+            _tool_done("call_a", "}"),
+            _tool_done("call_b", "}"),
+        ],
+    )
     args_done = _collect(events, "response.function_call_arguments.done")
     by_call = {d["call_id"]: json.loads(d["arguments"]) for d in args_done}
     assert by_call == {
@@ -451,11 +479,14 @@ async def test_s12_09_same_source_index_different_call_ids(store):
     后续 tool_call_done 按新 call_id 匹配不到时安全降级为 incomplete（不产生
     重复执行、不崩溃）。
     """
-    _, events = await _run_pipeline(store, [
-        _tool("call_first", "web_search", '{"q": "', source_index=0),
-        _tool("call_second", "web_search", "query", source_index=0),
-        _tool_done("call_second", '"}'),
-    ])
+    _, events = await _run_pipeline(
+        store,
+        [
+            _tool("call_first", "web_search", '{"q": "', source_index=0),
+            _tool("call_second", "web_search", "query", source_index=0),
+            _tool_done("call_second", '"}'),
+        ],
+    )
     item_done = _collect(events, "response.output_item.done")
     fc = [d for d in item_done if d["item"]["type"] == "function_call"]
     assert fc, "expected a function_call item done"
@@ -473,17 +504,23 @@ async def test_s12_09_same_source_index_different_call_ids(store):
 @pytest.mark.asyncio
 async def test_s12_10_unicode_escapes_nested_json(store):
     """中文、``\\n``、引号转义、嵌套 JSON 对象跨分片后原样保留。"""
-    full_args = json.dumps({
-        "query": "北京\n上海",
-        "quote": '他说"你好"',
-        "nested": {"list": [1, 2, {"k": "v"}]},
-    }, ensure_ascii=False)
+    full_args = json.dumps(
+        {
+            "query": "北京\n上海",
+            "quote": '他说"你好"',
+            "nested": {"list": [1, 2, {"k": "v"}]},
+        },
+        ensure_ascii=False,
+    )
     mid = len(full_args) // 2
-    _, events = await _run_pipeline(store, [
-        _tool("call_u", "search", full_args[:mid], source_index=0),
-        _tool("call_u", "search", full_args[mid:], source_index=0),
-        _tool_done("call_u", ""),
-    ])
+    _, events = await _run_pipeline(
+        store,
+        [
+            _tool("call_u", "search", full_args[:mid], source_index=0),
+            _tool("call_u", "search", full_args[mid:], source_index=0),
+            _tool_done("call_u", ""),
+        ],
+    )
     args_done = _collect(events, "response.function_call_arguments.done")
     assert args_done
     parsed = json.loads(args_done[0]["arguments"])
@@ -500,13 +537,16 @@ async def test_s12_10_unicode_escapes_nested_json(store):
 @pytest.mark.asyncio
 async def test_s12_11_output_index_globally_unique(store):
     """文本 + 两个工具调用：每个 item 的 output_index 全局唯一、连续从 0 开始。"""
-    _, events = await _run_pipeline(store, [
-        _text("hello "),
-        _tool("call_a", "alpha", '{"n":1}', source_index=0),
-        _tool_done("call_a", '{"n":1}'),
-        _tool("call_b", "beta", '{"m":2}', source_index=1),
-        _tool_done("call_b", '{"m":2}'),
-    ])
+    _, events = await _run_pipeline(
+        store,
+        [
+            _text("hello "),
+            _tool("call_a", "alpha", '{"n":1}', source_index=0),
+            _tool_done("call_a", '{"n":1}'),
+            _tool("call_b", "beta", '{"m":2}', source_index=1),
+            _tool_done("call_b", '{"m":2}'),
+        ],
+    )
     # output_index 是 item 身份：output_item.added 分配的索引必须全局唯一且连续。
     added_idx = [data["output_index"] for ev, data in events if ev == "response.output_item.added"]
     assert len(added_idx) == 3, f"expect 3 items (text + 2 tools): {added_idx}"
@@ -525,11 +565,15 @@ async def test_s12_11_output_index_globally_unique(store):
 @pytest.mark.asyncio
 async def test_s12_12_sequence_strictly_monotonic(store):
     """持久化事件日志的 seq 严格 +1 递增（append-only，R-P1-36 同源保证）。"""
-    await _run_pipeline(store, [
-        _text("hello "),
-        _tool("call_a", "alpha", '{"n":1}', source_index=0),
-        _tool_done("call_a", '{"n":1}'),
-    ], response_id="resp_seq")
+    await _run_pipeline(
+        store,
+        [
+            _text("hello "),
+            _tool("call_a", "alpha", '{"n":1}', source_index=0),
+            _tool_done("call_a", '{"n":1}'),
+        ],
+        response_id="resp_seq",
+    )
     events = await _rs(store).list_events("resp_seq")
     seqs = [e["seq"] for e in events]
     assert seqs, "expected persisted events"
@@ -545,11 +589,14 @@ async def test_s12_12_sequence_strictly_monotonic(store):
 @pytest.mark.asyncio
 async def test_s12_13_every_added_has_a_done(store):
     """output_item.added 与 output_item.done 一一配对，且 item id 匹配。"""
-    _, events = await _run_pipeline(store, [
-        _text("hello "),
-        _tool("call_a", "alpha", '{"n":1}', source_index=0),
-        _tool_done("call_a", '{"n":1}'),
-    ])
+    _, events = await _run_pipeline(
+        store,
+        [
+            _text("hello "),
+            _tool("call_a", "alpha", '{"n":1}', source_index=0),
+            _tool_done("call_a", '{"n":1}'),
+        ],
+    )
     added = _collect(events, "response.output_item.added")
     done = _collect(events, "response.output_item.done")
     assert len(added) == len(done) >= 1
@@ -593,6 +640,7 @@ async def test_s12_14_completed_and_done_each_once(store):
 @pytest.mark.asyncio
 async def test_s12_15_disconnect_before_first_chunk_still_created(store):
     """上游立即断开（首个 chunk 前断流）：首事件仍是 response.created（铁律 3）。"""
+
     async def source():
         raise ConnectionError("upstream died instantly")
         yield  # pragma: no cover
@@ -619,9 +667,15 @@ async def test_s12_16_usage_only_empty_choices_no_done_stream():
     """三种形态：usage-only 捕获计费但不产事件；空 choices 不产事件；无 [DONE] 也能正常收尾。"""
     # ① usage-only chunk：捕获 usage，不产出任何流事件。
     tr = ResponsesTurnBridge(model="m")
-    out = await tr.feed(_sse({
-        "id": "c1", "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-    }))
+    out = await tr.feed(
+        _sse(
+            {
+                "id": "c1",
+                "choices": [],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+        )
+    )
     assert out == []
     assert tr.usage == {"prompt_tokens": 10, "completion_tokens": 5}
 
@@ -631,9 +685,9 @@ async def test_s12_16_usage_only_empty_choices_no_done_stream():
 
     # ③ 无 [DONE] 流：上游不发 [DONE] 哨兵，仅凭 finish_reason 正常收尾。
     tr3 = ResponsesTurnBridge(model="m")
-    out3 = await tr3.feed(_sse({
-        "id": "c1", "choices": [{"index": 0, "delta": {"content": "ok"},
-                                 "finish_reason": "stop"}]}))
+    out3 = await tr3.feed(
+        _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]})
+    )
     text = b"".join(out3).decode()
     assert "response.completed" in text
 
@@ -647,8 +701,9 @@ async def test_s12_16_usage_only_empty_choices_no_done_stream():
 async def test_s12_17_late_chunks_after_completed_dropped():
     """正式终止（completed 已发出）之后到达的 chunk 被丢弃，零下游输出。"""
     tr = ResponsesTurnBridge(model="m")
-    out = await tr.feed(_sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"},
-                                                       "finish_reason": "stop"}]}))
+    out = await tr.feed(
+        _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"}, "finish_reason": "stop"}]})
+    )
     text = b"".join(out).decode()
     assert "response.completed" in text
     # 终止后继续喂迟发 chunk：bridge 直接忽略，零新事件。

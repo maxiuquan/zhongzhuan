@@ -1,4 +1,5 @@
 """Non-Windows DPAPI stub: raises error."""
+
 from __future__ import annotations
 
 

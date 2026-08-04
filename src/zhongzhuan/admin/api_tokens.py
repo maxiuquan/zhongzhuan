@@ -1,10 +1,14 @@
 """Access token CRUD API."""
+
 from __future__ import annotations
 
 from aiohttp import web
 
 from ..store.access_tokens import (
-    list_tokens, create_token, delete_token, update_token,
+    list_tokens,
+    create_token,
+    delete_token,
+    update_token,
 )
 
 
@@ -21,19 +25,29 @@ def register_routes(app: web.Application, ctx) -> None:
         # expires_at: 接受天数（>0）或时间戳（<=0 表示永不过期）
         expires_days = int(data.get("expires_days", 0))
         import time
+
         expires_at = int(time.time()) + expires_days * 86400 if expires_days > 0 else 0
         t = await create_token(
-            ctx.store, label,
+            ctx.store,
+            label,
             quota_tokens=quota_tokens,
             model_whitelist=model_whitelist,
             expires_at=expires_at,
         )
-        return web.json_response({
-            "id": t.id, "token": t.token, "label": t.label,
-            "enabled": t.enabled, "quota_tokens": t.quota_tokens,
-            "used_tokens": t.used_tokens, "model_whitelist": t.model_whitelist,
-            "expires_at": t.expires_at, "created_at": t.created_at,
-        }, status=201)
+        return web.json_response(
+            {
+                "id": t.id,
+                "token": t.token,
+                "label": t.label,
+                "enabled": t.enabled,
+                "quota_tokens": t.quota_tokens,
+                "used_tokens": t.used_tokens,
+                "model_whitelist": t.model_whitelist,
+                "expires_at": t.expires_at,
+                "created_at": t.created_at,
+            },
+            status=201,
+        )
 
     async def delete(request):
         token_id = int(request.match_info["id"])
@@ -54,6 +68,7 @@ def register_routes(app: web.Application, ctx) -> None:
             kwargs["model_whitelist"] = data["model_whitelist"]
         if "expires_days" in data:
             import time
+
             days = int(data["expires_days"])
             kwargs["expires_at"] = int(time.time()) + days * 86400 if days > 0 else 0
         await update_token(ctx.store, token_id, **kwargs)

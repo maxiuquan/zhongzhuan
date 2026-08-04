@@ -1,4 +1,5 @@
 """T32 判据② — effective config 快照无密钥且标注来源（R-P1-62）。"""
+
 from __future__ import annotations
 
 import yaml

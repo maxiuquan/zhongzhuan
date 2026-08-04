@@ -1,9 +1,9 @@
 """/v1/* route handler: pass-through with multi-key retry + protocol translation."""
+
 from __future__ import annotations
 
 import json
 import time
-import urllib.parse
 
 from aiohttp import web
 
@@ -16,9 +16,11 @@ from ..config.timeouts import DEFAULT_TIMEOUT_POLICY, TimeoutPolicy
 from .context import RequestContextBuilder
 from .ratelimit import KeyHealth, STATE_HEALTHY
 from .retry import (
-    mark_auth_failure, mark_rate_limited, mark_server_error,
-    mark_network_failure, mark_failure, mark_success, learn_rate_limits,
-    classify_failure, reason_for_exhaustion,
+    mark_network_failure,
+    mark_success,
+    learn_rate_limits,
+    classify_failure,
+    reason_for_exhaustion,
 )
 from .scheduler import pick_key
 from .protocol.translate_a2o import translate_request_a2o, translate_response_o2a
@@ -183,8 +185,12 @@ class ProxyHandler:
             if matched:
                 return matched
             # 3. 别名匹配：检查 KeyHealth 是否有 aliases 属性（从 DB 加载时设置）
-            matched = [k for k in available if getattr(k, "aliases", "") and requested_model in
-                       [a.strip() for a in str(getattr(k, "aliases", "")).split(",") if a.strip()]]
+            matched = [
+                k
+                for k in available
+                if getattr(k, "aliases", "")
+                and requested_model in [a.strip() for a in str(getattr(k, "aliases", "")).split(",") if a.strip()]
+            ]
             if matched:
                 return matched
 
@@ -229,13 +235,20 @@ class ProxyHandler:
             content = msg.get("content")
             if content is None:
                 continue
-            text = content if isinstance(content, str) else json.dumps(
-                content, ensure_ascii=False, sort_keys=True,
+            text = (
+                content
+                if isinstance(content, str)
+                else json.dumps(
+                    content,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
             )
             text = text.strip()
             if not text:
                 continue
             import hashlib
+
             return "fp:" + hashlib.sha256(text.encode()).hexdigest()[:16]
         return ""
 
@@ -285,6 +298,7 @@ class ProxyHandler:
                     continue
                 # 仅统计 hosted tool（R-P1-60）：普通 function tool 不需要能力承载。
                 from .protocol.responses_models import HOSTED_TOOL_CAPABILITY
+
                 cap = HOSTED_TOOL_CAPABILITY.get(tool_type)
                 if cap is not None:
                     req.add(cap.value)
@@ -327,10 +341,7 @@ class ProxyHandler:
                 bound_caps = self._sticky_caps.get(session_key, frozenset())
                 required = self._required_capabilities(body_obj)
                 if required and bound_caps and not (required <= bound_caps):
-                    reason = (
-                        f"capability mismatch: required={sorted(required)} "
-                        f"bound={sorted(bound_caps)}"
-                    )
+                    reason = f"capability mismatch: required={sorted(required)} bound={sorted(bound_caps)}"
                     self._binding_failover_reasons[session_key] = reason
                     return None
                 return k
@@ -351,6 +362,7 @@ class ProxyHandler:
         """Lazily build the ResponseStore used for session→route binding (T35)."""
         if self._rs is None and self.store is not None:
             from ..store.response_store import ResponseStore
+
             self._rs = ResponseStore(self.store)
         return self._rs
 
@@ -389,7 +401,10 @@ class ProxyHandler:
             self._sticky_caps[session_key] = caps
 
     async def _persist_sticky_binding(
-        self, session_key: str, key_id: int, caps: frozenset[str],
+        self,
+        session_key: str,
+        key_id: int,
+        caps: frozenset[str],
     ) -> None:
         """Persist a session→route binding to the ResponseStore (T35 / R-P1-61)."""
         rs = self._response_store()
@@ -437,16 +452,19 @@ class ProxyHandler:
         if self.store is not None:
             try:
                 from ..store.groups import list_groups as list_groups_db
+
                 rows = await list_groups_db(self.store)
-                self._set_groups([
-                    {
-                        "id": r.get("id"),
-                        "name": r.get("name"),
-                        "strategy": r.get("strategy"),
-                        "members": [m["model_id"] for m in (r.get("members") or [])],
-                    }
-                    for r in rows
-                ])
+                self._set_groups(
+                    [
+                        {
+                            "id": r.get("id"),
+                            "name": r.get("name"),
+                            "strategy": r.get("strategy"),
+                            "members": [m["model_id"] for m in (r.get("members") or [])],
+                        }
+                        for r in rows
+                    ]
+                )
             except Exception:
                 _lg.exception("reload groups failed")
         return len(self._keys)
@@ -513,6 +531,7 @@ class ProxyHandler:
     async def _health_snapshot_loop(self) -> None:
         """优化点4：每 30 秒把 key 健康状态快照到 DB（重启后可恢复）。"""
         from ..store.key_health import save_health, KeyHealthRow
+
         while self._bg_running:
             try:
                 await asyncio.sleep(30)
@@ -522,16 +541,19 @@ class ProxyHandler:
                     if k.key_id <= 0:
                         continue  # 跳过 env/dummy key (key_id=0)
                     try:
-                        await save_health(self.store, KeyHealthRow(
-                            key_id=k.key_id,
-                            status=k.status,
-                            cooldown_until=k.cooldown_until,
-                            rpm_limit=k.rpm_limit,
-                            tpm_limit=k.tpm_limit,
-                            success_count=k.success_count,
-                            failure_count=k.total_failures,
-                            recent_429_count=k.recent_429_count,
-                        ))
+                        await save_health(
+                            self.store,
+                            KeyHealthRow(
+                                key_id=k.key_id,
+                                status=k.status,
+                                cooldown_until=k.cooldown_until,
+                                rpm_limit=k.rpm_limit,
+                                tpm_limit=k.tpm_limit,
+                                success_count=k.success_count,
+                                failure_count=k.total_failures,
+                                recent_429_count=k.recent_429_count,
+                            ),
+                        )
                     except Exception:
                         pass
             except asyncio.CancelledError:
@@ -554,9 +576,7 @@ class ProxyHandler:
         remote = ctx.remote
 
         # Log the incoming request early (before processing)
-        _lg.info(
-            f"[REQ] {method} {path} remote={remote} content_length={ctx.content_length}"
-        )
+        _lg.info(f"[REQ] {method} {path} remote={remote} content_length={ctx.content_length}")
         _lg.info(
             f"[{id(request):x}] processing {method} {path} "
             f"model={requested_model!r} stream={body_obj.get('stream', False) if body_obj else False} "
@@ -580,7 +600,8 @@ class ProxyHandler:
         candidates = self._resolve_candidates(requested_model)
         if not candidates:
             return web.json_response(
-                {"error": "no enabled keys"}, status=503,
+                {"error": "no enabled keys"},
+                status=503,
             )
 
         # Determine if this is a streaming request
@@ -592,10 +613,19 @@ class ProxyHandler:
         for k, v in request.headers.items():
             kl = k.lower()
             if kl not in (
-                "host", "connection", "transfer-encoding", "content-length",
-                "content-encoding", "keep-alive", "proxy-authenticate",
-                "proxy-authorization", "te", "trailer", "upgrade",
-                "x-forwarded-for", "x-forwarded-proto",
+                "host",
+                "connection",
+                "transfer-encoding",
+                "content-length",
+                "content-encoding",
+                "keep-alive",
+                "proxy-authenticate",
+                "proxy-authorization",
+                "te",
+                "trailer",
+                "upgrade",
+                "x-forwarded-for",
+                "x-forwarded-proto",
             ):
                 base_headers[k] = v
 
@@ -616,16 +646,15 @@ class ProxyHandler:
                     if sticky_k is None and session_key in self._binding_failover_reasons:
                         # 判据⑥：sticky key 因健康/能力不兼容被拒 → 记录故障迁移
                         await self._persist_sticky_failover(session_key)
-                    k = sticky_k if sticky_k is not None else pick_key(
-                        [x for x in candidates if x.key_id not in tried]
-                    )
+                    k = sticky_k if sticky_k is not None else pick_key([x for x in candidates if x.key_id not in tried])
                 else:
                     k = pick_key([x for x in candidates if x.key_id not in tried])
                 if k is None:
                     # 优化点8：429 响应带 X-Zhongzhuan-Reason 头
                     reason = reason_for_exhaustion(candidates)
                     return web.json_response(
-                        {"error": "all keys exhausted"}, status=429,
+                        {"error": "all keys exhausted"},
+                        status=429,
                         headers={"X-Zhongzhuan-Reason": reason},
                     )
                 tried.add(k.key_id)
@@ -710,48 +739,40 @@ class ProxyHandler:
                 # upstream_path_override: non-empty → use directly as path/URL
                 if k.upstream_path_override:
                     upstream_path = k.upstream_path_override
-                    _lg.info(
-                        f"[{id(request):x}] key_id={k.key_id} "
-                        f"using upstream_path_override={upstream_path!r}"
-                    )
+                    _lg.info(f"[{id(request):x}] key_id={k.key_id} using upstream_path_override={upstream_path!r}")
 
                 try:
                     # Check if client is still connected before making expensive upstream calls
                     transport = request.transport
                     if transport is not None and transport.is_closing():
-                        _lg.warning(
-                            f"[{id(request):x}] client transport closing before upstream request, aborting"
-                        )
+                        _lg.warning(f"[{id(request):x}] client transport closing before upstream request, aborting")
                         return web.Response(status=499, text="Client Closed Request")
 
                     _upstream_start = time.time()
                     resp = await client.request(
-                        request.method, upstream_path, headers=headers, content=final_body,
+                        request.method,
+                        upstream_path,
+                        headers=headers,
+                        content=final_body,
                     )
                     _upstream_elapsed = time.time() - _upstream_start
                     _lg.info(
                         f"[{id(request):x}] key_id={k.key_id} upstream responded in "
-                        f"{_upstream_elapsed*1000:.0f}ms status={resp.status_code}"
+                        f"{_upstream_elapsed * 1000:.0f}ms status={resp.status_code}"
                     )
                 except (ConnectionResetError, ConnectionError, OSError) as e:
                     # Client-side disconnect (timeout or cancel).
                     # This is NOT an upstream failure — do NOT mark the key as failed.
                     transport = request.transport
                     if transport is not None and transport.is_closing():
-                        _lg.warning(
-                            f"[{id(request):x}] client disconnected before upstream response"
-                        )
+                        _lg.warning(f"[{id(request):x}] client disconnected before upstream response")
                         return web.Response(status=499, text="Client Closed Request")
                     # Otherwise it may be an upstream connection failure; log and retry.
-                    _lg.error(
-                        f"[{id(request):x}] key_id={k.key_id} connection error: {type(e).__name__}: {e}"
-                    )
+                    _lg.error(f"[{id(request):x}] key_id={k.key_id} connection error: {type(e).__name__}: {e}")
                     mark_network_failure(k)
                     continue
                 except Exception as e:
-                    _lg.error(
-                        f"[{id(request):x}] key_id={k.key_id} exception: {type(e).__name__}: {e}"
-                    )
+                    _lg.error(f"[{id(request):x}] key_id={k.key_id} exception: {type(e).__name__}: {e}")
                     mark_network_failure(k)
                     continue
 
@@ -765,6 +786,7 @@ class ProxyHandler:
                 content_encoding = resp_headers.get("content-encoding", "").lower()
                 if "gzip" in content_encoding:
                     import gzip
+
                     try:
                         data = gzip.decompress(data)
                     except Exception:
@@ -828,8 +850,11 @@ class ProxyHandler:
                             # Downstream is Chat Completions JSON (openai) or
                             # Anthropic JSON (anthropic) -> normalize to Chat
                             # Completions first, then to Responses API.
-                            cc_resp = translate_response_a2o(resp_data, requested_model or "") \
-                                if outbound_protocol == "anthropic" else resp_data
+                            cc_resp = (
+                                translate_response_a2o(resp_data, requested_model or "")
+                                if outbound_protocol == "anthropic"
+                                else resp_data
+                            )
                             translated_resp = chatcompletions_to_responses(cc_resp, requested_model or "")
                         else:
                             translated_resp = translate_response_a2o(resp_data, requested_model or "")
@@ -841,15 +866,14 @@ class ProxyHandler:
                         )
                     except (json.JSONDecodeError, ValueError) as e:
                         _lg.warning(
-                            f"[{id(request):x}] key_id={k.key_id} failed to translate "
-                            f"response: {e}, returning raw"
+                            f"[{id(request):x}] key_id={k.key_id} failed to translate response: {e}, returning raw"
                         )
 
                 _process_elapsed = time.time() - _process_start
                 total_elapsed = time.time() - _request_start
                 _lg.info(
-                    f"[{id(request):x}] key_id={k.key_id} upstream={_upstream_elapsed*1000:.0f}ms "
-                    f"proc={_process_elapsed*1000:.0f}ms total={total_elapsed*1000:.0f}ms body={len(data)}b"
+                    f"[{id(request):x}] key_id={k.key_id} upstream={_upstream_elapsed * 1000:.0f}ms "
+                    f"proc={_process_elapsed * 1000:.0f}ms total={total_elapsed * 1000:.0f}ms body={len(data)}b"
                 )
                 mark_success(k)
 
@@ -875,9 +899,7 @@ class ProxyHandler:
                     caps = self._required_capabilities(body_obj)
                     self._set_sticky(session_key, k.key_id, caps)
                     # T35 / R-P1-61 判据⑤：ResponseStore 持久化 session→route binding。
-                    asyncio.create_task(
-                        self._persist_sticky_binding(session_key, k.key_id, caps)
-                    )
+                    asyncio.create_task(self._persist_sticky_binding(session_key, k.key_id, caps))
 
                 # Log successful request asynchronously（含 token 用量 + 配额扣减 + 成本）
                 if self.store:
@@ -885,11 +907,14 @@ class ProxyHandler:
                     _token_id = request.get("token_id", 0)
                     asyncio.create_task(
                         self._log_and_deduct(
-                            self.store, client_ip=request.remote,
+                            self.store,
+                            client_ip=request.remote,
                             model_name=requested_model or "",
-                            key_id=k.key_id, status=resp.status_code,
+                            key_id=k.key_id,
+                            status=resp.status_code,
                             latency_ms=latency_ms,
-                            tokens_in=_tokens_in, tokens_out=_tokens_out,
+                            tokens_in=_tokens_in,
+                            tokens_out=_tokens_out,
                             inbound_protocol=inbound_protocol,
                             outbound_protocol=outbound_protocol,
                             translated=need_translation,
@@ -975,13 +1000,17 @@ class ProxyHandler:
                         # T35：进程重启后从 ResponseStore 恢复 binding，保持粘性连续性。
                         await self._restore_sticky_from_store(session_key)
                         sticky_k = self._get_sticky_key(
-                            session_key, candidates, body_obj or {},
+                            session_key,
+                            candidates,
+                            body_obj or {},
                         )
                         if sticky_k is None and session_key in self._binding_failover_reasons:
                             # 判据⑥：sticky key 因健康/能力不兼容被拒 → 记录故障迁移
                             await self._persist_sticky_failover(session_key)
-                        k = sticky_k if sticky_k is not None else pick_key(
-                            [x for x in candidates if x.key_id not in tried]
+                        k = (
+                            sticky_k
+                            if sticky_k is not None
+                            else pick_key([x for x in candidates if x.key_id not in tried])
                         )
                     else:
                         k = pick_key([x for x in candidates if x.key_id not in tried])
@@ -1067,7 +1096,10 @@ class ProxyHandler:
 
                     try:
                         async for upstream_resp in client.stream(
-                            request.method, upstream_path, headers=headers, content=final_body,
+                            request.method,
+                            upstream_path,
+                            headers=headers,
+                            content=final_body,
                         ):
                             # Any 4xx/5xx is a failure: do NOT forward as SSE
                             # (the body is a JSON error envelope, not a stream,
@@ -1148,8 +1180,7 @@ class ProxyHandler:
                                         chunk_count += 1
                             except (ConnectionResetError, ConnectionError, OSError):
                                 _lg.warning(
-                                    f"[{id(request):x}] streaming: key_id={k.key_id} "
-                                    f"client disconnected during stream"
+                                    f"[{id(request):x}] streaming: key_id={k.key_id} client disconnected during stream"
                                 )
 
                             if stream_translator and not stream_translator.done:
@@ -1165,10 +1196,7 @@ class ProxyHandler:
                                 for ev in closing:
                                     await resp.write(ev)
 
-                            _lg.info(
-                                f"[{id(request):x}] streaming: key_id={k.key_id} "
-                                f"completed ({chunk_count} chunks)"
-                            )
+                            _lg.info(f"[{id(request):x}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)")
                             mark_success(k)
 
                             # 流式响应的 token 用量：尝试从 stream_translator 提取
@@ -1187,20 +1215,21 @@ class ProxyHandler:
                                 caps = self._required_capabilities(body_obj)
                                 self._set_sticky(session_key, k.key_id, caps)
                                 # T35 / R-P1-61 判据⑤：ResponseStore 持久化 binding。
-                                asyncio.create_task(
-                                    self._persist_sticky_binding(session_key, k.key_id, caps)
-                                )
+                                asyncio.create_task(self._persist_sticky_binding(session_key, k.key_id, caps))
 
                             if self.store:
                                 latency_ms = int((time.time() - _stream_start) * 1000)
                                 _token_id = request.get("token_id", 0)
                                 asyncio.create_task(
                                     self._log_and_deduct(
-                                        self.store, client_ip=request.remote,
+                                        self.store,
+                                        client_ip=request.remote,
                                         model_name=requested_model or "",
-                                        key_id=k.key_id, status=200,
+                                        key_id=k.key_id,
+                                        status=200,
                                         latency_ms=latency_ms,
-                                        tokens_in=_stream_tokens_in, tokens_out=_stream_tokens_out,
+                                        tokens_in=_stream_tokens_in,
+                                        tokens_out=_stream_tokens_out,
                                         inbound_protocol=inbound_protocol,
                                         outbound_protocol=outbound_protocol,
                                         translated=need_translation,
@@ -1209,18 +1238,12 @@ class ProxyHandler:
                                 )
                             return resp
                     except (ConnectionResetError, ConnectionError, OSError):
-                        _lg.warning(
-                            f"[{id(request):x}] streaming: key_id={k.key_id} "
-                            f"client disconnected"
-                        )
+                        _lg.warning(f"[{id(request):x}] streaming: key_id={k.key_id} client disconnected")
                         return resp
                     except Exception as e:
                         mark_network_failure(k)
                         exc_type_str = type(e).__name__
-                        _lg.error(
-                            f"[{id(request):x}] streaming: key_id={k.key_id} "
-                            f"exception: {exc_type_str}: {e}"
-                        )
+                        _lg.error(f"[{id(request):x}] streaming: key_id={k.key_id} exception: {exc_type_str}: {e}")
                         # Track exception type for circuit breaker
                         if first_exc_type is None:
                             first_exc_type = exc_type_str
@@ -1269,18 +1292,27 @@ class ProxyHandler:
         return resp
 
     async def _log_and_deduct(
-        self, store, *,
-        client_ip: str = "", model_name: str = "",
-        key_id: int | None = None, status: int = 0, latency_ms: int = 0,
-        tokens_in: int = 0, tokens_out: int = 0,
-        inbound_protocol: str = "", outbound_protocol: str = "",
-        translated: bool = False, token_id: int = 0,
+        self,
+        store,
+        *,
+        client_ip: str = "",
+        model_name: str = "",
+        key_id: int | None = None,
+        status: int = 0,
+        latency_ms: int = 0,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        inbound_protocol: str = "",
+        outbound_protocol: str = "",
+        translated: bool = False,
+        token_id: int = 0,
     ) -> None:
         """记录请求日志 + 扣减令牌配额 + 计算成本（异步调用）。"""
         # 计算成本
         cost = 0.0
         try:
             from ..store.pricing import calculate_cost
+
             cost = await calculate_cost(store, model_name, tokens_in, tokens_out)
         except Exception:
             pass
@@ -1289,12 +1321,18 @@ class ProxyHandler:
         try:
             await log_request(
                 store,
-                client_ip=client_ip, model_name=model_name,
-                key_id=key_id, status=status, latency_ms=latency_ms,
-                tokens_in=tokens_in, tokens_out=tokens_out,
+                client_ip=client_ip,
+                model_name=model_name,
+                key_id=key_id,
+                status=status,
+                latency_ms=latency_ms,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
                 inbound_protocol=inbound_protocol,
                 outbound_protocol=outbound_protocol,
-                translated=translated, token_id=token_id, cost=cost,
+                translated=translated,
+                token_id=token_id,
+                cost=cost,
             )
         except Exception:
             _lg.exception("log_request failed")
@@ -1303,6 +1341,7 @@ class ProxyHandler:
         if token_id > 0 and (tokens_in > 0 or tokens_out > 0):
             try:
                 from ..store.access_tokens import deduct_token_quota
+
                 total_tokens = tokens_in + tokens_out
                 await deduct_token_quota(store, token_id, total_tokens)
             except Exception:
@@ -1317,6 +1356,7 @@ class ProxyHandler:
         model names so downstream clients can invoke a whole group.
         """
         from datetime import datetime, timezone
+
         now = int(datetime.now(timezone.utc).timestamp())
         seen: set[str] = set()
         data: list[dict] = []

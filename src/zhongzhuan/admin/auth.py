@@ -11,6 +11,7 @@
   支持 secret 轮换（``ZHONGZHUAN_JWT_SECRET_PREVIOUS`` 逗号分隔旧 secret），
   旧 token 在 ``ZHONGZHUAN_JWT_GRACE_PERIOD_SECONDS`` 宽限期内仍可验证。
 """
+
 from __future__ import annotations
 
 import os
@@ -44,6 +45,7 @@ def set_login_clock(clock) -> None:
 
 def _now() -> float:
     return _MONOTONIC_CLOCK()
+
 
 # ---- R-P2-03: CSRF double-submit cookie ----
 _CSRF_COOKIE = "zhongzhuan_csrf"
@@ -89,8 +91,7 @@ def init_jwt_secret(
         if not secret:
             if is_prod:
                 raise ConfigError(
-                    "ZHONGZHUAN_JWT_SECRET is required in production (fail closed, "
-                    "no in-process random generation)"
+                    "ZHONGZHUAN_JWT_SECRET is required in production (fail closed, no in-process random generation)"
                 )
             _SECRET = secrets.token_hex(32)
             _warn_dev_random_secret()
@@ -98,9 +99,9 @@ def init_jwt_secret(
             _SECRET = secret
 
     if previous is not None:
-        prev_list = previous if isinstance(previous, list) else [
-            p.strip() for p in str(previous).split(",") if p.strip()
-        ]
+        prev_list = (
+            previous if isinstance(previous, list) else [p.strip() for p in str(previous).split(",") if p.strip()]
+        )
     else:
         raw = os.getenv("ZHONGZHUAN_JWT_SECRET_PREVIOUS", "")
         prev_list = [p.strip() for p in raw.split(",") if p.strip()]
@@ -124,6 +125,7 @@ def _warn_dev_random_secret() -> None:
     )
     try:
         from loguru import logger
+
         logger.warning(f"[auth] {message}")
     except Exception:  # pragma: no cover
         pass
@@ -251,8 +253,11 @@ def _get_csrf_token() -> str:
 
 def _set_csrf_cookie(resp: web.StreamResponse) -> None:
     resp.set_cookie(
-        _CSRF_COOKIE, _get_csrf_token(),
-        path="/", samesite="Lax", httponly=False,
+        _CSRF_COOKIE,
+        _get_csrf_token(),
+        path="/",
+        samesite="Lax",
+        httponly=False,
     )
 
 
@@ -287,10 +292,10 @@ def _add_security_headers(resp: web.StreamResponse) -> None:
 def _audit(event: str, request: web.Request, **extra) -> None:
     try:
         from loguru import logger
+
         ctx = " ".join(f"{k}={v}" for k, v in extra.items())
         logger.info(
-            f"[audit] {event} ip={request.remote} method={request.method} "
-            f"path={request.path}{' ' + ctx if ctx else ''}"
+            f"[audit] {event} ip={request.remote} method={request.method} path={request.path}{' ' + ctx if ctx else ''}"
         )
     except Exception:  # pragma: no cover
         pass

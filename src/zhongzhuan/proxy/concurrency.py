@@ -76,9 +76,7 @@ class QueueTimeout(RuntimeError):
     """
 
     def __init__(self, retry_after: float, layer: str) -> None:
-        super().__init__(
-            f"concurrency slot '{layer}' unavailable after {retry_after:g}s"
-        )
+        super().__init__(f"concurrency slot '{layer}' unavailable after {retry_after:g}s")
         self.retry_after: float = retry_after
         self.layer: str = layer
 
@@ -144,9 +142,7 @@ class _TimedSlotPool:
                         await asyncio.wait_for(waiter, timeout=remaining)
                     except asyncio.TimeoutError:
                         if self._free <= 0:
-                            raise QueueTimeout(
-                                retry_after=retry_after, layer=self._name
-                            ) from None
+                            raise QueueTimeout(retry_after=retry_after, layer=self._name) from None
                         continue
                 else:
                     await self._cond.wait()
@@ -195,9 +191,7 @@ class ConcurrencyGate:
         self._clock = clock
         self._global = _TimedSlotPool(self.config.global_limit, clock, "global")
         self._tool = _TimedSlotPool(self.config.tool_pool_size, clock, "tool")
-        self._background = _TimedSlotPool(
-            self.config.background_limit, clock, "background"
-        )
+        self._background = _TimedSlotPool(self.config.background_limit, clock, "background")
         # Lazily created per-tenant / per-model pools (bounded by config limits).
         self._tenants: dict[str, _TimedSlotPool] = {}
         self._models: dict[str, _TimedSlotPool] = {}
@@ -212,9 +206,7 @@ class ConcurrencyGate:
             return None
         pool = self._tenants.get(tenant)
         if pool is None:
-            pool = _TimedSlotPool(
-                self.config.tenant_limit, self._clock, f"tenant:{tenant}"
-            )
+            pool = _TimedSlotPool(self.config.tenant_limit, self._clock, f"tenant:{tenant}")
             self._tenants[tenant] = pool
         return pool
 
@@ -223,15 +215,11 @@ class ConcurrencyGate:
             return None
         pool = self._models.get(model)
         if pool is None:
-            pool = _TimedSlotPool(
-                self.config.model_limit, self._clock, f"model:{model}"
-            )
+            pool = _TimedSlotPool(self.config.model_limit, self._clock, f"model:{model}")
             self._models[model] = pool
         return pool
 
-    async def acquire_model(
-        self, *, tenant: str = "", model: str = "", timeout: float | None = None
-    ) -> _Hold:
+    async def acquire_model(self, *, tenant: str = "", model: str = "", timeout: float | None = None) -> _Hold:
         """Acquire a model-stream slot: global -> tenant -> model (reverse release).
 
         Waits (queues) when over the limit; raises :class:`QueueTimeout` after
@@ -260,9 +248,7 @@ class ConcurrencyGate:
         return _Hold(acquired)
 
     @asynccontextmanager
-    async def model_scope(
-        self, *, tenant: str = "", model: str = "", timeout: float | None = None
-    ):
+    async def model_scope(self, *, tenant: str = "", model: str = "", timeout: float | None = None):
         """Async context manager wrapping :meth:`acquire_model`."""
         hold = await self.acquire_model(tenant=tenant, model=model, timeout=timeout)
         try:
@@ -398,12 +384,8 @@ def make_concurrency_middleware(
 
     @web.middleware
     async def middleware(request: web.Request, handler):
-        tenant = tenant_provider(request) if tenant_provider else request.headers.get(
-            "X-Workspace-Id", ""
-        )
-        model = model_provider(request) if model_provider else request.headers.get(
-            "X-Model", ""
-        )
+        tenant = tenant_provider(request) if tenant_provider else request.headers.get("X-Workspace-Id", "")
+        model = model_provider(request) if model_provider else request.headers.get("X-Model", "")
         try:
             async with gate.model_scope(tenant=tenant, model=model):
                 return await handler(request)

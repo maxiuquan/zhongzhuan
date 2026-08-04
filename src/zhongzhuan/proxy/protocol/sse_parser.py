@@ -49,9 +49,9 @@ __all__ = [
 ]
 
 # --- 字节常量（全部 ASCII，UTF-8 自同步保证它们不会出现在多字节序列内部）---------
-_LF: Final[int] = 0x0A          # b"\n"
-_CR: Final[int] = 0x0D          # b"\r"
-_COLON: Final[int] = 0x3A       # b":"
+_LF: Final[int] = 0x0A  # b"\n"
+_CR: Final[int] = 0x0D  # b"\r"
+_COLON: Final[int] = 0x3A  # b":"
 _UTF8_BOM: Final[bytes] = b"\xef\xbb\xbf"
 
 #: 单个事件的字节上限，超过即判定为畸形并丢弃该块（防御恶意/失控上游）。
@@ -180,9 +180,7 @@ class SSEParser:
             raise ValueError("max_event_bytes must be positive")
         self._max_event_bytes: int = int(max_event_bytes)
         self._validate_json: bool = bool(validate_json)
-        self._json_exempt: frozenset[str] = (
-            _DEFAULT_JSON_EXEMPT if json_exempt is None else frozenset(json_exempt)
-        )
+        self._json_exempt: frozenset[str] = _DEFAULT_JSON_EXEMPT if json_exempt is None else frozenset(json_exempt)
         self._emit_dataless: bool = bool(emit_dataless)
 
         self._buf: bytearray = bytearray()
@@ -494,7 +492,4 @@ class SSEParser:
         self._retry = None
 
     def __repr__(self) -> str:  # pragma: no cover - 仅调试用
-        return (
-            f"SSEParser(pending_bytes={self.pending_bytes}, "
-            f"malformed_count={self._malformed})"
-        )
+        return f"SSEParser(pending_bytes={self.pending_bytes}, malformed_count={self._malformed})"

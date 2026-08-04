@@ -5,6 +5,7 @@
 R-P2-03：无 CSRF token 的写操作 403；连续登录失败触发限速；安全响应头断言。
 判据⑦（接口层）：默认配置下 fallback 刷新被拒（未注册）。
 """
+
 from __future__ import annotations
 
 import socket

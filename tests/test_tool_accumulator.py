@@ -8,6 +8,7 @@ Covers the acceptance criteria of T11 (§5.3 / §5.4 / §9.3 / 铁律 2):
 5. Reasoning is ephemeral (released at turn end).
 6. Duplicate chunks / late chunks never double-complete.
 """
+
 from __future__ import annotations
 
 import pytest

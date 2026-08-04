@@ -1,4 +1,5 @@
 """Unit tests for the TLS module (build_ssl_context + selfsign)."""
+
 import os
 import ssl
 import tempfile
@@ -40,8 +41,12 @@ class TestSelfsign:
         key = str(tmp_path / "key.pem")
         ca = str(tmp_path / "ca.pem")
         selfsign(
-            out_cert=cert, out_key=key, out_ca=ca,
-            cn="myproxy", san_dns=["example.com"], san_ip=["127.0.0.1"],
+            out_cert=cert,
+            out_key=key,
+            out_ca=ca,
+            cn="myproxy",
+            san_dns=["example.com"],
+            san_ip=["127.0.0.1"],
         )
         assert Path(cert).exists()
         assert Path(key).exists()
@@ -82,8 +87,11 @@ class TestSelfsign:
         cert = str(tmp_path / "cert.pem")
         key = str(tmp_path / "key.pem")
         selfsign(
-            out_cert=cert, out_key=key, cn="sancheck",
-            san_dns=["my.example.com"], san_ip=["10.0.0.1"],
+            out_cert=cert,
+            out_key=key,
+            cn="sancheck",
+            san_dns=["my.example.com"],
+            san_ip=["10.0.0.1"],
         )
         cert_obj = x509.load_pem_x509_certificate(Path(cert).read_bytes())
         san_ext = cert_obj.extensions.get_extension_for_class(x509.SubjectAlternativeName)
@@ -92,6 +100,7 @@ class TestSelfsign:
         ip_addrs = san.get_values_for_type(x509.IPAddress)
         assert "my.example.com" in dns_names
         import ipaddress
+
         assert ipaddress.ip_address("10.0.0.1") in ip_addrs
 
     def test_ca_signs_leaf(self, tmp_path):

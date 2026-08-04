@@ -1,8 +1,8 @@
 """Key CRUD API."""
+
 from __future__ import annotations
 
 import time
-import urllib.parse
 
 import httpx
 from aiohttp import web
@@ -17,30 +17,47 @@ def register_routes(app: web.Application, ctx) -> None:
     async def list_(request):
         model_id = request.query.get("model_id")
         rows = await list_keys(ctx.store, int(model_id) if model_id else None)
-        return web.json_response({"data": [
+        return web.json_response(
             {
-                "id": r.id, "model_id": r.model_id, "label": r.label,
-                "key_masked": r.key_masked, "enabled": r.enabled,
-                "priority": r.priority, "created_at": r.created_at,
+                "data": [
+                    {
+                        "id": r.id,
+                        "model_id": r.model_id,
+                        "label": r.label,
+                        "key_masked": r.key_masked,
+                        "enabled": r.enabled,
+                        "priority": r.priority,
+                        "created_at": r.created_at,
+                    }
+                    for r in rows
+                ]
             }
-            for r in rows
-        ]})
+        )
 
     async def create(request):
         data = await request.json()
         k = ApiKey(
-            id=None, model_id=int(data["model_id"]),
-            label=data.get("label", ""), key_value=data["key_value"],
+            id=None,
+            model_id=int(data["model_id"]),
+            label=data.get("label", ""),
+            key_value=data["key_value"],
             enabled=bool(data.get("enabled", True)),
             priority=int(data.get("priority", 0)),
         )
         k = await create_key(ctx.store, k)
         await notify_proxy_reload()
-        return web.json_response({
-            "id": k.id, "model_id": k.model_id, "label": k.label,
-            "key_masked": mask(k.key_value), "enabled": k.enabled,
-            "priority": k.priority, "created_at": k.created_at,
-        }, status=201)
+        return web.json_response(
+            {
+                "id": k.id,
+                "model_id": k.model_id,
+                "label": k.label,
+                "key_masked": mask(k.key_value),
+                "enabled": k.enabled,
+                "priority": k.priority,
+                "created_at": k.created_at,
+            },
+            status=201,
+        )
 
     async def delete(request):
         key_id = int(request.match_info["id"])
@@ -52,7 +69,8 @@ def register_routes(app: web.Application, ctx) -> None:
         key_id = int(request.match_info["id"])
         data = await request.json()
         await update_key(
-            ctx.store, key_id,
+            ctx.store,
+            key_id,
             label=data.get("label"),
             enabled=data.get("enabled"),
             priority=data.get("priority"),
@@ -67,9 +85,7 @@ def register_routes(app: web.Application, ctx) -> None:
         if not plain:
             return web.json_response({"ok": False, "error": "key not found or decrypt failed"}, status=404)
 
-        row = await ctx.store.fetchone(
-            "SELECT model_id FROM api_keys WHERE id=?", (key_id,)
-        )
+        row = await ctx.store.fetchone("SELECT model_id FROM api_keys WHERE id=?", (key_id,))
         if not row:
             return web.json_response({"ok": False, "error": "key not found"}, status=404)
         model = await get_model_by_id(ctx.store, row[0])
@@ -128,33 +144,43 @@ def register_routes(app: web.Application, ctx) -> None:
             if not ok:
                 try:
                     err_obj = resp.json()
-                    err_msg = (err_obj.get("error", {}).get("message")
-                               or err_obj.get("message")
-                               or str(resp.status_code))
+                    err_msg = err_obj.get("error", {}).get("message") or err_obj.get("message") or str(resp.status_code)
                 except Exception:
                     err_msg = resp.text[:200] if resp.text else str(resp.status_code)
-            return web.json_response({
-                "ok": ok,
-                "status": resp.status_code,
-                "latency_ms": latency,
-                "url": url,
-                "model": upstream_model,
-                "error": err_msg,
-            })
+            return web.json_response(
+                {
+                    "ok": ok,
+                    "status": resp.status_code,
+                    "latency_ms": latency,
+                    "url": url,
+                    "model": upstream_model,
+                    "error": err_msg,
+                }
+            )
         except httpx.TimeoutException:
             latency = int((time.time() - t0) * 1000)
-            return web.json_response({
-                "ok": False, "status": 0, "latency_ms": latency,
-                "url": url, "model": upstream_model,
-                "error": "timeout (30s)",
-            })
+            return web.json_response(
+                {
+                    "ok": False,
+                    "status": 0,
+                    "latency_ms": latency,
+                    "url": url,
+                    "model": upstream_model,
+                    "error": "timeout (30s)",
+                }
+            )
         except Exception as e:
             latency = int((time.time() - t0) * 1000)
-            return web.json_response({
-                "ok": False, "status": 0, "latency_ms": latency,
-                "url": url, "model": upstream_model,
-                "error": f"{type(e).__name__}: {e}",
-            })
+            return web.json_response(
+                {
+                    "ok": False,
+                    "status": 0,
+                    "latency_ms": latency,
+                    "url": url,
+                    "model": upstream_model,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            )
 
     app.router.add_get("/api/keys", list_)
     app.router.add_post("/api/keys", create)

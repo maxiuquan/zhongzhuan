@@ -1,4 +1,5 @@
 """Tests for access-token hashing and credential hygiene (T04 / R-P0-06 / R-P0-07)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -50,9 +51,7 @@ def test_create_token_never_stores_plaintext(store):
     """Plaintext must not be persisted; only prefix + hash are stored."""
     tok = _run(create_token(store, label="t1"))
     assert tok.token.startswith("zz-")
-    row = _run(store.fetchone(
-        "SELECT token, token_prefix, token_hash FROM access_tokens WHERE label='t1'"
-    ))
+    row = _run(store.fetchone("SELECT token, token_prefix, token_hash FROM access_tokens WHERE label='t1'"))
     assert row is not None
     plain, prefix, digest = row
     # Plaintext column is now nullable and never written by the hashed path.
@@ -98,10 +97,12 @@ def test_rotate_token_links_audit(store):
     rotated = _run(rotate_token(store, tok.id, rotated_by="bob"))
     assert rotated is not None
     assert rotated.token != tok.token
-    row = _run(store.fetchone(
-        "SELECT rotation_of, created_by FROM access_tokens WHERE token_prefix=?",
-        (rotated.token[:8],),
-    ))
+    row = _run(
+        store.fetchone(
+            "SELECT rotation_of, created_by FROM access_tokens WHERE token_prefix=?",
+            (rotated.token[:8],),
+        )
+    )
     assert row is not None
     orig_id = _run(store.fetchone("SELECT id FROM access_tokens WHERE label='orig'"))[0]
     assert row[0] == orig_id  # rotation_of points to original
@@ -114,9 +115,7 @@ def test_revoke_token_sets_audit(store):
     tok = _run(create_token(store, label="rev"))
     _run(revoke_token(store, tok.id, revoked_by="admin"))
     assert _run(verify_token(store, tok.token)) is False
-    row = _run(store.fetchone(
-        "SELECT revoked_at, revoked_by FROM access_tokens WHERE label='rev'"
-    ))
+    row = _run(store.fetchone("SELECT revoked_at, revoked_by FROM access_tokens WHERE label='rev'"))
     assert row[0] > 0
     assert row[1] == "admin"
 

@@ -24,6 +24,7 @@ fake transport），而真实的 aiohttp 客户端在 T28 / T37 接入时只需�
 HONEST STUB：真实上游连接、超时六件套与重试策略由 T28 的 pipeline 提供；
 本模块只负责「发出去的那一份请求长什么样」。
 """
+
 from __future__ import annotations
 
 import inspect
@@ -115,9 +116,7 @@ class NativePassthrough:
 
         headers: dict[str, str] = {
             "Content-Type": "application/json",
-            "Accept": (
-                "text/event-stream" if payload.get("stream") else "application/json"
-            ),
+            "Accept": ("text/event-stream" if payload.get("stream") else "application/json"),
         }
         if api_key:
             headers["Authorization"] = "Bearer " + api_key
@@ -125,7 +124,10 @@ class NativePassthrough:
             headers[str(name)] = str(value)
 
         return PassthroughRequest(
-            method="POST", url=url, headers=headers, body=body,
+            method="POST",
+            url=url,
+            headers=headers,
+            body=body,
         )
 
     # -- 发送 ------------------------------------------------------------
@@ -153,7 +155,10 @@ class NativePassthrough:
             extra_headers=extra_headers,
         )
         stream = transport.send(
-            prepared.method, prepared.url, prepared.headers, prepared.body,
+            prepared.method,
+            prepared.url,
+            prepared.headers,
+            prepared.body,
         )
         if inspect.isawaitable(stream):
             stream = await stream
@@ -180,7 +185,10 @@ class RecordingTransport:
     ) -> AsyncIterable[bytes]:
         self.calls.append(
             PassthroughRequest(
-                method=method, url=url, headers=dict(headers), body=body,
+                method=method,
+                url=url,
+                headers=dict(headers),
+                body=body,
             )
         )
         return _aiter(self.chunks)
@@ -217,13 +225,12 @@ def _assert_native_path(url: str) -> None:
     if path != PATH_RESPONSES:
         raise PassthroughPathError(
             "native passthrough must target {0}, refused: {1}".format(
-                PATH_RESPONSES, path,
+                PATH_RESPONSES,
+                path,
             )
         )
     if PATH_CHAT_COMPLETIONS in url:
-        raise PassthroughPathError(
-            "native passthrough must never be downgraded to " + PATH_CHAT_COMPLETIONS
-        )
+        raise PassthroughPathError("native passthrough must never be downgraded to " + PATH_CHAT_COMPLETIONS)
 
 
 __all__ = [

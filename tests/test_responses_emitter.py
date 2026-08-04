@@ -10,6 +10,7 @@ Covers the acceptance criteria of T14:
 6. Heartbeat never transitions state.
 7. terminate() is idempotent and closes still-open items.
 """
+
 from __future__ import annotations
 
 import json
@@ -38,7 +39,7 @@ def _parse(frame: bytes) -> tuple[str, dict]:
     data = None
     for line in text.splitlines():
         if line.startswith("data: "):
-            data = json.loads(line[len("data: "):])
+            data = json.loads(line[len("data: ") :])
     return event, data
 
 

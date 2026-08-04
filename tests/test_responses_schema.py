@@ -8,6 +8,7 @@ Covers the four acceptance criteria of T10:
    never dropped.
 4. The 13 Responses-only fields are never present in the upstream payload.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -150,8 +151,7 @@ def test_parse_string_input():
 
 def test_parse_item_list_input():
     raw = [
-        {"type": "message", "role": "user",
-         "content": [{"type": "input_text", "text": "a"}]},
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "a"}]},
         {"type": "function_call_output", "call_id": "call_1", "output": "42"},
     ]
     items = parse_input_items(raw)
@@ -197,9 +197,7 @@ def test_text_format_text_consumed():
 
 def test_responses_only_fields_never_in_payload():
     """Fully-consumed Responses-only fields never reach the upstream payload."""
-    body = {
-        k: _sample_value(k) for k in RESPONSES_ONLY_FIELDS
-    }
+    body = {k: _sample_value(k) for k in RESPONSES_ONLY_FIELDS}
     body["model"] = "gpt-4o"
     body["input"] = "hi"
     body["max_output_tokens"] = 100

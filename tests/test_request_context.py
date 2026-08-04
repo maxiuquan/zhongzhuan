@@ -5,6 +5,7 @@ detection and model extraction behave identically to the old inline logic,
 and ``InboundProtocol`` is a ``str`` subclass so legacy string comparisons
 keep working.
 """
+
 from __future__ import annotations
 
 from unittest.mock import Mock, patch
@@ -66,9 +67,7 @@ async def test_detect_anthropic_by_path():
 
 @pytest.mark.asyncio
 async def test_detect_anthropic_by_header():
-    ctx = await RequestContextBuilder().build(
-        _request(headers={"x-api-key": "secret"})
-    )
+    ctx = await RequestContextBuilder().build(_request(headers={"x-api-key": "secret"}))
     assert ctx.inbound_protocol == "anthropic"
 
 
@@ -96,9 +95,7 @@ async def test_empty_body():
 
 @pytest.mark.asyncio
 async def test_non_stream_default():
-    ctx = await RequestContextBuilder().build(
-        _request(body=b'{"model": "gpt-4o", "messages": []}')
-    )
+    ctx = await RequestContextBuilder().build(_request(body=b'{"model": "gpt-4o", "messages": []}'))
     assert ctx.is_stream is False
 
 

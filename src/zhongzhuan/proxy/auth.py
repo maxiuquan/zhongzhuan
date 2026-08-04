@@ -8,6 +8,7 @@
 
 通过校验后，将 token_id 注入 request["token_id"] 供 handler 后续扣减配额。
 """
+
 from __future__ import annotations
 
 import json

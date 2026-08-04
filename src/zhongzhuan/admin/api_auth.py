@@ -1,9 +1,10 @@
 """Admin auth API: login / status."""
+
 from __future__ import annotations
 
 from aiohttp import web
 
-from ..store.admin_users import verify_admin, admin_exists, update_password
+from ..store.admin_users import verify_admin, update_password
 from .auth import create_token, auth_enabled, verify_token
 
 
@@ -15,7 +16,8 @@ def register_routes(app: web.Application, ctx) -> None:
 
         if not await verify_admin(ctx.store, username, password):
             return web.json_response(
-                {"error": "invalid credentials"}, status=401,
+                {"error": "invalid credentials"},
+                status=401,
             )
 
         token = create_token(username)
@@ -38,7 +40,8 @@ def register_routes(app: web.Application, ctx) -> None:
 
         if not await verify_admin(ctx.store, username, old_password):
             return web.json_response(
-                {"error": "invalid current password"}, status=401,
+                {"error": "invalid current password"},
+                status=401,
             )
 
         await update_password(ctx.store, username, new_password)

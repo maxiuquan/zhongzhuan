@@ -7,6 +7,7 @@ legacy ``test_responses.py``:
 * ④ ``reasoning_event_mode`` 三档各断言下游事件类型（Q1）；
 * ⑤ mock 上游立即断开，事件序列首个为 ``response.created``。
 """
+
 import json
 import re
 
@@ -37,12 +38,9 @@ class TestReasoningBufferReleased:
     async def test_reasoning_buffer_cleared_after_finish(self):
         """③ R-P1-04: reasoning text is released at turn end."""
         chunks = [
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {
-                "reasoning_content": "think step 1"}}]}),
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {
-                "reasoning_content": " think step 2"}}]}),
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "answer"},
-                                           "finish_reason": "stop"}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"reasoning_content": "think step 1"}}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"reasoning_content": " think step 2"}}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "answer"}, "finish_reason": "stop"}]}),
             b"data: [DONE]\n\n",
         ]
         tr, _ = await _run(chunks)
@@ -54,8 +52,7 @@ class TestReasoningBufferReleased:
     async def test_no_reasoning_leak_into_next_turn(self):
         """A fresh bridge must not retain the previous turn's reasoning."""
         tr = ResponsesTurnBridge(model="m")
-        await tr.feed(_sse({"id": "c1", "choices": [{"index": 0, "delta": {
-            "reasoning_content": "secret"}}]}))
+        await tr.feed(_sse({"id": "c1", "choices": [{"index": 0, "delta": {"reasoning_content": "secret"}}]}))
         await tr.afinish()
         # New bridge -> no reasoning state at all.
         tr2 = ResponsesTurnBridge(model="m")
@@ -66,10 +63,8 @@ class TestReasoningEventMode:
     async def test_summary_text_mode(self):
         """④ default SUMMARY_TEXT -> reasoning_summary_text.* family."""
         chunks = [
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {
-                "reasoning_content": "t"}}]}),
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"},
-                                           "finish_reason": "stop"}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"reasoning_content": "t"}}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"}, "finish_reason": "stop"}]}),
             b"data: [DONE]\n\n",
         ]
         _, text = await _run(chunks)
@@ -84,15 +79,11 @@ class TestReasoningEventMode:
     async def test_text_mode(self):
         """④ reasoning_text mode -> reasoning_text.* family."""
         chunks = [
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {
-                "reasoning_content": "t"}}]}),
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"},
-                                           "finish_reason": "stop"}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"reasoning_content": "t"}}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"}, "finish_reason": "stop"}]}),
             b"data: [DONE]\n\n",
         ]
-        _, text = await _run(
-            chunks, model="m", reasoning_event_mode=ReasoningEventMode.TEXT.value
-        )
+        _, text = await _run(chunks, model="m", reasoning_event_mode=ReasoningEventMode.TEXT.value)
         names = _event_names(text)
         assert "response.reasoning_text.delta" in names
         assert "response.reasoning_text.done" in names
@@ -103,15 +94,11 @@ class TestReasoningEventMode:
     async def test_disabled_mode(self):
         """④ disabled -> no reasoning events at all."""
         chunks = [
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {
-                "reasoning_content": "t"}}]}),
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"},
-                                           "finish_reason": "stop"}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"reasoning_content": "t"}}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"}, "finish_reason": "stop"}]}),
             b"data: [DONE]\n\n",
         ]
-        _, text = await _run(
-            chunks, model="m", reasoning_event_mode=ReasoningEventMode.DISABLED.value
-        )
+        _, text = await _run(chunks, model="m", reasoning_event_mode=ReasoningEventMode.DISABLED.value)
         names = _event_names(text)
         assert not any("reasoning" in n for n in names)
         # Message still flows.

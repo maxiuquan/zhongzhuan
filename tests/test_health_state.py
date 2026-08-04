@@ -1,20 +1,30 @@
 """健康状态机测试：验证 mark_* 函数和 is_available() 的状态分流逻辑。"""
+
 import time
 
 from zhongzhuan.proxy.ratelimit import (
-    KeyHealth, SlidingWindow,
-    STATE_HEALTHY, STATE_RATE_LIMITED, STATE_INVALID, STATE_ERROR,
+    KeyHealth,
+    SlidingWindow,
+    STATE_HEALTHY,
+    STATE_RATE_LIMITED,
+    STATE_INVALID,
+    STATE_ERROR,
 )
 from zhongzhuan.proxy.retry import (
-    mark_auth_failure, mark_rate_limited, mark_server_error,
-    mark_network_failure, mark_success, classify_failure,
+    mark_auth_failure,
+    mark_rate_limited,
+    mark_server_error,
+    mark_network_failure,
+    mark_success,
+    classify_failure,
     reason_for_exhaustion,
 )
 
 
 def _kh(key_id: int = 1) -> KeyHealth:
     return KeyHealth(
-        key_id=key_id, api_key=f"sk-{key_id}",
+        key_id=key_id,
+        api_key=f"sk-{key_id}",
         window=SlidingWindow(60, 100),
         rpm_limit=100,
     )

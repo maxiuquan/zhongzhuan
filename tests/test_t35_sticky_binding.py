@@ -13,6 +13,7 @@
 * 能力校验通过 ``tools[N].type``（hosted tool）+ ``background`` +
   ``metadata.stateful_responses`` 提取。
 """
+
 from __future__ import annotations
 
 import json
@@ -38,6 +39,7 @@ class FakeClock:
 
     def __init__(self, start: float | None = None) -> None:
         import time as _t
+
         self.t = start if start is not None else _t.time()
 
     def __call__(self) -> float:
@@ -45,11 +47,14 @@ class FakeClock:
 
 
 def _make_key(
-    key_id: int, model_name: str = "model", *,
+    key_id: int,
+    model_name: str = "model",
+    *,
     capabilities: set[str] | None = None,
 ) -> KeyHealth:
     return KeyHealth(
-        key_id=key_id, api_key=f"sk-{key_id}",
+        key_id=key_id,
+        api_key=f"sk-{key_id}",
         window=SlidingWindow(60, 1000),
         rpm_limit=1000,
         model_name=model_name,
@@ -78,6 +83,7 @@ def _make_request(headers: dict | None = None) -> web.Request:
     class _MockRequest:
         def __init__(self, hdrs: dict | None = None) -> None:
             self.headers = hdrs or {}
+
     return _MockRequest(headers)
 
 
@@ -95,6 +101,7 @@ async def store(tmp_path):
 # --------------------------------------------------------------------------- #
 # 判据③：10 轮会话内容各异，fingerprint 恒定、命中同一 key
 # --------------------------------------------------------------------------- #
+
 
 class TestStableFingerprint:
     def test_fingerprint_stable_across_10_turns(self):
@@ -145,6 +152,7 @@ class TestStableFingerprint:
 # 判据④：同一会话两轮 reasoning 不同但 session hash 相同
 # --------------------------------------------------------------------------- #
 
+
 class TestReasoningExcludedFromFingerprint:
     def test_messages_reasoning_field_does_not_change_hash(self):
         """``messages`` 里 assistant 的 ``reasoning`` 字段不参与指纹。"""
@@ -152,15 +160,13 @@ class TestReasoningExcludedFromFingerprint:
         base = {
             "messages": [
                 {"role": "user", "content": "你好"},
-                {"role": "assistant", "content": "回复",
-                 "reasoning": "内部思考 A"},
+                {"role": "assistant", "content": "回复", "reasoning": "内部思考 A"},
             ]
         }
         other = {
             "messages": [
                 {"role": "user", "content": "你好"},
-                {"role": "assistant", "content": "回复",
-                 "reasoning": "完全不同的内部思考 B"},
+                {"role": "assistant", "content": "回复", "reasoning": "完全不同的内部思考 B"},
             ]
         }
         assert ProxyHandler._session_key(req, base) == ProxyHandler._session_key(req, other)
@@ -168,20 +174,26 @@ class TestReasoningExcludedFromFingerprint:
     def test_input_reasoning_items_do_not_change_hash(self):
         """Responses ``input`` 里 ``role=reasoning`` 的项不参与指纹。"""
         req = _make_request()
-        key_a = ProxyHandler._session_key(req, {
-            "input": [
-                {"role": "user", "content": "你好"},
-                {"role": "reasoning", "content": "推理过程 A"},
-                {"role": "assistant", "content": "答复"},
-            ]
-        })
-        key_b = ProxyHandler._session_key(req, {
-            "input": [
-                {"role": "user", "content": "你好"},
-                {"role": "reasoning", "content": "推理过程 B"},
-                {"role": "assistant", "content": "答复"},
-            ]
-        })
+        key_a = ProxyHandler._session_key(
+            req,
+            {
+                "input": [
+                    {"role": "user", "content": "你好"},
+                    {"role": "reasoning", "content": "推理过程 A"},
+                    {"role": "assistant", "content": "答复"},
+                ]
+            },
+        )
+        key_b = ProxyHandler._session_key(
+            req,
+            {
+                "input": [
+                    {"role": "user", "content": "你好"},
+                    {"role": "reasoning", "content": "推理过程 B"},
+                    {"role": "assistant", "content": "答复"},
+                ]
+            },
+        )
         assert key_a == key_b
 
     def test_reasoning_before_first_user_is_skipped(self):
@@ -191,18 +203,24 @@ class TestReasoningExcludedFromFingerprint:
         会直接污染指纹；正确实现必须跳过它、继续找第一条 ``role=user``。
         """
         req = _make_request()
-        key_a = ProxyHandler._session_key(req, {
-            "input": [
-                {"role": "reasoning", "content": "推理过程 A"},
-                {"role": "user", "content": "你好"},
-            ]
-        })
-        key_b = ProxyHandler._session_key(req, {
-            "input": [
-                {"role": "reasoning", "content": "推理过程 B"},
-                {"role": "user", "content": "你好"},
-            ]
-        })
+        key_a = ProxyHandler._session_key(
+            req,
+            {
+                "input": [
+                    {"role": "reasoning", "content": "推理过程 A"},
+                    {"role": "user", "content": "你好"},
+                ]
+            },
+        )
+        key_b = ProxyHandler._session_key(
+            req,
+            {
+                "input": [
+                    {"role": "reasoning", "content": "推理过程 B"},
+                    {"role": "user", "content": "你好"},
+                ]
+            },
+        )
         assert key_a == key_b
         assert key_a.startswith("fp:")
 
@@ -234,11 +252,13 @@ class TestReasoningExcludedFromFingerprint:
 # 判据⑤：ResponseStore 持久化 session→route binding（TTL + 能力 + 故障迁移）
 # --------------------------------------------------------------------------- #
 
+
 class TestRouteBindingPersistence:
     @pytest.mark.asyncio
     async def test_binding_persisted_and_readable(self, store):
         """binding 写入 ResponseStore 后可读回（判据⑤持久化）。"""
         import time as _t
+
         rs = ResponseStore(store)
         await rs.upsert_route_binding(
             session_key="hdr:abc",
@@ -257,14 +277,17 @@ class TestRouteBindingPersistence:
         """过期 binding 视为不存在并懒删除（TTL）。"""
         rs = ResponseStore(store)
         await rs.upsert_route_binding(
-            session_key="hdr:exp", key_id=1, expires_at=100,
+            session_key="hdr:exp",
+            key_id=1,
+            expires_at=100,
         )
         # 当前真实时间必然 > 100，直接读应返回 None。
         rec = await rs.get_route_binding("hdr:exp")
         assert rec is None
         # 行已被懒删除
         row = await store.fetchone(
-            "SELECT 1 FROM route_bindings WHERE session_key = ?", ("hdr:exp",),
+            "SELECT 1 FROM route_bindings WHERE session_key = ?",
+            ("hdr:exp",),
         )
         assert row is None
 
@@ -311,13 +334,16 @@ class TestRouteBindingPersistence:
 # 判据⑥：sticky 仅在选定模型健康且能力兼容时生效
 # --------------------------------------------------------------------------- #
 
+
 class TestStickyCapabilityCheck:
     def test_sticky_hits_when_healthy_and_compatible(self):
         """健康且能力兼容 → sticky 生效。"""
-        handler = _make_handler([
-            _make_key(1, capabilities={"web_search"}),
-            _make_key(2),
-        ])
+        handler = _make_handler(
+            [
+                _make_key(1, capabilities={"web_search"}),
+                _make_key(2),
+            ]
+        )
         handler._set_sticky("hdr:s", 1, frozenset({"web_search"}))
         body = {"tools": [{"type": "web_search"}]}
         sticky = handler._get_sticky_key("hdr:s", handler._keys, body)
@@ -326,10 +352,12 @@ class TestStickyCapabilityCheck:
 
     def test_sticky_invalid_when_capability_mismatch(self):
         """能力不兼容 → sticky 失效（判据⑥），并记录故障迁移原因。"""
-        handler = _make_handler([
-            _make_key(1, capabilities={"file_search"}),
-            _make_key(2),
-        ])
+        handler = _make_handler(
+            [
+                _make_key(1, capabilities={"file_search"}),
+                _make_key(2),
+            ]
+        )
         handler._set_sticky("hdr:s", 1, frozenset({"file_search"}))
         body = {"tools": [{"type": "web_search"}]}
         sticky = handler._get_sticky_key("hdr:s", handler._keys, body)
@@ -340,6 +368,7 @@ class TestStickyCapabilityCheck:
     def test_sticky_invalid_when_unhealthy(self):
         """模型不健康 → sticky 失效（原有行为，判据⑥健康维度）。"""
         from zhongzhuan.proxy.retry import mark_auth_failure
+
         handler = _make_handler([_make_key(1), _make_key(2)])
         handler._set_sticky("hdr:s", 1)
         mark_auth_failure(handler._keys[0])
@@ -389,13 +418,16 @@ class TestStickyCapabilityCheck:
 # 判据⑤ 补充：handler 层 binding 持久化链路（store 存在时）
 # --------------------------------------------------------------------------- #
 
+
 class TestHandlerBindingPersistence:
     @pytest.mark.asyncio
     async def test_persist_sticky_binding_writes_store(self, store):
         """成功响应后 binding 落库（handler 层）。"""
         handler = _make_handler([_make_key(1), _make_key(2)], store=store)
         await handler._persist_sticky_binding(
-            "hdr:abc", 1, frozenset({"web_search"}),
+            "hdr:abc",
+            1,
+            frozenset({"web_search"}),
         )
         rs = ResponseStore(store)
         rec = await rs.get_route_binding("hdr:abc")

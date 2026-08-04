@@ -28,6 +28,7 @@ filter, a broken tool schema).  Retrying it burns quota and produces the same
 truncation, so the position is latched open in :attr:`_circuit_open` and every
 later attempt at that position fails fast with ``RETRY_BUDGET_EXHAUSTED``.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -42,13 +43,15 @@ from .budget import ExecutionBudget
 #: Never retried regardless of budget (R-P0-34).  The first two are the
 #: client's own fault -- replaying them just reproduces the same 4xx -- and the
 #: last two mean nobody is left to read the answer.
-NEVER_RETRYABLE: frozenset[ErrorClass] = frozenset({
-    ErrorClass.INVALID_CLIENT_REQUEST,      # 400
-    ErrorClass.UNSUPPORTED_INPUT_BLOCK,     # 400
-    ErrorClass.UNSUPPORTED_TOOL_CAPABILITY, # 400
-    ErrorClass.INVALID_TOOL_ARGUMENTS,      # 422-class
-    ErrorClass.CLIENT_DISCONNECTED,         # client cancelled / went away
-})
+NEVER_RETRYABLE: frozenset[ErrorClass] = frozenset(
+    {
+        ErrorClass.INVALID_CLIENT_REQUEST,  # 400
+        ErrorClass.UNSUPPORTED_INPUT_BLOCK,  # 400
+        ErrorClass.UNSUPPORTED_TOOL_CAPABILITY,  # 400
+        ErrorClass.INVALID_TOOL_ARGUMENTS,  # 422-class
+        ErrorClass.CLIENT_DISCONNECTED,  # client cancelled / went away
+    }
+)
 
 #: Truncations at one position before the position is latched open (R-P0-30).
 TRUNCATION_CIRCUIT_THRESHOLD: int = 2

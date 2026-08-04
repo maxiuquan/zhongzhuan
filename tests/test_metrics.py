@@ -8,6 +8,7 @@ Acceptance mapping
    trigger once, metric <-> terminal_reason reverse     test_fourteen_error_classes_cross_reference
    look-up
 """
+
 from __future__ import annotations
 
 from zhongzhuan.observability import metrics as m
@@ -32,7 +33,7 @@ def _names() -> set[str]:
     names: set[str] = set()
     for line in text.splitlines():
         if line.startswith("# HELP "):
-            names.add(line[len("# HELP "):].split(" ")[0])
+            names.add(line[len("# HELP ") :].split(" ")[0])
     return names
 
 
@@ -79,12 +80,12 @@ def test_13_metrics_exist_and_triggerable():
 
     # Each triggered metric has a value line in the snapshot.
     text = m.render_metrics()
-    assert "responses_requests_total{endpoint=\"create\",status=\"200\"} 1" in text
-    assert "responses_streams_completed_total{terminal_reason=\"normal_finish\"} 1" in text
-    assert "responses_streams_truncated_total{terminal_reason=\"upstream_truncated\"} 1" in text
-    assert "responses_unknown_params_dropped_total{field=\"foo\"} 1" in text
+    assert 'responses_requests_total{endpoint="create",status="200"} 1' in text
+    assert 'responses_streams_completed_total{terminal_reason="normal_finish"} 1' in text
+    assert 'responses_streams_truncated_total{terminal_reason="upstream_truncated"} 1' in text
+    assert 'responses_unknown_params_dropped_total{field="foo"} 1' in text
     assert "responses_reasoning_history_dropped_total 1" in text
-    assert "responses_tool_calls_total{tool_type=\"web_search\"} 1" in text
+    assert 'responses_tool_calls_total{tool_type="web_search"} 1' in text
     assert "responses_tool_call_json_invalid_total 1" in text
     assert "responses_duplicate_tool_chunks_total 1" in text
     assert "responses_late_chunks_total 1" in text
@@ -126,7 +127,7 @@ def test_counter_increments_are_cumulative():
     m.record_request("create", 200)
     m.record_request("create", 200)
     text = m.render_metrics()
-    assert "responses_requests_total{endpoint=\"create\",status=\"200\"} 2" in text
+    assert 'responses_requests_total{endpoint="create",status="200"} 2' in text
 
 
 def test_histogram_buckets_are_cumulative():
@@ -135,7 +136,7 @@ def test_histogram_buckets_are_cumulative():
     m.observe_first_token(5.0)
     text = m.render_metrics()
     # Both observations land in the +Inf bucket.
-    assert "responses_first_token_seconds_bucket{le=\"+Inf\"} 2" in text
+    assert 'responses_first_token_seconds_bucket{le="+Inf"} 2' in text
     assert "responses_first_token_seconds_count 2" in text
 
 
@@ -155,7 +156,7 @@ def test_ten_circuit_breaker_reasons_recorded():
 
     text = m.render_metrics()
     for reason in CIRCUIT_BREAKER_REASONS:
-        label = "responses_streams_truncated_total{{terminal_reason=\"{0}\"}} 1".format(reason.value)
+        label = 'responses_streams_truncated_total{{terminal_reason="{0}"}} 1'.format(reason.value)
         assert label in text, "missing metric for reason {0}".format(reason.value)
 
     # Reverse look-up: every recorded reason is a real TerminalReason member.
@@ -191,9 +192,9 @@ def test_fourteen_error_classes_cross_reference():
         reason = m.terminal_reason_for_error_class(err)
         assert reason is not None
         assert reason in TERMINAL_REASON_TO_ERROR_CLASS
-        assert "responses_streams_truncated_total{{terminal_reason=\"{0}\"}} 1".format(
-            reason.value
-        ) in text, "error {0} -> reason {1} missing".format(err.value, reason.value)
+        assert 'responses_streams_truncated_total{{terminal_reason="{0}"}} 1'.format(reason.value) in text, (
+            "error {0} -> reason {1} missing".format(err.value, reason.value)
+        )
 
     # Request-side classes: recorded by HTTP status (no fabricated terminal reason).
     for err in request_side:
@@ -202,7 +203,7 @@ def test_fourteen_error_classes_cross_reference():
         # Several classes share a status (e.g. four request-side classes map to
         # 400), so the counter accumulates -- assert the label line exists and
         # carries at least one occurrence.
-        label = "responses_requests_total{{endpoint=\"responses\",status=\"{0}\"}}".format(status)
+        label = 'responses_requests_total{{endpoint="responses",status="{0}"}}'.format(status)
         line = next((ln for ln in text.splitlines() if ln.startswith(label)), None)
         assert line is not None, "request-side error {0} (status {1}) missing".format(err.value, status)
         assert int(line.split()[-1]) >= 1

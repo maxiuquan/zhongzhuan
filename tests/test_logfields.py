@@ -8,6 +8,7 @@ Acceptance mapping
                                                test_short_sensitive_content_redacted
                                                test_redact_before_truncate_order
 """
+
 from __future__ import annotations
 
 import json
@@ -108,22 +109,24 @@ def test_logs_never_contain_sensitive_patterns():
     """A request-log stuffed with sensitive content yields zero hits of the
     hard-coded samples (API key / Authorization / reasoning full text)."""
     with _capture_loguru() as records:
-        emit_request_log({
-            "request_id": API_KEY_SAMPLE,
-            "session_id_hash": AUTH_HEADER_SAMPLE,
-            "model": REASONING_SAMPLE,
-            "upstream_protocol": "openai",
-            "upstream_key_id": JWT_SAMPLE,
-            "stream": True,
-            "attempt": 1,
-            "first_token_ms": 1,
-            "duration_ms": 1,
-            "dropped_fields": [API_KEY_SAMPLE, AUTH_HEADER_SAMPLE],
-            "reasoning_history_items_dropped": 1,
-            "tool_call_count": 1,
-            "terminal_reason": REASONING_SAMPLE,
-            "client_disconnected": False,
-        })
+        emit_request_log(
+            {
+                "request_id": API_KEY_SAMPLE,
+                "session_id_hash": AUTH_HEADER_SAMPLE,
+                "model": REASONING_SAMPLE,
+                "upstream_protocol": "openai",
+                "upstream_key_id": JWT_SAMPLE,
+                "stream": True,
+                "attempt": 1,
+                "first_token_ms": 1,
+                "duration_ms": 1,
+                "dropped_fields": [API_KEY_SAMPLE, AUTH_HEADER_SAMPLE],
+                "reasoning_history_items_dropped": 1,
+                "tool_call_count": 1,
+                "terminal_reason": REASONING_SAMPLE,
+                "client_disconnected": False,
+            }
+        )
 
     assert records, "expected at least one captured log line"
     joined = "\n".join(records)
@@ -205,11 +208,13 @@ def test_redact_before_truncate_order():
 
 
 def test_to_log_json_redacts_every_field():
-    line = to_log_json({
-        "request_id": "id-" + API_KEY_SAMPLE,
-        "model": "model " + AUTH_HEADER_SAMPLE,
-        "terminal_reason": "err " + API_KEY_SAMPLE,
-    })
+    line = to_log_json(
+        {
+            "request_id": "id-" + API_KEY_SAMPLE,
+            "model": "model " + AUTH_HEADER_SAMPLE,
+            "terminal_reason": "err " + API_KEY_SAMPLE,
+        }
+    )
     assert API_KEY_SAMPLE not in line
     assert AUTH_HEADER_SAMPLE not in line
     assert "t0k3n" not in line

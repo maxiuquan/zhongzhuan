@@ -1,4 +1,5 @@
 """Error envelope translation between OpenAI and Anthropic formats."""
+
 from __future__ import annotations
 
 # HTTP status -> OpenAI error type
@@ -32,9 +33,7 @@ def _lookup_type(mapping: dict[int, str], status: int, default: str) -> str:
     return mapping.get(status, default)
 
 
-def translate_error_a2o(
-    status: int, message: str, inbound_protocol: str = "anthropic"
-) -> tuple[int, dict]:
+def translate_error_a2o(status: int, message: str, inbound_protocol: str = "anthropic") -> tuple[int, dict]:
     """Translate an error to OpenAI error envelope format.
 
     Returns ``(status, error_body)`` where ``error_body`` is the dict to
@@ -56,9 +55,7 @@ def translate_error_a2o(
     return status, body
 
 
-def translate_error_o2a(
-    status: int, message: str, inbound_protocol: str = "openai"
-) -> tuple[int, dict]:
+def translate_error_o2a(status: int, message: str, inbound_protocol: str = "openai") -> tuple[int, dict]:
     """Translate an error to Anthropic error envelope format.
 
     Returns ``(status, error_body)`` where ``error_body`` is the dict to

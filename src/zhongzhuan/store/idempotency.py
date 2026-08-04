@@ -42,6 +42,7 @@ TTL 感知视图，不改它们的行为。
 并真的执行一次副作用。为了记一笔冲突而制造一次重复执行是净损失，所以
 :data:`STATE_CONFLICT` 只作为判定结果向上报，不落库。
 """
+
 from __future__ import annotations
 
 import time
@@ -71,7 +72,11 @@ class IdempotencyStore:
     # -- 判定 ----------------------------------------------------------------
 
     async def seen(
-        self, key: str, *, workspace_id: str = "", now: int | None = None,
+        self,
+        key: str,
+        *,
+        workspace_id: str = "",
+        now: int | None = None,
     ) -> bool:
         """该幂等键是否已被占用 —— ``True`` 表示**不得**再执行一次。
 
@@ -84,7 +89,11 @@ class IdempotencyStore:
         return record is not None and record["state"] in BLOCKING_STATES
 
     async def lookup(
-        self, key: str, *, workspace_id: str = "", now: int | None = None,
+        self,
+        key: str,
+        *,
+        workspace_id: str = "",
+        now: int | None = None,
     ) -> dict[str, Any] | None:
         """返回未过期的记录，没有则 ``None``。
 
@@ -196,8 +205,7 @@ class IdempotencyStore:
             "(workspace_id, idempotency_key, request_digest, response_id, "
             " status_code, state, created_at, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (workspace_id, key, request_digest, response_id,
-             int(status_code), state, ts, expires_at),
+            (workspace_id, key, request_digest, response_id, int(status_code), state, ts, expires_at),
         )
 
 

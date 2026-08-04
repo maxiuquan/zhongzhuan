@@ -11,10 +11,11 @@ This is a **pure relocation** surface (T02 / R-P1-63 first half, R-P0-22
 prerequisite): it must not change any behaviour.  ``InboundProtocol`` is a
 ``str`` subclass so ``ctx.inbound_protocol == "responses"`` keeps working.
 """
+
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from aiohttp import web

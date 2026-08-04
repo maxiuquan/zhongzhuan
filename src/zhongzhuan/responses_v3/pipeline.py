@@ -29,6 +29,7 @@ catch-up stream (T24) can replay it.  Sequence numbers are allocated from 0
 here; in production the canonical ``seq`` comes from ``ResponsesEventEmitter``
 (T16).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -58,9 +59,7 @@ def sse_frame(event_type: str, data: dict[str, Any]) -> bytes:
     frames to the live stream -- sharing this function is what makes that a
     property of the code rather than a comment (R-P1-36).
     """
-    return (
-        f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-    ).encode("utf-8")
+    return (f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n").encode("utf-8")
 
 
 #: Historical private alias kept for existing call sites inside this module.
@@ -201,17 +200,26 @@ class ResponsePipeline:
                 self._output_index += 1
                 item_id = make_message_item_id(self.response_id, idx)
                 self._open_message = {"id": item_id, "output_index": idx}
-                frames.append(await self._emit("response.output_item.added", {
-                    "type": "response.output_item.added",
-                    "output_index": idx,
-                    "item": {"id": item_id, "type": "message",
-                             "status": "in_progress", "role": "assistant"},
-                }))
-            frames.append(await self._emit("response.output_text.delta", {
-                "type": "response.output_text.delta",
-                "output_index": self._open_message["output_index"],
-                "delta": delta,
-            }))
+                frames.append(
+                    await self._emit(
+                        "response.output_item.added",
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": idx,
+                            "item": {"id": item_id, "type": "message", "status": "in_progress", "role": "assistant"},
+                        },
+                    )
+                )
+            frames.append(
+                await self._emit(
+                    "response.output_text.delta",
+                    {
+                        "type": "response.output_text.delta",
+                        "output_index": self._open_message["output_index"],
+                        "delta": delta,
+                    },
+                )
+            )
             self.state = "streaming"
 
         elif kind == "tool_call":
@@ -219,7 +227,8 @@ class ResponsePipeline:
             name = str(chunk.get("name") or "")
             fragment = str(chunk.get("arguments") or "")
             acc = self._tools.ensure(
-                output_index=self._output_index, call_id=call_id,
+                output_index=self._output_index,
+                call_id=call_id,
                 source_index=chunk.get("source_index"),
             )
             acc.replace_name(name)
@@ -227,20 +236,35 @@ class ResponsePipeline:
             if not acc.item_added:
                 idx = acc.output_index
                 self._output_index = max(self._output_index, idx + 1)
-                frames.append(await self._emit("response.output_item.added", {
-                    "type": "response.output_item.added",
-                    "output_index": idx,
-                    "item": {"id": make_function_call_item_id(acc.call_id),
-                             "type": "function_call", "status": "in_progress",
-                             "call_id": acc.call_id, "name": name, "arguments": ""},
-                }))
+                frames.append(
+                    await self._emit(
+                        "response.output_item.added",
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": idx,
+                            "item": {
+                                "id": make_function_call_item_id(acc.call_id),
+                                "type": "function_call",
+                                "status": "in_progress",
+                                "call_id": acc.call_id,
+                                "name": name,
+                                "arguments": "",
+                            },
+                        },
+                    )
+                )
                 acc.item_added = True
-            frames.append(await self._emit("response.function_call_arguments.delta", {
-                "type": "response.function_call_arguments.delta",
-                "output_index": acc.output_index,
-                "call_id": acc.call_id,
-                "delta": fragment,
-            }))
+            frames.append(
+                await self._emit(
+                    "response.function_call_arguments.delta",
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": acc.output_index,
+                        "call_id": acc.call_id,
+                        "delta": fragment,
+                    },
+                )
+            )
             self.state = "streaming"
 
         elif kind == "tool_call_done":
@@ -251,32 +275,57 @@ class ResponsePipeline:
                 valid = acc.validate_arguments()
                 item_id = make_function_call_item_id(acc.call_id)
                 if valid:
-                    frames.append(await self._emit("response.function_call_arguments.done", {
-                        "type": "response.function_call_arguments.done",
-                        "output_index": acc.output_index,
-                        "call_id": acc.call_id,
-                        "arguments": acc.arguments,
-                    }))
-                    frames.append(await self._emit("response.output_item.done", {
-                        "type": "response.output_item.done",
-                        "output_index": acc.output_index,
-                        "item": {"id": item_id, "type": "function_call",
-                                 "status": "completed", "call_id": acc.call_id,
-                                 "name": acc.name, "arguments": acc.arguments},
-                    }))
+                    frames.append(
+                        await self._emit(
+                            "response.function_call_arguments.done",
+                            {
+                                "type": "response.function_call_arguments.done",
+                                "output_index": acc.output_index,
+                                "call_id": acc.call_id,
+                                "arguments": acc.arguments,
+                            },
+                        )
+                    )
+                    frames.append(
+                        await self._emit(
+                            "response.output_item.done",
+                            {
+                                "type": "response.output_item.done",
+                                "output_index": acc.output_index,
+                                "item": {
+                                    "id": item_id,
+                                    "type": "function_call",
+                                    "status": "completed",
+                                    "call_id": acc.call_id,
+                                    "name": acc.name,
+                                    "arguments": acc.arguments,
+                                },
+                            },
+                        )
+                    )
                     acc.mark_item_done()
                 else:
                     # Truncated / invalid arguments: close the item safely but
                     # NEVER emit arguments.done (R-P1-22) -- a client that
                     # JSON.parses the partial fragment would execute a mangled
                     # tool call.
-                    frames.append(await self._emit("response.output_item.done", {
-                        "type": "response.output_item.done",
-                        "output_index": acc.output_index,
-                        "item": {"id": item_id, "type": "function_call",
-                                 "status": "incomplete", "call_id": acc.call_id,
-                                 "name": acc.name, "arguments": acc.arguments},
-                    }))
+                    frames.append(
+                        await self._emit(
+                            "response.output_item.done",
+                            {
+                                "type": "response.output_item.done",
+                                "output_index": acc.output_index,
+                                "item": {
+                                    "id": item_id,
+                                    "type": "function_call",
+                                    "status": "incomplete",
+                                    "call_id": acc.call_id,
+                                    "name": acc.name,
+                                    "arguments": acc.arguments,
+                                },
+                            },
+                        )
+                    )
                     acc.mark_item_done()
 
         # "finish" is a no-op marker: the natural-end handler sees it and
@@ -289,41 +338,66 @@ class ResponsePipeline:
         if self._open_message is not None:
             idx = self._open_message["output_index"]
             item_id = self._open_message["id"]
-            frames.append(await self._emit("response.output_text.done", {
-                "type": "response.output_text.done",
-                "output_index": idx,
-            }))
-            frames.append(await self._emit("response.output_item.done", {
-                "type": "response.output_item.done",
-                "output_index": idx,
-                "item": {"id": item_id, "type": "message",
-                         "status": "incomplete" if incomplete else "completed",
-                         "role": "assistant"},
-            }))
+            frames.append(
+                await self._emit(
+                    "response.output_text.done",
+                    {
+                        "type": "response.output_text.done",
+                        "output_index": idx,
+                    },
+                )
+            )
+            frames.append(
+                await self._emit(
+                    "response.output_item.done",
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": idx,
+                        "item": {
+                            "id": item_id,
+                            "type": "message",
+                            "status": "incomplete" if incomplete else "completed",
+                            "role": "assistant",
+                        },
+                    },
+                )
+            )
             self._open_message = None
         for acc in self._tools.incomplete():
             if acc.item_added and not acc.item_done:
-                frames.append(await self._emit("response.output_item.done", {
-                    "type": "response.output_item.done",
-                    "output_index": acc.output_index,
-                    "item": {"id": make_function_call_item_id(acc.call_id),
-                             "type": "function_call",
-                             "status": "incomplete" if incomplete else "completed",
-                             "call_id": acc.call_id, "name": acc.name,
-                             "arguments": acc.arguments},
-                }))
+                frames.append(
+                    await self._emit(
+                        "response.output_item.done",
+                        {
+                            "type": "response.output_item.done",
+                            "output_index": acc.output_index,
+                            "item": {
+                                "id": make_function_call_item_id(acc.call_id),
+                                "type": "function_call",
+                                "status": "incomplete" if incomplete else "completed",
+                                "call_id": acc.call_id,
+                                "name": acc.name,
+                                "arguments": acc.arguments,
+                            },
+                        },
+                    )
+                )
                 acc.mark_item_done()
         return frames
 
     # -- terminal helpers ---------------------------------------------------
 
     async def _terminal_frames(
-        self, *, reason: TerminalReason, strict: bool,
+        self,
+        *,
+        reason: TerminalReason,
+        strict: bool,
     ) -> list[bytes]:
         """Render the truncation terminal event + ``[DONE]`` (criteria ⑥⑦)."""
         frames = await self._close_open_items(incomplete=True)
         details = to_incomplete_details(
-            reason, "upstream stream terminated: {0}".format(reason.value),
+            reason,
+            "upstream stream terminated: {0}".format(reason.value),
         )
         if strict:
             status = "incomplete" if _is_timeout_reason(reason) else "failed"
@@ -336,10 +410,15 @@ class ResponsePipeline:
             "incomplete_details": details,
             "terminal_reason": reason.value,
         }
-        frames.append(await self._emit(event_name, {
-            "type": event_name,
-            "response": response_obj,
-        }))
+        frames.append(
+            await self._emit(
+                event_name,
+                {
+                    "type": event_name,
+                    "response": response_obj,
+                },
+            )
+        )
         frames.append(SSE_DONE_FRAME)
         self.state = status
         self.stats.terminal_reason = reason.value
@@ -349,10 +428,15 @@ class ResponsePipeline:
     async def _completed_frames(self) -> list[bytes]:
         """Graceful ``response.completed`` + ``[DONE]`` (T21 criterion ⑤)."""
         frames = await self._close_open_items(incomplete=False)
-        frames.append(await self._emit("response.completed", {
-            "type": "response.completed",
-            "response": {"id": self.response_id, "status": "completed"},
-        }))
+        frames.append(
+            await self._emit(
+                "response.completed",
+                {
+                    "type": "response.completed",
+                    "response": {"id": self.response_id, "status": "completed"},
+                },
+            )
+        )
         frames.append(SSE_DONE_FRAME)
         self.state = "completed"
         return frames
@@ -481,10 +565,7 @@ class ResponsePipeline:
                     terminal_reason = payload
                     break
                 elif kind == "upstream_error":
-                    terminal_reason = (
-                        TerminalReason.UPSTREAM_TRUNCATED
-                        if produced else TerminalReason.UPSTREAM_CONNECT
-                    )
+                    terminal_reason = TerminalReason.UPSTREAM_TRUNCATED if produced else TerminalReason.UPSTREAM_CONNECT
                     break
                 elif kind == "upstream_end":
                     if produced:
@@ -503,7 +584,8 @@ class ResponsePipeline:
 
         if terminal_reason is not None:
             for frame in await self._terminal_frames(
-                reason=terminal_reason, strict=cfg.strict_terminal,
+                reason=terminal_reason,
+                strict=cfg.strict_terminal,
             ):
                 yield frame
         else:

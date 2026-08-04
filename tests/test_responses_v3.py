@@ -9,6 +9,7 @@ Runnable acceptance criteria covered here (no live upstream / SDK needed):
 
 The OpenAI-Python-SDK direct-call (①) and server wiring are sealed in T25/T37.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -39,7 +40,9 @@ async def env(tmp_path):
 async def test_create_returns_response_object(env):
     rs, handler = env
     status, body = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1",
+        "POST",
+        "/v1/responses",
+        workspace_id="t1",
         body={"model": "gpt-4o", "input": "hi"},
     )
     assert status == 200
@@ -60,9 +63,7 @@ async def test_retrieve_unknown_is_404(env):
 async def test_retrieve_cross_tenant_is_404(env):
     """Criterion ④: a response created by t1 is invisible to t2."""
     rs, handler = env
-    _, created = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"}
-    )
+    _, created = await handler.dispatch("POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"})
     rid = created["id"]
     status, body = await handler.dispatch("GET", f"/v1/responses/{rid}", workspace_id="t2")
     assert status == 404
@@ -71,9 +72,7 @@ async def test_retrieve_cross_tenant_is_404(env):
 @pytest.mark.asyncio
 async def test_delete_and_cancel(env):
     rs, handler = env
-    _, created = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"}
-    )
+    _, created = await handler.dispatch("POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"})
     rid = created["id"]
     status, body = await handler.dispatch("DELETE", f"/v1/responses/{rid}", workspace_id="t1")
     assert status == 200 and body["deleted"] is True
@@ -81,9 +80,7 @@ async def test_delete_and_cancel(env):
     status, _ = await handler.dispatch("GET", f"/v1/responses/{rid}", workspace_id="t1")
     assert status == 404
 
-    _, created2 = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"}
-    )
+    _, created2 = await handler.dispatch("POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"})
     rid2 = created2["id"]
     status, body = await handler.dispatch("POST", f"/v1/responses/{rid2}/cancel", workspace_id="t1")
     assert status == 200 and body["status"] == "cancelled"
@@ -93,9 +90,7 @@ async def test_delete_and_cancel(env):
 async def test_no_405_for_any_endpoint(env):
     """Criterion ①: valid method+path for each endpoint never returns 405."""
     rs, handler = env
-    _, created = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"}
-    )
+    _, created = await handler.dispatch("POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"})
     rid = created["id"]
     cases = [
         ("POST", "/v1/responses"),
@@ -134,9 +129,7 @@ async def test_store_false_then_retrieve_404(env):
 async def test_input_items_pagination_three_pages(env):
     """Criterion ③: 50 items, limit 20 -> 3 pages, no dup / no missing."""
     rs, handler = env
-    _, created = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"}
-    )
+    _, created = await handler.dispatch("POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"})
     rid = created["id"]
     items = [{"id": f"item_{i}", "type": "message", "role": "user", "content": []} for i in range(50)]
     await rs.save_input_items(rid, items)
@@ -146,8 +139,10 @@ async def test_input_items_pagination_three_pages(env):
     pages = 0
     while True:
         status, body = await handler.dispatch(
-            "GET", f"/v1/responses/{rid}/input_items",
-            workspace_id="t1", body={"after": after, "limit": 20},
+            "GET",
+            f"/v1/responses/{rid}/input_items",
+            workspace_id="t1",
+            body={"after": after, "limit": 20},
         )
         assert status == 200
         page_ids = [it["id"] for it in body["data"]]
@@ -165,9 +160,7 @@ async def test_input_items_pagination_three_pages(env):
 async def test_pipeline_zero_bytes_sequence(env):
     """Criterion ⑤: a 0-byte upstream ends as created->in_progress->completed->[DONE]."""
     rs, handler = env
-    _, created = await handler.dispatch(
-        "POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"}
-    )
+    _, created = await handler.dispatch("POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"})
     rid = created["id"]
 
     async def empty_upstream():
@@ -183,7 +176,7 @@ async def test_pipeline_zero_bytes_sequence(env):
         line = fr.decode("utf-8")
         for ln in line.splitlines():
             if ln.startswith("event: "):
-                event_types.append(ln[len("event: "):].strip())
+                event_types.append(ln[len("event: ") :].strip())
     assert event_types == ["response.created", "response.in_progress", "response.completed"]
     # Events persisted for catch-up.
     events = await rs.list_events(rid)

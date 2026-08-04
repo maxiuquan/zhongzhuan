@@ -22,6 +22,7 @@
 外层 draw 出该边界下随机化的事件流内容，内层 draw 出随机切割点集合（任意
 字节间隙断开），然后断言两种解析方式产生**完全相等**的 ``SseFrame`` 序列。
 """
+
 from __future__ import annotations
 
 import json
@@ -62,8 +63,7 @@ def _split_invariant(stream: bytes, cut_points: set[int]) -> None:
         frames.extend(parser.feed(chunk))
     frames.extend(parser.flush())
     assert frames == baseline, (
-        f"fragmentation changed semantics; cuts={sorted(cut_points)}\n"
-        f"got {frames!r}\nwant {baseline!r}"
+        f"fragmentation changed semantics; cuts={sorted(cut_points)}\ngot {frames!r}\nwant {baseline!r}"
     )
     assert parser.malformed_count == 0, "valid UTF-8 stream split must not corrupt"
 
@@ -72,10 +72,14 @@ def _split_invariant(stream: bytes, cut_points: set[int]) -> None:
 def _cuts(data: st.DataObject, n: int) -> set[int]:
     if n <= 1:
         return set()
-    return set(data.draw(st.sets(
-        st.integers(min_value=1, max_value=n - 1),
-        max_size=n,
-    )))
+    return set(
+        data.draw(
+            st.sets(
+                st.integers(min_value=1, max_value=n - 1),
+                max_size=n,
+            )
+        )
+    )
 
 
 #: 多字节文本语料（中文 / 日文 / emoji / 组合字符）。
@@ -113,18 +117,23 @@ def test_utf8_multibyte_boundary_fragmentation(data):
 @given(st.data())
 def test_json_escape_boundary_fragmentation(data):
     """JSON 字符串含 ``\\n``/``\\t``/引号/反斜杠等转义，任意切分后原样保留。"""
-    inner = data.draw(st.text(
-        alphabet=st.characters(
-            blacklist_categories=("Cs",),
-            blacklist_characters=("\n", "\r"),
-        ),
-        max_size=120,
-    ))
-    obj = json.dumps({
-        "text": inner,
-        "escaped": 'line1\\nline2\\ttab\\"quote\\\\back',
-        "nested": {"k": [1, "中文", True]},
-    }, ensure_ascii=False)
+    inner = data.draw(
+        st.text(
+            alphabet=st.characters(
+                blacklist_categories=("Cs",),
+                blacklist_characters=("\n", "\r"),
+            ),
+            max_size=120,
+        )
+    )
+    obj = json.dumps(
+        {
+            "text": inner,
+            "escaped": 'line1\\nline2\\ttab\\"quote\\\\back',
+            "nested": {"k": [1, "中文", True]},
+        },
+        ensure_ascii=False,
+    )
     stream = f"data: {obj}\n\n".encode("utf-8")
     _split_invariant(stream, _cuts(data, len(stream)))
     frames = SSEParser.parse(stream)
@@ -140,21 +149,21 @@ def test_json_escape_boundary_fragmentation(data):
 @given(st.data())
 def test_crlf_lf_mixed_fragmentation(data):
     """同一流里混合 CRLF 与 LF 行终止符；切点落在 CR/LF 中间也不改变语义。"""
-    body = data.draw(st.text(
-        alphabet=st.characters(
-            blacklist_categories=("Cs",),
-            blacklist_characters=("\n", "\r"),
-        ),
-        max_size=60,
-    ))
+    body = data.draw(
+        st.text(
+            alphabet=st.characters(
+                blacklist_categories=("Cs",),
+                blacklist_characters=("\n", "\r"),
+            ),
+            max_size=60,
+        )
+    )
     stream = (
         b"event: message_start\r\n"
         b'data: {"type":"message_start","message":{"id":"m1"}}\r\n'
         b"\r\n"
         b": ping\n\n"  # 注释行，LF 终止
-        b"event: content_block_delta\n"
-        + f'data: {{"type":"content_block_delta","text":"{body}"}}\n'.encode()
-        + b"\n"
+        b"event: content_block_delta\n" + f'data: {{"type":"content_block_delta","text":"{body}"}}\n'.encode() + b"\n"
         b"data: [DONE]\r\n"
         b"\r\n"
     )
@@ -173,10 +182,12 @@ def test_multi_event_chunking_fragmentation(data):
     count = data.draw(st.integers(min_value=2, max_value=6))
     parts = []
     for i in range(count):
-        word = data.draw(st.text(
-            alphabet=st.characters(blacklist_categories=("Cs",)),
-            max_size=30,
-        ))
+        word = data.draw(
+            st.text(
+                alphabet=st.characters(blacklist_categories=("Cs",)),
+                max_size=30,
+            )
+        )
         parts.append(f'data: {{"idx":{i},"text":"{word}"}}'.encode("utf-8"))
     stream = b"\n\n".join(parts) + b"\n\n" + b"data: [DONE]\n\n"
     _split_invariant(stream, _cuts(data, len(stream)))
@@ -194,27 +205,32 @@ def test_multi_event_chunking_fragmentation(data):
 @given(st.data())
 def test_tool_arguments_byte_by_byte_fragmentation(data):
     """OpenAI 风格 tool_calls delta 流：arguments 每字节切分后语义不变。"""
-    args = json.dumps({
-        "query": data.draw(st.text(alphabet=st.characters(blacklist_categories=("Cs",)),
-                                   max_size=60)),
-        "filters": [1, 2, {"mode": "exact"}],
-        "unicode": "北京🚀",
-    }, ensure_ascii=False)
-    tool_id = "call_" + data.draw(st.text(alphabet=st.characters(blacklist_categories=("Cs",)),
-                                          min_size=3, max_size=8))
+    args = json.dumps(
+        {
+            "query": data.draw(st.text(alphabet=st.characters(blacklist_categories=("Cs",)), max_size=60)),
+            "filters": [1, 2, {"mode": "exact"}],
+            "unicode": "北京🚀",
+        },
+        ensure_ascii=False,
+    )
+    tool_id = "call_" + data.draw(st.text(alphabet=st.characters(blacklist_categories=("Cs",)), min_size=3, max_size=8))
     # 构造完整 OpenAI tool_calls 增量 SSE（一个事件多行 data）。
     delta_obj = {
         "id": "chatcmpl-1",
-        "choices": [{
-            "index": 0,
-            "delta": {
-                "tool_calls": [{
-                    "index": 0,
-                    "id": tool_id,
-                    "function": {"name": "search", "arguments": args},
-                }],
-            },
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": tool_id,
+                            "function": {"name": "search", "arguments": args},
+                        }
+                    ],
+                },
+            }
+        ],
     }
     stream = f"data: {json.dumps(delta_obj, ensure_ascii=False)}\n\n".encode("utf-8")
     _split_invariant(stream, _cuts(data, len(stream)))
@@ -222,7 +238,7 @@ def test_tool_arguments_byte_by_byte_fragmentation(data):
     parser = SSEParser()
     frames: list[SseFrame] = []
     for i in range(len(stream)):
-        frames.extend(parser.feed(stream[i:i + 1]))
+        frames.extend(parser.feed(stream[i : i + 1]))
     frames.extend(parser.flush())
     assert frames == SSEParser.parse(stream)
     assert parser.malformed_count == 0

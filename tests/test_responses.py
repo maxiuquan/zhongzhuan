@@ -6,6 +6,7 @@ Covers:
   * Chat Completions response -> Responses response conversion (non-streaming)
   * Chat Completions SSE -> Responses SSE streaming translation
 """
+
 import json
 import re
 
@@ -48,11 +49,13 @@ class TestDetectResponses:
 class TestNormalizeInput:
     def test_string_input_becomes_user_message(self):
         items = normalize_responses_input("hello")
-        assert items == [{
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": "hello"}],
-        }]
+        assert items == [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}],
+            }
+        ]
 
     def test_list_input_passthrough(self):
         src = [{"type": "message", "role": "user", "content": "hi"}]
@@ -203,8 +206,7 @@ class TestResponseConversion:
             "id": "chatcmpl-1",
             "created": 1700000000,
             "model": "gpt-4o",
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": "done"},
-                         "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
         }
         out = chatcompletions_to_responses(cc, "gpt-4o")
@@ -228,19 +230,23 @@ class TestResponseConversion:
         cc = {
             "id": "chatcmpl-2",
             "model": "gpt-4o",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": "call_x",
-                        "type": "function",
-                        "function": {"name": "shell", "arguments": '{"a":1}'},
-                    }],
-                },
-                "finish_reason": "tool_calls",
-            }],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_x",
+                                "type": "function",
+                                "function": {"name": "shell", "arguments": '{"a":1}'},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
             "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
         }
         out = chatcompletions_to_responses(cc, "gpt-4o")
@@ -278,14 +284,22 @@ def _event_names(text: str) -> list[str]:
 class TestStreaming:
     async def test_text_stream_lifecycle(self):
         chunks = [
-            _sse({"id": "c1", "model": "gpt-4o",
-                  "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]}),
-            _sse({"id": "c1", "model": "gpt-4o",
-                  "choices": [{"index": 0, "delta": {"content": "Hello"}}]}),
-            _sse({"id": "c1", "model": "gpt-4o",
-                  "choices": [{"index": 0, "delta": {"content": " world"}, "finish_reason": "stop"}]}),
-            _sse({"id": "c1", "model": "gpt-4o", "choices": [],
-                  "usage": {"prompt_tokens": 5, "completion_tokens": 3}}),
+            _sse(
+                {
+                    "id": "c1",
+                    "model": "gpt-4o",
+                    "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}],
+                }
+            ),
+            _sse({"id": "c1", "model": "gpt-4o", "choices": [{"index": 0, "delta": {"content": "Hello"}}]}),
+            _sse(
+                {
+                    "id": "c1",
+                    "model": "gpt-4o",
+                    "choices": [{"index": 0, "delta": {"content": " world"}, "finish_reason": "stop"}],
+                }
+            ),
+            _sse({"id": "c1", "model": "gpt-4o", "choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}),
             b"data: [DONE]\n\n",
         ]
         tr, text = await _run_stream(chunks)
@@ -308,22 +322,21 @@ class TestStreaming:
     async def test_text_deltas_accumulate(self):
         chunks = [
             _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "Hello"}}]}),
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": " world"},
-                                           "finish_reason": "stop"}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": " world"}, "finish_reason": "stop"}]}),
             b"data: [DONE]\n\n",
         ]
         _, text = await _run_stream(chunks)
-        deltas = [json.loads(m)["delta"]
-                  for m in re.findall(r"data: (\{.*?\})\n", text, re.S)
-                  if '"response.output_text.delta"' in m]
+        deltas = [
+            json.loads(m)["delta"]
+            for m in re.findall(r"data: (\{.*?\})\n", text, re.S)
+            if '"response.output_text.delta"' in m
+        ]
         assert "".join(deltas) == "Hello world"
 
     async def test_usage_captured_for_billing(self):
         chunks = [
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "hi"},
-                                           "finish_reason": "stop"}]}),
-            _sse({"id": "c1", "choices": [],
-                  "usage": {"prompt_tokens": 5, "completion_tokens": 3}}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]}),
+            _sse({"id": "c1", "choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3}}),
             b"data: [DONE]\n\n",
         ]
         tr, _ = await _run_stream(chunks)
@@ -333,8 +346,7 @@ class TestStreaming:
     async def test_all_emitted_events_are_valid_json(self):
         chunks = [
             _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "a"}}]}),
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "b"},
-                                           "finish_reason": "stop"}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "b"}, "finish_reason": "stop"}]}),
             b"data: [DONE]\n\n",
         ]
         _, text = await _run_stream(chunks)
@@ -346,28 +358,62 @@ class TestStreaming:
 
     async def test_tool_call_stream(self):
         chunks = [
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"tool_calls": [
-                {"index": 0, "id": "call_1", "type": "function",
-                 "function": {"name": "shell", "arguments": ""}}]}}]}),
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"tool_calls": [
-                {"index": 0, "function": {"arguments": '{"cmd":'}}]}}]}),
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"tool_calls": [
-                {"index": 0, "function": {"arguments": '"ls"}'}}]},
-                "finish_reason": "tool_calls"}]}),
+            _sse(
+                {
+                    "id": "c1",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {"name": "shell", "arguments": ""},
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                }
+            ),
+            _sse(
+                {
+                    "id": "c1",
+                    "choices": [
+                        {"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"cmd":'}}]}}
+                    ],
+                }
+            ),
+            _sse(
+                {
+                    "id": "c1",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"ls"}'}}]},
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                }
+            ),
             b"data: [DONE]\n\n",
         ]
         _, text = await _run_stream(chunks)
         names = _event_names(text)
         assert "response.function_call_arguments.delta" in names
         assert "response.function_call_arguments.done" in names
-        done_payload = [json.loads(m) for m in re.findall(r"data: (\{.*?\})\n", text, re.S)
-                        if '"response.function_call_arguments.done"' in m][0]
+        done_payload = [
+            json.loads(m)
+            for m in re.findall(r"data: (\{.*?\})\n", text, re.S)
+            if '"response.function_call_arguments.done"' in m
+        ][0]
         assert done_payload["arguments"] == '{"cmd":"ls"}'
 
     async def test_finish_safely_is_idempotent(self):
         chunks = [
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "x"},
-                                           "finish_reason": "stop"}]}),
+            _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "x"}, "finish_reason": "stop"}]}),
             b"data: [DONE]\n\n",
         ]
         tr, text = await _run_stream(chunks)
@@ -379,8 +425,7 @@ class TestStreaming:
     async def test_truncated_stream_still_terminated(self):
         """Upstream dies mid-stream: we must still close out the Responses stream."""
         tr = ResponsesStreamTranslator(model="gpt-4o")
-        out = await tr.feed(_sse({"id": "c1", "choices": [{"index": 0,
-                                                           "delta": {"content": "partial"}}]}))
+        out = await tr.feed(_sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "partial"}}]}))
         out.extend(tr.finish_safely())
         text = b"".join(out).decode()
         assert "response.completed" in _event_names(text)
@@ -413,8 +458,7 @@ class TestStreaming:
 
     async def test_split_chunk_boundaries(self):
         """SSE frames arriving split across TCP chunks must be buffered correctly."""
-        full = _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "Hello"},
-                                              "finish_reason": "stop"}]})
+        full = _sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": "stop"}]})
         tr = ResponsesStreamTranslator(model="gpt-4o")
         out = await tr.feed(full[:20])
         out.extend(await tr.feed(full[20:]))
@@ -435,13 +479,11 @@ class TestCompositeFinishAsync:
 
         # Anthropic SSE chunk -> StreamA2O -> Chat Completions SSE -> Responses.
         anthropic_chunk = (
-            b'event: content_block_delta\n'
+            b"event: content_block_delta\n"
             b'data: {"type":"content_block_delta","index":0,'
             b'"delta":{"type":"text_delta","text":"hi"}}\n\n'
         )
-        composite = CompositeStreamTranslator(
-            StreamA2O(model="claude-3-5"), ResponsesStreamTranslator(model="gpt-4o")
-        )
+        composite = CompositeStreamTranslator(StreamA2O(model="claude-3-5"), ResponsesStreamTranslator(model="gpt-4o"))
         out = await composite.feed(anthropic_chunk)
         closing = await composite.finish_safely()
         all_bytes = b"".join(out + closing).decode()

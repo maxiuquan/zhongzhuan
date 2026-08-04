@@ -21,6 +21,7 @@ Design rules enforced here:
 * All imports are limited to :mod:`.responses_models` and
   :mod:`.tool_accumulator` so this module stays cycle-free.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -33,7 +34,6 @@ from .responses_models import (
     make_function_call_item_id,
     make_message_item_id,
     make_reasoning_item_id,
-    make_synthetic_call_id,
 )
 from .tool_accumulator import ToolCallAccumulator, ToolCallCollection
 
@@ -155,8 +155,9 @@ class TurnAccumulator:
 
     def _tools_unset(self) -> bool:
         # ToolCallCollection is a mutable default; detect a fresh instance.
-        return not getattr(self.tools, "tools_by_call_id", None) \
-            and not getattr(self.tools, "tools_by_source_index", None)
+        return not getattr(self.tools, "tools_by_call_id", None) and not getattr(
+            self.tools, "tools_by_source_index", None
+        )
 
     # -- messages ------------------------------------------------------------
 
@@ -226,31 +227,37 @@ class TurnAccumulator:
         out: list[OutputItem] = []
         for msg in self.messages:
             if msg.added and not msg.done:
-                out.append(OutputItem(
-                    id=msg.item_id,
-                    output_index=msg.output_index,
-                    item_type=ItemType.MESSAGE,
-                    status=ItemStatus.IN_PROGRESS,
-                    role="assistant",
-                ))
+                out.append(
+                    OutputItem(
+                        id=msg.item_id,
+                        output_index=msg.output_index,
+                        item_type=ItemType.MESSAGE,
+                        status=ItemStatus.IN_PROGRESS,
+                        role="assistant",
+                    )
+                )
         rsn = self.reasoning
         if rsn is not None and rsn.added and not rsn.done:
-            out.append(OutputItem(
-                id=rsn.item_id,
-                output_index=rsn.output_index,
-                item_type=ItemType.REASONING,
-                status=ItemStatus.IN_PROGRESS,
-            ))
+            out.append(
+                OutputItem(
+                    id=rsn.item_id,
+                    output_index=rsn.output_index,
+                    item_type=ItemType.REASONING,
+                    status=ItemStatus.IN_PROGRESS,
+                )
+            )
         for tool in self.tools.list_all():
             if tool.item_added and not tool.item_done:
-                out.append(OutputItem(
-                    id=make_function_call_item_id(tool.call_id),
-                    output_index=tool.output_index,
-                    item_type=ItemType.FUNCTION_CALL,
-                    status=ItemStatus.IN_PROGRESS,
-                    call_id=tool.call_id,
-                    name=tool.name,
-                ))
+                out.append(
+                    OutputItem(
+                        id=make_function_call_item_id(tool.call_id),
+                        output_index=tool.output_index,
+                        item_type=ItemType.FUNCTION_CALL,
+                        status=ItemStatus.IN_PROGRESS,
+                        call_id=tool.call_id,
+                        name=tool.name,
+                    )
+                )
         out.sort(key=lambda it: it.output_index)
         return out
 

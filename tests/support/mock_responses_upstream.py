@@ -20,6 +20,7 @@
 
 本模块不依赖 ``zhongzhuan``。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -101,7 +102,7 @@ class ChunkStrategy:
             # keepends=True 保证拼接回去逐字节相等（含 \r\n 风格）
             return [line for line in payload.splitlines(keepends=True) if line]
         if self.mode == MODE_BY_N_BYTES:
-            return [payload[i:i + self.n] for i in range(0, len(payload), self.n)]
+            return [payload[i : i + self.n] for i in range(0, len(payload), self.n)]
         # random_split：用固定 seed 产生可复现的随机切点
         rng = random.Random(self.seed)
         total = len(payload)
@@ -325,19 +326,27 @@ class MockUpstream:
 
     async def _handle_models(self, request: web.Request) -> web.StreamResponse:
         """``GET /v1/models``：固定返回空列表，避免影响其他断言。"""
-        self.requests.append(RecordedRequest(
-            method=request.method, path=request.path,
-            headers=dict(request.headers), body=b"",
-        ))
+        self.requests.append(
+            RecordedRequest(
+                method=request.method,
+                path=request.path,
+                headers=dict(request.headers),
+                body=b"",
+            )
+        )
         return web.json_response({"object": "list", "data": []})
 
     async def _handle(self, request: web.Request) -> web.StreamResponse:
         """统一入口：记录请求 → 取行为 → 按行为应答。"""
         body = await request.read()
-        self.requests.append(RecordedRequest(
-            method=request.method, path=request.path,
-            headers=dict(request.headers), body=body,
-        ))
+        self.requests.append(
+            RecordedRequest(
+                method=request.method,
+                path=request.path,
+                headers=dict(request.headers),
+                body=body,
+            )
+        )
         behavior = self._next_behavior()
 
         # 1. 网络错误：连响应头都不发，直接断 TCP
@@ -352,13 +361,16 @@ class MockUpstream:
         if behavior.status >= 400:
             payload = behavior.error_body
             if payload is None:
-                payload = json.dumps({
-                    "error": {
-                        "message": f"mock upstream error {behavior.status}",
-                        "type": "mock_error",
-                        "code": behavior.status,
-                    }
-                }, ensure_ascii=False).encode()
+                payload = json.dumps(
+                    {
+                        "error": {
+                            "message": f"mock upstream error {behavior.status}",
+                            "type": "mock_error",
+                            "code": behavior.status,
+                        }
+                    },
+                    ensure_ascii=False,
+                ).encode()
             headers = {"Content-Type": behavior.content_type}
             headers.update(behavior.extra_headers)
             return web.Response(status=behavior.status, body=payload, headers=headers)
@@ -396,9 +408,7 @@ class MockUpstream:
         # 返回一个占位响应；连接已断，aiohttp 写入时会静默失败。
         return web.Response(status=500, body=b"")
 
-    async def _stream(
-        self, request: web.Request, behavior: UpstreamBehavior
-    ) -> web.StreamResponse:
+    async def _stream(self, request: web.Request, behavior: UpstreamBehavior) -> web.StreamResponse:
         """按分片策略 / 延迟 / 断流设置发送 SSE 流。"""
         headers = {
             "Content-Type": behavior.stream_content_type,
@@ -465,30 +475,45 @@ def openai_text_stream(
 ) -> bytes:
     """OpenAI Chat Completions 流式**纯文本**载荷（确定性）。"""
     out = bytearray()
-    out += _sse({
-        "id": _OAI_CHUNK_ID, "object": "chat.completion.chunk",
-        "created": _OAI_CREATED, "model": model,
-        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""},
-                     "finish_reason": None}],
-    })
+    out += _sse(
+        {
+            "id": _OAI_CHUNK_ID,
+            "object": "chat.completion.chunk",
+            "created": _OAI_CREATED,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+        }
+    )
     for piece in pieces:
-        out += _sse({
-            "id": _OAI_CHUNK_ID, "object": "chat.completion.chunk",
-            "created": _OAI_CREATED, "model": model,
-            "choices": [{"index": 0, "delta": {"content": piece},
-                         "finish_reason": None}],
-        })
-    out += _sse({
-        "id": _OAI_CHUNK_ID, "object": "chat.completion.chunk",
-        "created": _OAI_CREATED, "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    })
+        out += _sse(
+            {
+                "id": _OAI_CHUNK_ID,
+                "object": "chat.completion.chunk",
+                "created": _OAI_CREATED,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
+            }
+        )
+    out += _sse(
+        {
+            "id": _OAI_CHUNK_ID,
+            "object": "chat.completion.chunk",
+            "created": _OAI_CREATED,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }
+    )
     if include_usage:
-        out += _sse({
-            "id": _OAI_CHUNK_ID, "object": "chat.completion.chunk",
-            "created": _OAI_CREATED, "model": model, "choices": [],
-            "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15},
-        })
+        out += _sse(
+            {
+                "id": _OAI_CHUNK_ID,
+                "object": "chat.completion.chunk",
+                "created": _OAI_CREATED,
+                "model": model,
+                "choices": [],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15},
+            }
+        )
     out += b"data: [DONE]\n\n"
     return bytes(out)
 
@@ -502,51 +527,94 @@ def openai_tool_stream(
 ) -> bytes:
     """OpenAI Chat Completions 流式**工具调用**载荷（确定性）。"""
     out = bytearray()
-    out += _sse({
-        "id": _OAI_CHUNK_ID, "object": "chat.completion.chunk",
-        "created": _OAI_CREATED, "model": model,
-        "choices": [{"index": 0, "delta": {"role": "assistant", "content": None},
-                     "finish_reason": None}],
-    })
-    out += _sse({
-        "id": _OAI_CHUNK_ID, "object": "chat.completion.chunk",
-        "created": _OAI_CREATED, "model": model,
-        "choices": [{"index": 0, "delta": {"tool_calls": [{
-            "index": 0, "id": tool_call_id, "type": "function",
-            "function": {"name": tool_name, "arguments": ""},
-        }]}, "finish_reason": None}],
-    })
+    out += _sse(
+        {
+            "id": _OAI_CHUNK_ID,
+            "object": "chat.completion.chunk",
+            "created": _OAI_CREATED,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": None}, "finish_reason": None}],
+        }
+    )
+    out += _sse(
+        {
+            "id": _OAI_CHUNK_ID,
+            "object": "chat.completion.chunk",
+            "created": _OAI_CREATED,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": tool_call_id,
+                                "type": "function",
+                                "function": {"name": tool_name, "arguments": ""},
+                            }
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        }
+    )
     for piece in arg_pieces:
-        out += _sse({
-            "id": _OAI_CHUNK_ID, "object": "chat.completion.chunk",
-            "created": _OAI_CREATED, "model": model,
-            "choices": [{"index": 0, "delta": {"tool_calls": [{
-                "index": 0, "function": {"arguments": piece},
-            }]}, "finish_reason": None}],
-        })
-    out += _sse({
-        "id": _OAI_CHUNK_ID, "object": "chat.completion.chunk",
-        "created": _OAI_CREATED, "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
-    })
+        out += _sse(
+            {
+                "id": _OAI_CHUNK_ID,
+                "object": "chat.completion.chunk",
+                "created": _OAI_CREATED,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": piece},
+                                }
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+            }
+        )
+    out += _sse(
+        {
+            "id": _OAI_CHUNK_ID,
+            "object": "chat.completion.chunk",
+            "created": _OAI_CREATED,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        }
+    )
     out += b"data: [DONE]\n\n"
     return bytes(out)
 
 
-def openai_text_json(
-    *, model: str = "upstream-model", content: str = "Hello, world!"
-) -> bytes:
+def openai_text_json(*, model: str = "upstream-model", content: str = "Hello, world!") -> bytes:
     """OpenAI Chat Completions **非流式**纯文本响应（确定性）。"""
-    return json.dumps({
-        "id": _OAI_CHUNK_ID, "object": "chat.completion",
-        "created": _OAI_CREATED, "model": model,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": content},
-            "finish_reason": "stop",
-        }],
-        "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15},
-    }, ensure_ascii=False).encode()
+    return json.dumps(
+        {
+            "id": _OAI_CHUNK_ID,
+            "object": "chat.completion",
+            "created": _OAI_CREATED,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15},
+        },
+        ensure_ascii=False,
+    ).encode()
 
 
 def openai_tool_json(
@@ -557,32 +625,45 @@ def openai_tool_json(
     arguments: str = '{"city": "Beijing"}',
 ) -> bytes:
     """OpenAI Chat Completions **非流式**工具调用响应（确定性）。"""
-    return json.dumps({
-        "id": _OAI_CHUNK_ID, "object": "chat.completion",
-        "created": _OAI_CREATED, "model": model,
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant", "content": None,
-                "tool_calls": [{
-                    "id": tool_call_id, "type": "function",
-                    "function": {"name": tool_name, "arguments": arguments},
-                }],
-            },
-            "finish_reason": "tool_calls",
-        }],
-        "usage": {"prompt_tokens": 21, "completion_tokens": 9, "total_tokens": 30},
-    }, ensure_ascii=False).encode()
+    return json.dumps(
+        {
+            "id": _OAI_CHUNK_ID,
+            "object": "chat.completion",
+            "created": _OAI_CREATED,
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": tool_call_id,
+                                "type": "function",
+                                "function": {"name": tool_name, "arguments": arguments},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 21, "completion_tokens": 9, "total_tokens": 30},
+        },
+        ensure_ascii=False,
+    ).encode()
 
 
 def openai_error_json(
-    *, message: str = "upstream rejected the request",
-    err_type: str = "invalid_request_error", code: str = "bad_request",
+    *,
+    message: str = "upstream rejected the request",
+    err_type: str = "invalid_request_error",
+    code: str = "bad_request",
 ) -> bytes:
     """OpenAI 风格错误信封（确定性）。"""
-    return json.dumps({
-        "error": {"message": message, "type": err_type, "param": None, "code": code}
-    }, ensure_ascii=False).encode()
+    return json.dumps(
+        {"error": {"message": message, "type": err_type, "param": None, "code": code}}, ensure_ascii=False
+    ).encode()
 
 
 # ---- Anthropic Messages ----
@@ -597,30 +678,48 @@ def anthropic_text_stream(
 ) -> bytes:
     """Anthropic Messages 流式**纯文本**载荷（确定性）。"""
     out = bytearray()
-    out += _sse_named("message_start", {
-        "type": "message_start",
-        "message": {
-            "id": _ANT_MSG_ID, "type": "message", "role": "assistant",
-            "model": model, "content": [], "stop_reason": None,
-            "stop_sequence": None,
-            "usage": {"input_tokens": 11, "output_tokens": 0},
+    out += _sse_named(
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {
+                "id": _ANT_MSG_ID,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 11, "output_tokens": 0},
+            },
         },
-    })
-    out += _sse_named("content_block_start", {
-        "type": "content_block_start", "index": 0,
-        "content_block": {"type": "text", "text": ""},
-    })
+    )
+    out += _sse_named(
+        "content_block_start",
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+    )
     for piece in pieces:
-        out += _sse_named("content_block_delta", {
-            "type": "content_block_delta", "index": 0,
-            "delta": {"type": "text_delta", "text": piece},
-        })
+        out += _sse_named(
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": piece},
+            },
+        )
     out += _sse_named("content_block_stop", {"type": "content_block_stop", "index": 0})
-    out += _sse_named("message_delta", {
-        "type": "message_delta",
-        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-        "usage": {"output_tokens": 4},
-    })
+    out += _sse_named(
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+            "usage": {"output_tokens": 4},
+        },
+    )
     out += _sse_named("message_stop", {"type": "message_stop"})
     return bytes(out)
 
@@ -634,56 +733,76 @@ def anthropic_tool_stream(
 ) -> bytes:
     """Anthropic Messages 流式**工具调用**载荷（确定性）。"""
     out = bytearray()
-    out += _sse_named("message_start", {
-        "type": "message_start",
-        "message": {
-            "id": _ANT_MSG_ID, "type": "message", "role": "assistant",
-            "model": model, "content": [], "stop_reason": None,
-            "stop_sequence": None,
-            "usage": {"input_tokens": 21, "output_tokens": 0},
+    out += _sse_named(
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {
+                "id": _ANT_MSG_ID,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 21, "output_tokens": 0},
+            },
         },
-    })
-    out += _sse_named("content_block_start", {
-        "type": "content_block_start", "index": 0,
-        "content_block": {"type": "tool_use", "id": tool_use_id,
-                          "name": tool_name, "input": {}},
-    })
+    )
+    out += _sse_named(
+        "content_block_start",
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": tool_use_id, "name": tool_name, "input": {}},
+        },
+    )
     for piece in arg_pieces:
-        out += _sse_named("content_block_delta", {
-            "type": "content_block_delta", "index": 0,
-            "delta": {"type": "input_json_delta", "partial_json": piece},
-        })
+        out += _sse_named(
+            "content_block_delta",
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": piece},
+            },
+        )
     out += _sse_named("content_block_stop", {"type": "content_block_stop", "index": 0})
-    out += _sse_named("message_delta", {
-        "type": "message_delta",
-        "delta": {"stop_reason": "tool_use", "stop_sequence": None},
-        "usage": {"output_tokens": 9},
-    })
+    out += _sse_named(
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+            "usage": {"output_tokens": 9},
+        },
+    )
     out += _sse_named("message_stop", {"type": "message_stop"})
     return bytes(out)
 
 
-def anthropic_text_json(
-    *, model: str = "upstream-claude", content: str = "Hello, world!"
-) -> bytes:
+def anthropic_text_json(*, model: str = "upstream-claude", content: str = "Hello, world!") -> bytes:
     """Anthropic Messages **非流式**纯文本响应（确定性）。"""
-    return json.dumps({
-        "id": _ANT_MSG_ID, "type": "message", "role": "assistant",
-        "model": model,
-        "content": [{"type": "text", "text": content}],
-        "stop_reason": "end_turn", "stop_sequence": None,
-        "usage": {"input_tokens": 11, "output_tokens": 4},
-    }, ensure_ascii=False).encode()
+    return json.dumps(
+        {
+            "id": _ANT_MSG_ID,
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [{"type": "text", "text": content}],
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+            "usage": {"input_tokens": 11, "output_tokens": 4},
+        },
+        ensure_ascii=False,
+    ).encode()
 
 
 def anthropic_error_json(
-    *, message: str = "upstream rejected the request",
+    *,
+    message: str = "upstream rejected the request",
     err_type: str = "invalid_request_error",
 ) -> bytes:
     """Anthropic 风格错误信封（确定性）。"""
-    return json.dumps({
-        "type": "error", "error": {"type": err_type, "message": message}
-    }, ensure_ascii=False).encode()
+    return json.dumps({"type": "error", "error": {"type": err_type, "message": message}}, ensure_ascii=False).encode()
 
 
 # ---- OpenAI Responses（原生上游） ----
@@ -705,8 +824,12 @@ def responses_text_stream(
     full_text = "".join(pieces)
     item_id = "msg_fixture_item_0"
     base_response: dict[str, Any] = {
-        "id": _RESP_ID, "object": "response", "created_at": _OAI_CREATED,
-        "model": model, "status": "in_progress", "output": [],
+        "id": _RESP_ID,
+        "object": "response",
+        "created_at": _OAI_CREATED,
+        "model": model,
+        "status": "in_progress",
+        "output": [],
     }
     out = bytearray()
     seq = 0
@@ -719,42 +842,74 @@ def responses_text_stream(
 
     out += _emit("response.created", {"response": dict(base_response)})
     out += _emit("response.in_progress", {"response": dict(base_response)})
-    out += _emit("response.output_item.added", {
-        "output_index": 0,
-        "item": {"id": item_id, "type": "message", "status": "in_progress",
-                 "role": "assistant", "content": []},
-    })
-    out += _emit("response.content_part.added", {
-        "item_id": item_id, "output_index": 0, "content_index": 0,
-        "part": {"type": "output_text", "text": "", "annotations": []},
-    })
+    out += _emit(
+        "response.output_item.added",
+        {
+            "output_index": 0,
+            "item": {"id": item_id, "type": "message", "status": "in_progress", "role": "assistant", "content": []},
+        },
+    )
+    out += _emit(
+        "response.content_part.added",
+        {
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": "", "annotations": []},
+        },
+    )
     for piece in pieces:
-        out += _emit("response.output_text.delta", {
-            "item_id": item_id, "output_index": 0, "content_index": 0,
-            "delta": piece,
-        })
-    out += _emit("response.output_text.done", {
-        "item_id": item_id, "output_index": 0, "content_index": 0,
-        "text": full_text,
-    })
-    out += _emit("response.content_part.done", {
-        "item_id": item_id, "output_index": 0, "content_index": 0,
-        "part": {"type": "output_text", "text": full_text, "annotations": []},
-    })
-    out += _emit("response.output_item.done", {
-        "output_index": 0,
-        "item": {"id": item_id, "type": "message", "status": "completed",
-                 "role": "assistant",
-                 "content": [{"type": "output_text", "text": full_text,
-                              "annotations": []}]},
-    })
+        out += _emit(
+            "response.output_text.delta",
+            {
+                "item_id": item_id,
+                "output_index": 0,
+                "content_index": 0,
+                "delta": piece,
+            },
+        )
+    out += _emit(
+        "response.output_text.done",
+        {
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "text": full_text,
+        },
+    )
+    out += _emit(
+        "response.content_part.done",
+        {
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": {"type": "output_text", "text": full_text, "annotations": []},
+        },
+    )
+    out += _emit(
+        "response.output_item.done",
+        {
+            "output_index": 0,
+            "item": {
+                "id": item_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+            },
+        },
+    )
     completed = dict(base_response)
     completed["status"] = "completed"
-    completed["output"] = [{
-        "id": item_id, "type": "message", "status": "completed",
-        "role": "assistant",
-        "content": [{"type": "output_text", "text": full_text, "annotations": []}],
-    }]
+    completed["output"] = [
+        {
+            "id": item_id,
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": full_text, "annotations": []}],
+        }
+    ]
     completed["usage"] = {"input_tokens": 11, "output_tokens": 4, "total_tokens": 15}
     out += _emit("response.completed", {"response": completed})
     out += b"data: [DONE]\n\n"

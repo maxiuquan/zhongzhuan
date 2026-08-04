@@ -20,19 +20,12 @@ This module imports only from :mod:`.responses_models` and :mod:`.errors`
 (never from ``responses.py``) so it can be used by the config layer, the
 store layer and the v3 handlers without creating cycles.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
-from .responses_errors import ErrorClass, to_error_response
-from .responses_models import (
-    ItemType,
-    NormalizedItem,
-    canonical_json,
-    coerce_enum,
-    enum_values,
-)
 
 # ---------------------------------------------------------------------------
 # 1. Official top-level request fields (versioned allowlist)
@@ -41,56 +34,60 @@ from .responses_models import (
 #: The official ``POST /v1/responses`` create request fields.  Anything not in
 #: this set is a dropped/unknown field (goes to ``dropped_fields``).
 #: ``str`` keys because the wire body is a ``dict`` parsed from JSON.
-RESPONSES_CREATE_FIELDS: frozenset[str] = frozenset({
-    "model",
-    "input",
-    "instructions",
-    "max_output_tokens",
-    "previous_response_id",
-    "store",
-    "metadata",
-    "reasoning",
-    "tools",
-    "tool_choice",
-    "parallel_tool_calls",
-    "text",
-    "output",
-    "prompt",
-    "truncation",
-    "stream",
-    "user",
-    "include",
-    "stream_options",
-    "temperature",
-    "top_p",
-    "max_wall_time_seconds",
-    "retry",
-    "schema",
-})
+RESPONSES_CREATE_FIELDS: frozenset[str] = frozenset(
+    {
+        "model",
+        "input",
+        "instructions",
+        "max_output_tokens",
+        "previous_response_id",
+        "store",
+        "metadata",
+        "reasoning",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "text",
+        "output",
+        "prompt",
+        "truncation",
+        "stream",
+        "user",
+        "include",
+        "stream_options",
+        "temperature",
+        "top_p",
+        "max_wall_time_seconds",
+        "retry",
+        "schema",
+    }
+)
 
 #: The Responses-specific fields that are NOT part of the Chat Completions
 #: shape and require explicit bridge handling (must never pass through the
 #: upstream body verbatim as Chat fields): each is either translated, emulated
 #: or consumed deliberately (T10-4).
-RESPONSES_ONLY_FIELDS: frozenset[str] = frozenset({
-    "previous_response_id",   # state chain -> mapped to conversation, not body
-    "store",                  # persistence flag, not an upstream knob
-    "metadata",               # persisted, not forwarded
-    "reasoning",              # reasoning config -> parsed, not forwarded
-    "input",                  # item list -> converted to messages
-    "instructions",           # -> system message
-    "tools",                  # -> Chat Completions tools
-    "tool_choice",            # -> Chat Completions tool_choice
-    "parallel_tool_calls",    # -> Chat Completions parallel_tool_calls
-    "text",                   # text.format -> response_format (Q7), else dropped
-    "output",                 # output config -> consumed/emulated
-    "prompt",                 # v2 alias of instructions -> consumed
-    "truncation",             # -> not supported upstream, dropped or emulated
-    "include",                # subscription list, consumed
-    "stream_options",         # -> stream_options passthrough when supported
-    "max_wall_time_seconds",  # budget, consumed by ExecutionBudget
-    "retry",                  # budget, consumed by AttemptManager
-})
+RESPONSES_ONLY_FIELDS: frozenset[str] = frozenset(
+    {
+        "previous_response_id",  # state chain -> mapped to conversation, not body
+        "store",  # persistence flag, not an upstream knob
+        "metadata",  # persisted, not forwarded
+        "reasoning",  # reasoning config -> parsed, not forwarded
+        "input",  # item list -> converted to messages
+        "instructions",  # -> system message
+        "tools",  # -> Chat Completions tools
+        "tool_choice",  # -> Chat Completions tool_choice
+        "parallel_tool_calls",  # -> Chat Completions parallel_tool_calls
+        "text",  # text.format -> response_format (Q7), else dropped
+        "output",  # output config -> consumed/emulated
+        "prompt",  # v2 alias of instructions -> consumed
+        "truncation",  # -> not supported upstream, dropped or emulated
+        "include",  # subscription list, consumed
+        "stream_options",  # -> stream_options passthrough when supported
+        "max_wall_time_seconds",  # budget, consumed by ExecutionBudget
+        "retry",  # budget, consumed by AttemptManager
+    }
+)
 
 #: The subset of Responses-only fields that are *fully consumed* by the bridge
 #: and never appear in the upstream payload under any form.  Contrast with
@@ -98,32 +95,36 @@ RESPONSES_ONLY_FIELDS: frozenset[str] = frozenset({
 #: which are translated (e.g. ``tools`` -> ``tools``, ``instructions`` ->
 #: ``messages[].system``, ``text.format`` -> ``response_format``) and therefore
 #: *do* legitimately land in the upstream body, just never verbatim.
-NOT_FORWARDED_FIELDS: frozenset[str] = frozenset({
-    "previous_response_id",
-    "store",
-    "metadata",
-    "reasoning",
-    "input",
-    "output",
-    "prompt",
-    "truncation",
-    "include",
-    "stream_options",
-    "max_wall_time_seconds",
-    "retry",
-})
+NOT_FORWARDED_FIELDS: frozenset[str] = frozenset(
+    {
+        "previous_response_id",
+        "store",
+        "metadata",
+        "reasoning",
+        "input",
+        "output",
+        "prompt",
+        "truncation",
+        "include",
+        "stream_options",
+        "max_wall_time_seconds",
+        "retry",
+    }
+)
 
 #: Fields that are safe to pass through to a Chat Completions upstream
 #: unchanged (they exist in both shapes).
-CHAT_COMPATIBLE_FIELDS: frozenset[str] = frozenset({
-    "model",
-    "max_output_tokens",       # -> max_tokens
-    "stream",
-    "user",
-    "temperature",
-    "top_p",
-    "seed",
-})
+CHAT_COMPATIBLE_FIELDS: frozenset[str] = frozenset(
+    {
+        "model",
+        "max_output_tokens",  # -> max_tokens
+        "stream",
+        "user",
+        "temperature",
+        "top_p",
+        "seed",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -154,15 +155,13 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     "input": FieldSpec("input", allowed_types=(str, list)),
     "instructions": FieldSpec("instructions", allowed_types=(str,), consumed=True),
     "max_output_tokens": FieldSpec("max_output_tokens", allowed_types=(int,)),
-    "previous_response_id": FieldSpec(
-        "previous_response_id", allowed_types=(str,), responses_only=True),
+    "previous_response_id": FieldSpec("previous_response_id", allowed_types=(str,), responses_only=True),
     "store": FieldSpec("store", allowed_types=(bool,), responses_only=True),
     "metadata": FieldSpec("metadata", allowed_types=(dict,), responses_only=True),
     "reasoning": FieldSpec("reasoning", allowed_types=(dict,), responses_only=True),
     "tools": FieldSpec("tools", allowed_types=(list,), consumed=True),
     "tool_choice": FieldSpec("tool_choice", consumed=True),
-    "parallel_tool_calls": FieldSpec(
-        "parallel_tool_calls", allowed_types=(bool,), consumed=True),
+    "parallel_tool_calls": FieldSpec("parallel_tool_calls", allowed_types=(bool,), consumed=True),
     "text": FieldSpec("text", allowed_types=(dict,), consumed=True),
     "output": FieldSpec("output", allowed_types=(dict,), responses_only=True),
     "prompt": FieldSpec("prompt", allowed_types=(str,), consumed=True),
@@ -173,8 +172,7 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     "stream_options": FieldSpec("stream_options", allowed_types=(dict,)),
     "temperature": FieldSpec("temperature", allowed_types=(float, int)),
     "top_p": FieldSpec("top_p", allowed_types=(float, int)),
-    "max_wall_time_seconds": FieldSpec(
-        "max_wall_time_seconds", allowed_types=(int, float), responses_only=True),
+    "max_wall_time_seconds": FieldSpec("max_wall_time_seconds", allowed_types=(int, float), responses_only=True),
     "retry": FieldSpec("retry", allowed_types=(dict,), responses_only=True),
     "schema": FieldSpec("schema", allowed_types=(dict,), consumed=True),
 }
@@ -230,11 +228,12 @@ def validate_requests_schema(body: Mapping[str, Any]) -> SchemaValidation:
         if spec.allowed_types is not None and not isinstance(value, spec.allowed_types):
             result.valid = False
             result.invalid_fields.append((key, type(value).__name__))
-            result.errors.append((
-                spec.name,
-                f"field '{spec.name}' must be of type "
-                f"{', '.join(t.__name__ for t in spec.allowed_types)}",
-            ))
+            result.errors.append(
+                (
+                    spec.name,
+                    f"field '{spec.name}' must be of type {', '.join(t.__name__ for t in spec.allowed_types)}",
+                )
+            )
     return result
 
 

@@ -1,4 +1,5 @@
 """Windows DPAPI encryption via ctypes."""
+
 from __future__ import annotations
 
 import ctypes
@@ -23,7 +24,10 @@ def dpapi_protect(plaintext: bytes) -> bytes:
     out_blob = DATA_BLOB()
     if not ctypes.windll.crypt32.CryptProtectData(
         ctypes.byref(in_blob),
-        None, None, None, None,
+        None,
+        None,
+        None,
+        None,
         CRYPTPROTECT_UI_FORBIDDEN,
         ctypes.byref(out_blob),
     ):
@@ -44,7 +48,10 @@ def dpapi_unprotect(ciphertext: bytes) -> bytes:
     out_blob = DATA_BLOB()
     if not ctypes.windll.crypt32.CryptUnprotectData(
         ctypes.byref(in_blob),
-        None, None, None, None,
+        None,
+        None,
+        None,
+        None,
         CRYPTPROTECT_UI_FORBIDDEN,
         ctypes.byref(out_blob),
     ):

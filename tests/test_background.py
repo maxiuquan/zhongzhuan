@@ -9,6 +9,7 @@ Acceptance mapping
 ⑤ R-P1-38  five background budget reasons ............. test_bg_budget_*
 ⑥ R-P1-34  concurrent claim -> exactly one winner ..... test_concurrent_claim_only_one_wins
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -105,7 +106,9 @@ def rs(store):
 async def _seed(worker: BackgroundWorker, response_id: str, **kwargs):
     """Enqueue one background response and return its record."""
     return await worker.enqueue(
-        response_id=response_id, workspace_id="t1", model="gpt-4o",
+        response_id=response_id,
+        workspace_id="t1",
+        model="gpt-4o",
         request={"model": "gpt-4o", "input": "hi", "background": True},
         **kwargs,
     )
@@ -272,9 +275,7 @@ async def test_catchup_matches_live_sequence_numbers(rs):
     # Byte-identical frames ([DONE] is a sentinel, never a logged event).
     assert live_frames[-1] == b"data: [DONE]\n\n"
     assert replayed_frames == live_frames[:-1]
-    assert replayed_frames == [
-        sse_frame(e["event_type"], e["data"]) for e in live_events
-    ]
+    assert replayed_frames == [sse_frame(e["event_type"], e["data"]) for e in live_events]
 
 
 @pytest.mark.asyncio
@@ -383,7 +384,9 @@ async def _run_budget_case(rs, response_id, *, budget, chunks, **worker_kwargs):
     worker = BackgroundWorker(rs, budget=budget, **worker_kwargs)
     await _seed(worker, response_id, budget=budget)
     status = await worker.run_job(
-        response_id, upstream=FakeUpstream(chunks), budget=budget,
+        response_id,
+        upstream=FakeUpstream(chunks),
+        budget=budget,
     )
     assert status == "incomplete"
     return await rs.get_response(response_id, workspace_id="t1")
@@ -396,7 +399,8 @@ def _call(name: str) -> dict:
 @pytest.mark.asyncio
 async def test_bg_budget_max_tool_rounds(rs):
     record = await _run_budget_case(
-        rs, "bg_rounds",
+        rs,
+        "bg_rounds",
         budget=ExecutionBudget(max_tool_rounds=1, max_wall_time_seconds=3600),
         chunks=[{"type": "tool_round"}, {"type": "tool_round"}],
     )
@@ -407,7 +411,8 @@ async def test_bg_budget_max_tool_rounds(rs):
 @pytest.mark.asyncio
 async def test_bg_budget_max_total_tool_calls(rs):
     record = await _run_budget_case(
-        rs, "bg_calls",
+        rs,
+        "bg_calls",
         budget=ExecutionBudget(max_total_tool_calls=1, max_wall_time_seconds=3600),
         chunks=[_call("alpha"), _call("beta")],
     )
@@ -417,7 +422,8 @@ async def test_bg_budget_max_total_tool_calls(rs):
 @pytest.mark.asyncio
 async def test_bg_budget_max_output_budget(rs):
     record = await _run_budget_case(
-        rs, "bg_output",
+        rs,
+        "bg_output",
         budget=ExecutionBudget(max_output_tokens_total=1, max_wall_time_seconds=3600),
         chunks=[text("a", 1), text("b", 1)],
     )
@@ -427,7 +433,8 @@ async def test_bg_budget_max_output_budget(rs):
 @pytest.mark.asyncio
 async def test_bg_budget_max_wall_time(rs):
     record = await _run_budget_case(
-        rs, "bg_wall",
+        rs,
+        "bg_wall",
         budget=ExecutionBudget(max_wall_time_seconds=1),
         chunks=[text("a"), text("b")],
         clock=StepClock([0.0, 100.0]),
@@ -439,7 +446,8 @@ async def test_bg_budget_max_wall_time(rs):
 async def test_bg_budget_exhausted(rs):
     """The background envelope is its own ceiling, with its own reason."""
     record = await _run_budget_case(
-        rs, "bg_envelope",
+        rs,
+        "bg_envelope",
         budget=ExecutionBudget(max_wall_time_seconds=3600),  # generic ceilings wide open
         chunks=[_call("alpha"), _call("beta")],
         max_background_calls=1,
@@ -452,14 +460,18 @@ async def test_bg_no_progress_loops_also_trip(rs):
     """R-P0-28 still applies inside a background job (identical call / failure)."""
     repeat = ExecutionBudget(max_identical_call_repeats=1, max_wall_time_seconds=3600)
     record = await _run_budget_case(
-        rs, "bg_repeat", budget=repeat,
+        rs,
+        "bg_repeat",
+        budget=repeat,
         chunks=[_call("alpha"), _call("alpha")],
     )
     assert record.incomplete_details["reason"] == "repeated_tool_call"
 
     failure = ExecutionBudget(max_identical_call_repeats=1, max_wall_time_seconds=3600)
     record = await _run_budget_case(
-        rs, "bg_fail", budget=failure,
+        rs,
+        "bg_fail",
+        budget=failure,
         chunks=[
             {"type": "tool_result", "signature": "sig-1", "failed": True},
             {"type": "tool_result", "signature": "sig-1", "failed": True},
@@ -472,21 +484,45 @@ async def test_bg_no_progress_loops_also_trip(rs):
 async def test_incomplete_details_reason_present(rs):
     """All five ceilings produce ``incomplete`` + a non-null, distinct reason."""
     cases = [
-        ("p_rounds", ExecutionBudget(max_tool_rounds=1, max_wall_time_seconds=3600),
-         [{"type": "tool_round"}, {"type": "tool_round"}], {}),
-        ("p_calls", ExecutionBudget(max_total_tool_calls=1, max_wall_time_seconds=3600),
-         [_call("alpha"), _call("beta")], {}),
-        ("p_output", ExecutionBudget(max_output_tokens_total=1, max_wall_time_seconds=3600),
-         [text("a", 1), text("b", 1)], {}),
-        ("p_wall", ExecutionBudget(max_wall_time_seconds=1),
-         [text("a"), text("b")], {"clock": StepClock([0.0, 100.0])}),
-        ("p_envelope", ExecutionBudget(max_wall_time_seconds=3600),
-         [_call("alpha"), _call("beta")], {"max_background_calls": 1}),
+        (
+            "p_rounds",
+            ExecutionBudget(max_tool_rounds=1, max_wall_time_seconds=3600),
+            [{"type": "tool_round"}, {"type": "tool_round"}],
+            {},
+        ),
+        (
+            "p_calls",
+            ExecutionBudget(max_total_tool_calls=1, max_wall_time_seconds=3600),
+            [_call("alpha"), _call("beta")],
+            {},
+        ),
+        (
+            "p_output",
+            ExecutionBudget(max_output_tokens_total=1, max_wall_time_seconds=3600),
+            [text("a", 1), text("b", 1)],
+            {},
+        ),
+        (
+            "p_wall",
+            ExecutionBudget(max_wall_time_seconds=1),
+            [text("a"), text("b")],
+            {"clock": StepClock([0.0, 100.0])},
+        ),
+        (
+            "p_envelope",
+            ExecutionBudget(max_wall_time_seconds=3600),
+            [_call("alpha"), _call("beta")],
+            {"max_background_calls": 1},
+        ),
     ]
     reasons = []
     for response_id, budget, chunks, kwargs in cases:
         record = await _run_budget_case(
-            rs, response_id, budget=budget, chunks=chunks, **kwargs,
+            rs,
+            response_id,
+            budget=budget,
+            chunks=chunks,
+            **kwargs,
         )
         assert record.status == "incomplete", response_id
         assert record.incomplete_details.get("reason") is not None, response_id
@@ -494,8 +530,11 @@ async def test_incomplete_details_reason_present(rs):
 
     assert len(set(reasons)) == 5, "each ceiling must be individually diagnosable"
     assert set(reasons) == {
-        "max_tool_rounds", "max_total_tool_calls", "max_output_budget",
-        "max_response_time", "background_budget_exhausted",
+        "max_tool_rounds",
+        "max_total_tool_calls",
+        "max_output_budget",
+        "max_response_time",
+        "background_budget_exhausted",
     }
 
 

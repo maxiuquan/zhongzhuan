@@ -19,6 +19,7 @@ Design rules
 * **Tenant isolation**: every write takes a ``workspace_id``; reads filter by it
   so cross-tenant access is prevented at the store boundary.
 """
+
 from __future__ import annotations
 
 import json
@@ -99,13 +100,24 @@ class ResponseStore:
                 previous_response_id, background, request, usage
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                response_id, workspace_id, status, model, now, now,
-                previous_response_id, int(background), _dumps(request), _dumps(usage),
+                response_id,
+                workspace_id,
+                status,
+                model,
+                now,
+                now,
+                previous_response_id,
+                int(background),
+                _dumps(request),
+                _dumps(usage),
             ),
         )
 
     async def get_response(
-        self, response_id: str, *, workspace_id: str = "",
+        self,
+        response_id: str,
+        *,
+        workspace_id: str = "",
     ) -> ResponseRecord | None:
         row = await self._store.fetchone(
             "SELECT * FROM responses WHERE response_id = ? AND workspace_id = ?",
@@ -134,9 +146,15 @@ class ResponseStore:
                output = ?
                WHERE response_id = ?""",
             (
-                status, now, completed_at,
-                terminal_reason, _dumps(incomplete_details), error,
-                _dumps(usage), _dumps(output), response_id,
+                status,
+                now,
+                completed_at,
+                terminal_reason,
+                _dumps(incomplete_details),
+                error,
+                _dumps(usage),
+                _dumps(output),
+                response_id,
             ),
         )
 
@@ -158,7 +176,9 @@ class ResponseStore:
     # -- input / output items ------------------------------------------------
 
     async def save_input_items(
-        self, response_id: str, items: list[Mapping[str, Any]],
+        self,
+        response_id: str,
+        items: list[Mapping[str, Any]],
     ) -> None:
         for seq, item in enumerate(items):
             await self._store.execute(
@@ -166,7 +186,8 @@ class ResponseStore:
                    (response_id, seq, item_type, role, payload)
                    VALUES (?, ?, ?, ?, ?)""",
                 (
-                    response_id, seq,
+                    response_id,
+                    seq,
                     str(item.get("type", "") or ""),
                     str(item.get("role", "") or ""),
                     _dumps(item),
@@ -174,7 +195,9 @@ class ResponseStore:
             )
 
     async def save_output_items(
-        self, response_id: str, items: list[Mapping[str, Any]],
+        self,
+        response_id: str,
+        items: list[Mapping[str, Any]],
     ) -> None:
         for idx, item in enumerate(items):
             await self._store.execute(
@@ -182,7 +205,9 @@ class ResponseStore:
                    (response_id, seq, output_index, item_type, role, payload)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (
-                    response_id, idx, idx,
+                    response_id,
+                    idx,
+                    idx,
                     str(item.get("type", "") or ""),
                     str(item.get("role", "") or ""),
                     _dumps(item),
@@ -190,19 +215,21 @@ class ResponseStore:
             )
 
     async def list_input_items(
-        self, response_id: str, *, after_seq: int = -1, limit: int = 100,
+        self,
+        response_id: str,
+        *,
+        after_seq: int = -1,
+        limit: int = 100,
     ) -> list[dict]:
         rows = await self._store.fetchall(
-            "SELECT payload FROM response_input_items "
-            "WHERE response_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+            "SELECT payload FROM response_input_items WHERE response_id = ? AND seq > ? ORDER BY seq LIMIT ?",
             (response_id, after_seq, limit),
         )
         return [_loads(r[0], {}) for r in rows]
 
     async def list_output_items(self, response_id: str, *, limit: int = 100) -> list[dict]:
         rows = await self._store.fetchall(
-            "SELECT payload FROM response_output_items WHERE response_id = ? "
-            "ORDER BY output_index LIMIT ?",
+            "SELECT payload FROM response_output_items WHERE response_id = ? ORDER BY output_index LIMIT ?",
             (response_id, limit),
         )
         return [_loads(r[0], {}) for r in rows]
@@ -212,13 +239,15 @@ class ResponseStore:
     async def append_event(self, response_id: str, event_type: str, data: Mapping[str, Any]) -> int:
         """Append one event to ``response_events`` (delegates to :class:`EventLog`)."""
         return await self.event_log.append_event(
-            response_id=response_id, event_type=event_type, data=data, workspace_id="",
+            response_id=response_id,
+            event_type=event_type,
+            data=data,
+            workspace_id="",
         )
 
     async def list_events(self, response_id: str, *, after_seq: int = -1) -> list[dict]:
         rows = await self._store.fetchall(
-            "SELECT seq, event_type, data FROM response_events "
-            "WHERE response_id = ? AND seq > ? ORDER BY seq",
+            "SELECT seq, event_type, data FROM response_events WHERE response_id = ? AND seq > ? ORDER BY seq",
             (response_id, after_seq),
         )
         return [{"seq": r[0], "event_type": r[1], "data": _loads(r[2], {})} for r in rows]
@@ -226,7 +255,12 @@ class ResponseStore:
     # -- state chain ---------------------------------------------------------
 
     async def save_state_chain(
-        self, response_id: str, previous_response_id: str, depth: int, *, workspace_id: str = "",
+        self,
+        response_id: str,
+        previous_response_id: str,
+        depth: int,
+        *,
+        workspace_id: str = "",
     ) -> None:
         await self._store.execute(
             "INSERT OR REPLACE INTO response_state_chain "
@@ -305,8 +339,7 @@ class ResponseStore:
             "(execution_id, response_id, workspace_id, call_id, tool_name, "
             " idempotency_key, status, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (execution_id, response_id, workspace_id, call_id, tool_name,
-             idempotency_key, status, now, now),
+            (execution_id, response_id, workspace_id, call_id, tool_name, idempotency_key, status, now, now),
         )
 
     async def has_execution(self, idempotency_key: str) -> bool:
@@ -334,12 +367,22 @@ class ResponseStore:
             "(workspace_id, idempotency_key, request_digest, response_id, "
             " status_code, state, created_at, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (workspace_id, idempotency_key, request_digest, response_id,
-             status_code, state, int(time.time()), expires_at),
+            (
+                workspace_id,
+                idempotency_key,
+                request_digest,
+                response_id,
+                status_code,
+                state,
+                int(time.time()),
+                expires_at,
+            ),
         )
 
     async def get_idempotency_record(
-        self, workspace_id: str, idempotency_key: str,
+        self,
+        workspace_id: str,
+        idempotency_key: str,
     ) -> tuple[str, int, str] | None:
         row = await self._store.fetchone(
             "SELECT response_id, status_code, state FROM idempotency_records "
@@ -376,13 +419,21 @@ class ResponseStore:
             " failover_count, last_failover_reason"
             ") VALUES (?, ?, ?, ?, ?, ?, ?, 0, '')",
             (
-                session_key, key_id, _dumps(caps), workspace_id,
-                now, now, int(expires_at),
+                session_key,
+                key_id,
+                _dumps(caps),
+                workspace_id,
+                now,
+                now,
+                int(expires_at),
             ),
         )
 
     async def get_route_binding(
-        self, session_key: str, *, workspace_id: str = "",
+        self,
+        session_key: str,
+        *,
+        workspace_id: str = "",
     ) -> dict[str, Any] | None:
         """Return the persisted binding, or ``None``.
 
@@ -398,7 +449,8 @@ class ResponseStore:
         rec = self._route_binding_to_dict(row)
         if rec["expires_at"] and int(time.time()) > rec["expires_at"]:
             await self._store.execute(
-                "DELETE FROM route_bindings WHERE session_key = ?", (session_key,),
+                "DELETE FROM route_bindings WHERE session_key = ?",
+                (session_key,),
             )
             return None
         if workspace_id and rec["workspace_id"] and rec["workspace_id"] != workspace_id:
@@ -407,7 +459,11 @@ class ResponseStore:
         return rec
 
     async def record_binding_failover(
-        self, session_key: str, *, reason: str = "", workspace_id: str = "",
+        self,
+        session_key: str,
+        *,
+        reason: str = "",
+        workspace_id: str = "",
     ) -> None:
         """Append one failover event to a binding (R-P1-61 故障迁移记录).
 

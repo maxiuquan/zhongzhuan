@@ -1,4 +1,5 @@
 """Notify proxy server to reload keys after admin changes."""
+
 from __future__ import annotations
 
 # Reload target configured by AdminServer at startup.
@@ -32,7 +33,8 @@ async def notify_proxy_reload() -> None:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    url, ssl=ssl_arg,
+                    url,
+                    ssl=ssl_arg,
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     if resp.status == 200:

@@ -1,4 +1,5 @@
 """API Key CRUD (async)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -53,10 +54,17 @@ async def list_keys(s: Store, model_id: int | None = None) -> list[ApiKeyRow]:
     out = []
     for row in rows:
         plain = decrypt(row[3]).decode("utf-8", errors="replace")
-        out.append(ApiKeyRow(
-            id=row[0], model_id=row[1], label=row[2], key_masked=mask(plain),
-            enabled=bool(row[4]), priority=row[5], created_at=row[6],
-        ))
+        out.append(
+            ApiKeyRow(
+                id=row[0],
+                model_id=row[1],
+                label=row[2],
+                key_masked=mask(plain),
+                enabled=bool(row[4]),
+                priority=row[5],
+                created_at=row[6],
+            )
+        )
     return out
 
 
@@ -69,14 +77,19 @@ async def delete_key(s: Store, key_id: int) -> None:
     await s.execute("DELETE FROM api_keys WHERE id=?", (key_id,))
 
 
-async def update_key(s: Store, key_id: int, *, label: str | None = None, enabled: bool | None = None, priority: int | None = None) -> None:
+async def update_key(
+    s: Store, key_id: int, *, label: str | None = None, enabled: bool | None = None, priority: int | None = None
+) -> None:
     sets, params = [], []
     if label is not None:
-        sets.append("label=?"); params.append(label)
+        sets.append("label=?")
+        params.append(label)
     if enabled is not None:
-        sets.append("enabled=?"); params.append(int(enabled))
+        sets.append("enabled=?")
+        params.append(int(enabled))
     if priority is not None:
-        sets.append("priority=?"); params.append(priority)
+        sets.append("priority=?")
+        params.append(priority)
     if not sets:
         return
     params.append(key_id)

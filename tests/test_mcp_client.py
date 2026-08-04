@@ -35,6 +35,7 @@
 **本文件不发一个真实网络包**：全部走 :class:`InMemoryMcpServer`（JSON-RPC 内存
 对端）或注入的假 poster（HTTP 层抓包器）。
 """
+
 from __future__ import annotations
 
 import builtins
@@ -116,11 +117,12 @@ def _server(**kwargs) -> InMemoryMcpServer:
     """一个带两个真实 handler 的内存 MCP server。"""
     defaults = dict(
         tools=[
-            {"name": "search", "description": "search the wiki",
-             "inputSchema": {"type": "object",
-                             "properties": {"q": {"type": "string"}}}},
-            {"name": "write_file", "description": "has side effects",
-             "inputSchema": {"type": "object"}},
+            {
+                "name": "search",
+                "description": "search the wiki",
+                "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
+            },
+            {"name": "write_file", "description": "has side effects", "inputSchema": {"type": "object"}},
         ],
         handlers={
             "search": lambda a: "hits for " + str(a.get("q")),
@@ -161,12 +163,15 @@ async def test_list_tools_item_and_event_family():
     """判据①：mcp_list_tools item + in_progress/completed 事件，且真的握了手。"""
     server = _server()
     out = await McpClient().list_tools(
-        _session(server), _cfg(), response_id="resp_1",
+        _session(server),
+        _cfg(),
+        response_id="resp_1",
     )
 
     assert out.kind == OUTCOME_COMPLETED
     assert out.event_types == (
-        EVENT_LIST_TOOLS_IN_PROGRESS, EVENT_LIST_TOOLS_COMPLETED,
+        EVENT_LIST_TOOLS_IN_PROGRESS,
+        EVENT_LIST_TOOLS_COMPLETED,
     )
     assert out.item["type"] == ItemType.MCP_LIST_TOOLS.value
     assert out.item["server_label"] == "deepwiki"
@@ -181,8 +186,11 @@ async def test_mcp_call_item_and_event_family():
     """判据①：mcp_call item + 4 个事件，output 来自远端 handler 的真实返回。"""
     server = _server()
     out = await McpClient().call_tool(
-        _session(server), _cfg(),
-        response_id="resp_1", tool_seq=0, name="search",
+        _session(server),
+        _cfg(),
+        response_id="resp_1",
+        tool_seq=0,
+        name="search",
         arguments={"q": "mcp"},
     )
 
@@ -199,9 +207,7 @@ async def test_mcp_call_item_and_event_family():
     assert out.item["output"] == [{"type": "text", "text": "hits for mcp"}]
     assert out.item["error"] is None
     # 远端真的收到了带参数的 tools/call。
-    assert server.calls_to("tools/call") == [
-        {"name": "search", "arguments": {"q": "mcp"}}
-    ]
+    assert server.calls_to("tools/call") == [{"name": "search", "arguments": {"q": "mcp"}}]
 
 
 @pytest.mark.asyncio
@@ -209,8 +215,12 @@ async def test_arguments_delta_can_be_chunked():
     """判据①：arguments.delta 可分片，且分片拼回来恒等于 arguments.done。"""
     server = _server()
     out = await McpClient(arguments_chunk_size=4).call_tool(
-        _session(server), _cfg(),
-        response_id="r", tool_seq=0, name="search", arguments={"q": "abcdefgh"},
+        _session(server),
+        _cfg(),
+        response_id="r",
+        tool_seq=0,
+        name="search",
+        arguments={"q": "abcdefgh"},
     )
     deltas = [e for e in out.events if e["type"] == EVENT_CALL_ARGUMENTS_DELTA]
     done = [e for e in out.events if e["type"] == EVENT_CALL_ARGUMENTS_DONE]
@@ -232,14 +242,22 @@ async def test_approval_round_trip_covers_all_four_item_types(tmp_path):
         seen: list[str] = []
 
         listed = await client.list_tools(
-            session, cfg, response_id="resp_1", workspace_id="ws",
+            session,
+            cfg,
+            response_id="resp_1",
+            workspace_id="ws",
         )
         seen.append(listed.item["type"])
 
         # 第一次调用：没批过 -> 只拿到审批请求，一次 tools/call 都没发。
         pending = await client.call_tool(
-            session, cfg, response_id="resp_1", tool_seq=0, name="write_file",
-            arguments={"path": "/tmp/x"}, workspace_id="ws",
+            session,
+            cfg,
+            response_id="resp_1",
+            tool_seq=0,
+            name="write_file",
+            arguments={"path": "/tmp/x"},
+            workspace_id="ws",
         )
         assert pending.kind == OUTCOME_PENDING_APPROVAL
         assert pending.event_types == (EVENT_APPROVAL_REQUEST,)
@@ -257,8 +275,14 @@ async def test_approval_round_trip_covers_all_four_item_types(tmp_path):
 
         # 带着批准结果重放 -> 这次真的执行。
         done = await client.call_tool(
-            session, cfg, response_id="resp_1", tool_seq=0, name="write_file",
-            arguments={"path": "/tmp/x"}, workspace_id="ws", approved=True,
+            session,
+            cfg,
+            response_id="resp_1",
+            tool_seq=0,
+            name="write_file",
+            arguments={"path": "/tmp/x"},
+            workspace_id="ws",
+            approved=True,
         )
         assert done.kind == OUTCOME_COMPLETED
         seen.append(done.item["type"])
@@ -285,8 +309,12 @@ async def test_events_flow_through_official_emitter():
     client = McpClient()
     listed = await client.list_tools(_session(server), _cfg(), response_id="r")
     called = await client.call_tool(
-        _session(server), _cfg(), response_id="r", tool_seq=0,
-        name="search", arguments={"q": "x"},
+        _session(server),
+        _cfg(),
+        response_id="r",
+        tool_seq=0,
+        name="search",
+        arguments={"q": "x"},
     )
 
     emitter = ResponsesEventEmitter(response_id="r", model="m")
@@ -295,18 +323,18 @@ async def test_events_flow_through_official_emitter():
         frames += emitter.delta(event["type"], dict(event))
     frames += emitter.terminate("completed")
 
-    parsed = [
-        json.loads(f.decode("utf-8").split("data: ", 1)[1])
-        for f in frames if f.startswith(b"event: ")
-    ]
+    parsed = [json.loads(f.decode("utf-8").split("data: ", 1)[1]) for f in frames if f.startswith(b"event: ")]
     seqs = [p["sequence_number"] for p in parsed]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
     assert emitter.illegal_transitions == []
     emitted = {p["type"] for p in parsed}
     assert MCP_EVENT_TYPES & emitted == {
-        EVENT_LIST_TOOLS_IN_PROGRESS, EVENT_LIST_TOOLS_COMPLETED,
-        EVENT_CALL_IN_PROGRESS, EVENT_CALL_ARGUMENTS_DELTA,
-        EVENT_CALL_ARGUMENTS_DONE, EVENT_CALL_COMPLETED,
+        EVENT_LIST_TOOLS_IN_PROGRESS,
+        EVENT_LIST_TOOLS_COMPLETED,
+        EVENT_CALL_IN_PROGRESS,
+        EVENT_CALL_ARGUMENTS_DELTA,
+        EVENT_CALL_ARGUMENTS_DONE,
+        EVENT_CALL_COMPLETED,
     }
 
 
@@ -317,20 +345,39 @@ async def test_client_never_invents_an_event_name():
     client = McpClient()
     produced: set[str] = set()
 
-    produced |= set((await client.list_tools(
-        _session(server), _cfg(), response_id="r")).event_types)
-    produced |= set((await client.call_tool(
-        _session(server), _cfg(), response_id="r", tool_seq=0,
-        name="search", arguments={})).event_types)
-    produced |= set((await client.call_tool(
-        _session(server), _cfg(require_approval="always"), response_id="r",
-        tool_seq=1, name="search", arguments={})).event_types)
-    produced |= set((await client.call_tool(
-        _session(_server(transport_error="down")), _cfg(), response_id="r",
-        tool_seq=2, name="search", arguments={})).event_types)
-    produced |= set((await client.list_tools(
-        _session(_server(transport_error="down")), _cfg(),
-        response_id="r")).event_types)
+    produced |= set((await client.list_tools(_session(server), _cfg(), response_id="r")).event_types)
+    produced |= set(
+        (
+            await client.call_tool(_session(server), _cfg(), response_id="r", tool_seq=0, name="search", arguments={})
+        ).event_types
+    )
+    produced |= set(
+        (
+            await client.call_tool(
+                _session(server),
+                _cfg(require_approval="always"),
+                response_id="r",
+                tool_seq=1,
+                name="search",
+                arguments={},
+            )
+        ).event_types
+    )
+    produced |= set(
+        (
+            await client.call_tool(
+                _session(_server(transport_error="down")),
+                _cfg(),
+                response_id="r",
+                tool_seq=2,
+                name="search",
+                arguments={},
+            )
+        ).event_types
+    )
+    produced |= set(
+        (await client.list_tools(_session(_server(transport_error="down")), _cfg(), response_id="r")).event_types
+    )
 
     assert produced <= MCP_EVENT_TYPES
     assert EVENT_CALL_FAILED in produced
@@ -354,8 +401,13 @@ async def test_approval_state_none_to_pending_to_approved(tmp_path):
         server = _server()
 
         await client.call_tool(
-            _session(server), cfg, response_id="resp_1", tool_seq=0,
-            name="write_file", arguments={"path": "/a"}, workspace_id="ws",
+            _session(server),
+            cfg,
+            response_id="resp_1",
+            tool_seq=0,
+            name="write_file",
+            arguments={"path": "/a"},
+            workspace_id="ws",
         )
         rows = await executions.get_for_response("resp_1", workspace_id="ws")
         assert [r["approval_state"] for r in rows] == [APPROVAL_PENDING]
@@ -369,7 +421,8 @@ async def test_approval_state_none_to_pending_to_approved(tmp_path):
 
         await client.submit_approval(
             build_approval_response_item(
-                make_approval_request_id("resp_1", 0), approve=True,
+                make_approval_request_id("resp_1", 0),
+                approve=True,
             ),
             workspace_id="ws",
         )
@@ -392,16 +445,22 @@ async def test_rejected_approval_never_reaches_the_server(tmp_path):
         decision = await client.submit_approval(
             build_approval_response_item(
                 make_approval_request_id("resp_1", 0),
-                approve=False, reason="too risky",
+                approve=False,
+                reason="too risky",
             ),
             workspace_id="ws",
         )
         assert decision.approved is False
 
         out = await client.call_tool(
-            _session(server), _cfg(require_approval="always"),
-            response_id="resp_1", tool_seq=0, name="write_file",
-            arguments={"path": "/a"}, workspace_id="ws", approved=False,
+            _session(server),
+            _cfg(require_approval="always"),
+            response_id="resp_1",
+            tool_seq=0,
+            name="write_file",
+            arguments={"path": "/a"},
+            workspace_id="ws",
+            approved=False,
         )
         assert out.kind == OUTCOME_FAILED
         assert out.event_types[-1] == EVENT_CALL_FAILED
@@ -420,8 +479,7 @@ async def test_rejected_approval_never_reaches_the_server(tmp_path):
 async def test_missing_approve_field_is_treated_as_rejection():
     """畸形回执（没写 approve）按拒绝处理，绝不按同意。"""
     decision = await McpClient().submit_approval(
-        {"type": "mcp_approval_response",
-         "approval_request_id": make_approval_request_id("r", 3)},
+        {"type": "mcp_approval_response", "approval_request_id": make_approval_request_id("r", 3)},
     )
     assert decision.approved is False
     assert decision.tool_seq == 3
@@ -455,13 +513,23 @@ async def test_same_idempotency_key_executes_only_once(tmp_path):
         args = {"path": "/only-once"}
 
         first = await client.call_tool(
-            session, _cfg(), response_id="resp_1", tool_seq=0,
-            name="write_file", arguments=args, workspace_id="ws",
+            session,
+            _cfg(),
+            response_id="resp_1",
+            tool_seq=0,
+            name="write_file",
+            arguments=args,
+            workspace_id="ws",
             idempotency_key="idem-1",
         )
         second = await client.call_tool(
-            session, _cfg(), response_id="resp_1", tool_seq=1,
-            name="write_file", arguments=args, workspace_id="ws",
+            session,
+            _cfg(),
+            response_id="resp_1",
+            tool_seq=1,
+            name="write_file",
+            arguments=args,
+            workspace_id="ws",
             idempotency_key="idem-1",
         )
 
@@ -487,12 +555,24 @@ async def test_same_key_different_body_is_conflict(tmp_path):
         session = _session(server)
 
         await client.call_tool(
-            session, _cfg(), response_id="r", tool_seq=0, name="write_file",
-            arguments={"path": "/a"}, workspace_id="ws", idempotency_key="k",
+            session,
+            _cfg(),
+            response_id="r",
+            tool_seq=0,
+            name="write_file",
+            arguments={"path": "/a"},
+            workspace_id="ws",
+            idempotency_key="k",
         )
         clash = await client.call_tool(
-            session, _cfg(), response_id="r", tool_seq=1, name="write_file",
-            arguments={"path": "/b"}, workspace_id="ws", idempotency_key="k",
+            session,
+            _cfg(),
+            response_id="r",
+            tool_seq=1,
+            name="write_file",
+            arguments={"path": "/b"},
+            workspace_id="ws",
+            idempotency_key="k",
         )
 
         assert clash.kind == OUTCOME_FAILED
@@ -506,9 +586,7 @@ async def test_same_key_different_body_is_conflict(tmp_path):
 @pytest.mark.asyncio
 async def test_key_order_does_not_defeat_idempotency(tmp_path):
     """键序不同的同一个请求体必须算同一体，否则幂等保护形同虚设。"""
-    assert request_digest("s", "t", {"a": 1, "b": 2}) == request_digest(
-        "s", "t", {"b": 2, "a": 1}
-    )
+    assert request_digest("s", "t", {"a": 1, "b": 2}) == request_digest("s", "t", {"b": 2, "a": 1})
     store = await _make_store(tmp_path)
     try:
         client = McpClient(
@@ -518,12 +596,24 @@ async def test_key_order_does_not_defeat_idempotency(tmp_path):
         server = _server()
         session = _session(server)
         await client.call_tool(
-            session, _cfg(), response_id="r", tool_seq=0, name="write_file",
-            arguments={"a": 1, "b": 2}, workspace_id="ws", idempotency_key="k",
+            session,
+            _cfg(),
+            response_id="r",
+            tool_seq=0,
+            name="write_file",
+            arguments={"a": 1, "b": 2},
+            workspace_id="ws",
+            idempotency_key="k",
         )
         again = await client.call_tool(
-            session, _cfg(), response_id="r", tool_seq=1, name="write_file",
-            arguments={"b": 2, "a": 1}, workspace_id="ws", idempotency_key="k",
+            session,
+            _cfg(),
+            response_id="r",
+            tool_seq=1,
+            name="write_file",
+            arguments={"b": 2, "a": 1},
+            workspace_id="ws",
+            idempotency_key="k",
         )
         assert again.kind == OUTCOME_DUPLICATE
         assert len(server.calls_to("tools/call")) == 1
@@ -539,9 +629,15 @@ async def test_inflight_holder_makes_caller_wait_then_time_out(tmp_path):
         idem = IdempotencyStore(store)
         digest = request_digest("deepwiki", "write_file", {"path": "/a"})
         # 另一个执行者已占位，还没出结果。
-        assert await idem.reserve(
-            "k", workspace_id="ws", response_id="other#0", request_digest=digest,
-        ) is True
+        assert (
+            await idem.reserve(
+                "k",
+                workspace_id="ws",
+                response_id="other#0",
+                request_digest=digest,
+            )
+            is True
+        )
 
         slept: list[float] = []
 
@@ -549,14 +645,21 @@ async def test_inflight_holder_makes_caller_wait_then_time_out(tmp_path):
             slept.append(seconds)
 
         client = McpClient(
-            executions=ToolExecutionStore(store), idempotency=idem,
-            idempotency_wait_seconds=0.2, idempotency_poll_seconds=0.05,
+            executions=ToolExecutionStore(store),
+            idempotency=idem,
+            idempotency_wait_seconds=0.2,
+            idempotency_poll_seconds=0.05,
             sleep=_record_sleep,
         )
         server = _server()
         out = await client.call_tool(
-            _session(server), _cfg(), response_id="r", tool_seq=0,
-            name="write_file", arguments={"path": "/a"}, workspace_id="ws",
+            _session(server),
+            _cfg(),
+            response_id="r",
+            tool_seq=0,
+            name="write_file",
+            arguments={"path": "/a"},
+            workspace_id="ws",
             idempotency_key="k",
         )
 
@@ -578,24 +681,36 @@ async def test_inflight_holder_finishing_turns_into_duplicate(tmp_path):
         idem = IdempotencyStore(store)
         digest = request_digest("deepwiki", "write_file", {"path": "/a"})
         await idem.reserve(
-            "k", workspace_id="ws", response_id="other#0", request_digest=digest,
+            "k",
+            workspace_id="ws",
+            response_id="other#0",
+            request_digest=digest,
         )
 
         async def _finish_holder(_seconds: float) -> None:
             await idem.mark_executed(
-                "k", workspace_id="ws", response_id="other#0",
+                "k",
+                workspace_id="ws",
+                response_id="other#0",
                 request_digest=digest,
             )
 
         client = McpClient(
-            executions=ToolExecutionStore(store), idempotency=idem,
-            idempotency_wait_seconds=1.0, idempotency_poll_seconds=0.05,
+            executions=ToolExecutionStore(store),
+            idempotency=idem,
+            idempotency_wait_seconds=1.0,
+            idempotency_poll_seconds=0.05,
             sleep=_finish_holder,
         )
         server = _server()
         out = await client.call_tool(
-            _session(server), _cfg(), response_id="r", tool_seq=0,
-            name="write_file", arguments={"path": "/a"}, workspace_id="ws",
+            _session(server),
+            _cfg(),
+            response_id="r",
+            tool_seq=0,
+            name="write_file",
+            arguments={"path": "/a"},
+            workspace_id="ws",
             idempotency_key="k",
         )
         assert out.kind == OUTCOME_DUPLICATE
@@ -612,13 +727,21 @@ async def test_failed_call_does_not_lock_the_key_for_a_day(tmp_path):
     try:
         idem = IdempotencyStore(store)
         client = McpClient(
-            executions=ToolExecutionStore(store), idempotency=idem,
-            reservation_ttl_seconds=60, result_ttl_seconds=86400,
+            executions=ToolExecutionStore(store),
+            idempotency=idem,
+            reservation_ttl_seconds=60,
+            result_ttl_seconds=86400,
         )
         broken = _session(_server(transport_error="down"))
         out = await client.call_tool(
-            broken, _cfg(), response_id="r", tool_seq=0, name="write_file",
-            arguments={"path": "/a"}, workspace_id="ws", idempotency_key="k",
+            broken,
+            _cfg(),
+            response_id="r",
+            tool_seq=0,
+            name="write_file",
+            arguments={"path": "/a"},
+            workspace_id="ws",
+            idempotency_key="k",
         )
         assert out.kind == OUTCOME_FAILED
         record = await idem.lookup("k", workspace_id="ws")
@@ -626,8 +749,13 @@ async def test_failed_call_does_not_lock_the_key_for_a_day(tmp_path):
         assert record["expires_at"] - record["created_at"] == 60
 
         ok = await client.call_tool(
-            _session(_server()), _cfg(), response_id="r2", tool_seq=0,
-            name="write_file", arguments={"path": "/a"}, workspace_id="ws",
+            _session(_server()),
+            _cfg(),
+            response_id="r2",
+            tool_seq=0,
+            name="write_file",
+            arguments={"path": "/a"},
+            workspace_id="ws",
             idempotency_key="k2",
         )
         assert ok.kind == OUTCOME_COMPLETED
@@ -650,8 +778,13 @@ async def test_empty_idempotency_key_never_blocks(tmp_path):
         session = _session(server)
         for seq in (0, 1, 2):
             out = await client.call_tool(
-                session, _cfg(), response_id="r", tool_seq=seq,
-                name="write_file", arguments={"path": "/a"}, workspace_id="ws",
+                session,
+                _cfg(),
+                response_id="r",
+                tool_seq=seq,
+                name="write_file",
+                arguments={"path": "/a"},
+                workspace_id="ws",
             )
             assert out.kind == OUTCOME_COMPLETED
         assert len(server.calls_to("tools/call")) == 3
@@ -669,8 +802,12 @@ async def test_timeout_maps_to_official_failed_event():
     """判据②③：超时 -> response.mcp_call.failed + mcp_call_timeout，不挂起。"""
     server = _server(delay_seconds=0.05)
     out = await McpClient(timeout_seconds=0.01).call_tool(
-        _session(server), _cfg(), response_id="r", tool_seq=0,
-        name="search", arguments={"q": "x"},
+        _session(server),
+        _cfg(),
+        response_id="r",
+        tool_seq=0,
+        name="search",
+        arguments={"q": "x"},
     )
     assert out.kind == OUTCOME_FAILED
     assert out.event_types[-1] == EVENT_CALL_FAILED
@@ -686,11 +823,14 @@ async def test_timeout_maps_to_official_failed_event():
 async def test_list_tools_timeout_maps_to_its_own_failed_event():
     """list_tools 的超时走它自己的 failed 事件族，不串到 mcp_call 上。"""
     out = await McpClient(timeout_seconds=0.01).list_tools(
-        _session(_server(delay_seconds=0.05)), _cfg(), response_id="r",
+        _session(_server(delay_seconds=0.05)),
+        _cfg(),
+        response_id="r",
     )
     assert out.kind == OUTCOME_FAILED
     assert out.event_types == (
-        EVENT_LIST_TOOLS_IN_PROGRESS, EVENT_LIST_TOOLS_FAILED,
+        EVENT_LIST_TOOLS_IN_PROGRESS,
+        EVENT_LIST_TOOLS_FAILED,
     )
     assert out.error["code"] == ERROR_TIMEOUT
 
@@ -702,16 +842,26 @@ async def test_audit_trail_lands_in_tool_executions(tmp_path):
     try:
         executions = ToolExecutionStore(store)
         client = McpClient(
-            executions=executions, idempotency=IdempotencyStore(store),
+            executions=executions,
+            idempotency=IdempotencyStore(store),
         )
         await client.call_tool(
-            _session(_server()), _cfg(), response_id="r", tool_seq=0,
-            name="search", arguments={"q": "a"}, workspace_id="ws",
+            _session(_server()),
+            _cfg(),
+            response_id="r",
+            tool_seq=0,
+            name="search",
+            arguments={"q": "a"},
+            workspace_id="ws",
             idempotency_key="key-a",
         )
         await client.call_tool(
-            _session(_server(transport_error="down")), _cfg(),
-            response_id="r", tool_seq=1, name="search", arguments={"q": "b"},
+            _session(_server(transport_error="down")),
+            _cfg(),
+            response_id="r",
+            tool_seq=1,
+            name="search",
+            arguments={"q": "b"},
             workspace_id="ws",
         )
         rows = await executions.get_for_response("r", workspace_id="ws")
@@ -734,8 +884,13 @@ async def test_pending_approvals_are_tenant_scoped(tmp_path):
         cfg = _cfg(require_approval="always")
         for ws, rid in (("ws_a", "ra"), ("ws_b", "rb")):
             await client.call_tool(
-                _session(_server()), cfg, response_id=rid, tool_seq=0,
-                name="write_file", arguments={"path": "/x"}, workspace_id=ws,
+                _session(_server()),
+                cfg,
+                response_id=rid,
+                tool_seq=0,
+                name="write_file",
+                arguments={"path": "/x"},
+                workspace_id=ws,
             )
         a = await executions.get_pending_approvals(workspace_id="ws_a")
         b = await executions.get_pending_approvals(workspace_id="ws_b")
@@ -759,8 +914,13 @@ async def test_idempotency_keys_do_not_cross_tenants(tmp_path):
         session = _session(server)
         for ws in ("ws_a", "ws_b"):
             out = await client.call_tool(
-                session, _cfg(), response_id="r", tool_seq=0,
-                name="write_file", arguments={"path": "/x"}, workspace_id=ws,
+                session,
+                _cfg(),
+                response_id="r",
+                tool_seq=0,
+                name="write_file",
+                arguments={"path": "/x"},
+                workspace_id=ws,
                 idempotency_key="shared-key",
             )
             assert out.kind == OUTCOME_COMPLETED, ws
@@ -780,8 +940,12 @@ async def test_allowed_tools_is_a_whitelist():
     assert [t["name"] for t in listed.item["tools"]] == ["search"]
 
     blocked = await client.call_tool(
-        _session(server), cfg, response_id="r", tool_seq=0,
-        name="write_file", arguments={},
+        _session(server),
+        cfg,
+        response_id="r",
+        tool_seq=0,
+        name="write_file",
+        arguments={},
     )
     assert blocked.kind == OUTCOME_FAILED
     assert blocked.error["code"] == ERROR_TOOL_NOT_ALLOWED
@@ -806,12 +970,16 @@ def test_require_approval_policies():
 
 
 def test_from_tool_requires_server_label():
-    cfg = McpServerConfig.from_tool({
-        "type": "mcp", "server_label": "deepwiki",
-        "server_url": "https://example.invalid/mcp",
-        "require_approval": "never", "allowed_tools": ["search"],
-        "headers": {"X-Token": "t"},
-    })
+    cfg = McpServerConfig.from_tool(
+        {
+            "type": "mcp",
+            "server_label": "deepwiki",
+            "server_url": "https://example.invalid/mcp",
+            "require_approval": "never",
+            "allowed_tools": ["search"],
+            "headers": {"X-Token": "t"},
+        }
+    )
     assert cfg.server_label == "deepwiki"
     assert cfg.allowed_tools == ("search",)
     assert cfg.headers == {"X-Token": "t"}
@@ -825,9 +993,16 @@ def test_from_tool_requires_server_label():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", [
-    "not_allowed", "rejected", "timeout", "transport", "remote_error",
-])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "not_allowed",
+        "rejected",
+        "timeout",
+        "transport",
+        "remote_error",
+    ],
+)
 async def test_every_failure_mode_lands_on_mcp_call_failed(scenario, tmp_path):
     """判据③：五种失败无一例外走官方 failed 事件，各带可区分的错误码。"""
     expected = {
@@ -842,7 +1017,10 @@ async def test_every_failure_mode_lands_on_mcp_call_failed(scenario, tmp_path):
     server = _server()
     client = McpClient()
     kwargs: dict = dict(
-        response_id="r", tool_seq=0, name="write_file", arguments={"p": 1},
+        response_id="r",
+        tool_seq=0,
+        name="write_file",
+        arguments={"p": 1},
     )
     if scenario == "not_allowed":
         cfg = _cfg(allowed_tools=("search",))
@@ -877,8 +1055,12 @@ async def test_every_failure_mode_lands_on_mcp_call_failed(scenario, tmp_path):
 async def test_remote_is_error_carries_the_remote_message():
     """远端 isError 的文本要传到客户端，否则用户只看到「失败了」。"""
     out = await McpClient().call_tool(
-        _session(_server()), _cfg(), response_id="r", tool_seq=0,
-        name="boom", arguments={},
+        _session(_server()),
+        _cfg(),
+        response_id="r",
+        tool_seq=0,
+        name="boom",
+        arguments={},
     )
     assert out.error["code"] == ERROR_TOOL_FAILED
     assert "handler exploded" in out.error["message"]
@@ -887,8 +1069,12 @@ async def test_remote_is_error_carries_the_remote_message():
 @pytest.mark.asyncio
 async def test_unknown_tool_on_remote_is_reported_not_swallowed():
     out = await McpClient().call_tool(
-        _session(_server()), _cfg(), response_id="r", tool_seq=0,
-        name="nope", arguments={},
+        _session(_server()),
+        _cfg(),
+        response_id="r",
+        tool_seq=0,
+        name="nope",
+        arguments={},
     )
     assert out.kind == OUTCOME_FAILED
     assert "unknown tool: nope" in out.error["message"]
@@ -897,7 +1083,8 @@ async def test_unknown_tool_on_remote_is_reported_not_swallowed():
 @pytest.mark.asyncio
 async def test_list_tools_failure_lands_on_its_own_failed_event():
     out = await McpClient().list_tools(
-        _session(_server(transport_error="dns failure")), _cfg(),
+        _session(_server(transport_error="dns failure")),
+        _cfg(),
         response_id="r",
     )
     assert out.kind == OUTCOME_FAILED
@@ -909,6 +1096,7 @@ async def test_list_tools_failure_lands_on_its_own_failed_event():
 @pytest.mark.asyncio
 async def test_jsonrpc_error_object_becomes_a_tool_error():
     """JSON-RPC 层的 error 对象也必须变成失败，不能被当成空结果。"""
+
     class _ErrorTransport:
         async def request(self, method, params):
             return {"error": {"code": -32000, "message": "server said no"}}
@@ -945,12 +1133,14 @@ def _json_response(payload, headers=None):
 @pytest.mark.asyncio
 async def test_http_transport_emits_real_jsonrpc_over_the_wire():
     """真实实现：发出去的就是合法 JSON-RPC 2.0，头部按 MCP 规范声明两种 Accept。"""
-    poster = _FakePoster([
-        _json_response({"jsonrpc": "2.0", "id": 1,
-                        "result": {"protocolVersion": "2024-11-05"}}),
-    ])
+    poster = _FakePoster(
+        [
+            _json_response({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2024-11-05"}}),
+        ]
+    )
     transport = HttpMcpTransport(
-        "https://example.invalid/mcp", headers={"Authorization": "Bearer t"},
+        "https://example.invalid/mcp",
+        headers={"Authorization": "Bearer t"},
         poster=poster,
     )
     result = await transport.request("initialize", {"a": 1})
@@ -959,7 +1149,10 @@ async def test_http_transport_emits_real_jsonrpc_over_the_wire():
     url, headers, body = poster.calls[0]
     assert url == "https://example.invalid/mcp"
     assert json.loads(body) == {
-        "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"a": 1},
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"a": 1},
     }
     assert headers["Content-Type"] == "application/json"
     assert "application/json" in headers["Accept"]
@@ -971,11 +1164,12 @@ async def test_http_transport_emits_real_jsonrpc_over_the_wire():
 @pytest.mark.asyncio
 async def test_http_transport_echoes_mcp_session_id():
     """服务端分配的 Mcp-Session-Id 必须回带，否则后续请求会被判为新连接。"""
-    poster = _FakePoster([
-        _json_response({"jsonrpc": "2.0", "id": 1, "result": {}},
-                       headers={"Mcp-Session-Id": "sess-42"}),
-        _json_response({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
-    ])
+    poster = _FakePoster(
+        [
+            _json_response({"jsonrpc": "2.0", "id": 1, "result": {}}, headers={"Mcp-Session-Id": "sess-42"}),
+            _json_response({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
+        ]
+    )
     transport = HttpMcpTransport("https://example.invalid/mcp", poster=poster)
     session = JsonRpcMcpSession(transport)
     await session.list_tools()
@@ -991,11 +1185,7 @@ async def test_http_transport_echoes_mcp_session_id():
 @pytest.mark.asyncio
 async def test_http_transport_parses_sse_response():
     """规范允许服务端用 text/event-stream 回 JSON-RPC 响应，也要能解析。"""
-    body = (
-        b": ping\n\n"
-        b"event: message\n"
-        b'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"t"}]}}\n\n'
-    )
+    body = b': ping\n\nevent: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"t"}]}}\n\n'
     poster = _FakePoster([(200, {"Content-Type": "text/event-stream"}, body)])
     transport = HttpMcpTransport("https://example.invalid/mcp", poster=poster)
     result = await transport.request("tools/list", {})
@@ -1016,28 +1206,43 @@ async def test_http_transport_rejects_non_2xx_and_garbage():
 @pytest.mark.asyncio
 async def test_http_transport_drives_a_full_call_end_to_end():
     """判据①③的传输侧闭环：HTTP 传输 + McpClient 产出真正的 mcp_call item。"""
-    poster = _FakePoster([
-        _json_response({"jsonrpc": "2.0", "id": 1, "result": {}}),
-        _json_response({"jsonrpc": "2.0", "id": 2, "result": {
-            "isError": False,
-            "content": [{"type": "text", "text": "42"}],
-        }}),
-    ])
+    poster = _FakePoster(
+        [
+            _json_response({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            _json_response(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "isError": False,
+                        "content": [{"type": "text", "text": "42"}],
+                    },
+                }
+            ),
+        ]
+    )
     session = connect(
-        _cfg(server_url="https://example.invalid/mcp"), poster=poster,
+        _cfg(server_url="https://example.invalid/mcp"),
+        poster=poster,
     )
     out = await McpClient().call_tool(
-        session, _cfg(), response_id="r", tool_seq=0, name="answer",
+        session,
+        _cfg(),
+        response_id="r",
+        tool_seq=0,
+        name="answer",
         arguments={"q": "life"},
     )
     assert out.kind == OUTCOME_COMPLETED
     assert out.item["output"] == [{"type": "text", "text": "42"}]
     # 线上真发出去的方法名必须是规范里的那两个，不是我们自己编的。
     assert [json.loads(c[2])["method"] for c in poster.calls] == [
-        "initialize", "tools/call",
+        "initialize",
+        "tools/call",
     ]
     assert json.loads(poster.calls[1][2])["params"] == {
-        "name": "answer", "arguments": {"q": "life"},
+        "name": "answer",
+        "arguments": {"q": "life"},
     }
 
 
@@ -1077,10 +1282,7 @@ def test_load_mcp_sdk_raises_dependency_error_not_import_error(monkeypatch):
 def test_module_has_no_toplevel_mcp_import():
     """回归护栏：任何人把 ``import mcp`` 提到模块层，不装可选依赖的环境就全崩。"""
     source = Path(mcp_mod.__file__).read_text(encoding="utf-8")
-    offenders = [
-        line for line in source.splitlines()
-        if line.startswith(("import mcp", "from mcp"))
-    ]
+    offenders = [line for line in source.splitlines() if line.startswith(("import mcp", "from mcp"))]
     assert offenders == []
 
 
@@ -1142,21 +1344,24 @@ async def test_sdk_session_normalizes_without_the_mcp_package():
 
     result = await session.call_tool("x", {"k": 1})
     assert result["isError"] is False
-    assert result["content"] == [
-        {"type": "text", "text": "called x with {'k': 1}"}
-    ]
+    assert result["content"] == [{"type": "text", "text": "called x with {'k': 1}"}]
 
 
 @pytest.mark.asyncio
 async def test_sdk_session_error_flows_into_failed_event():
     """SDK 形态的 isError 同样落到官方 failed 事件（判据③不挑传输类型）。"""
+
     class _ErroringSdk(_FakeSdkSession):
         async def call_tool(self, name, arguments):
             return _FakeSdkCallResult("sdk said no", is_error=True)
 
     out = await McpClient().call_tool(
-        SdkMcpSession(_ErroringSdk()), _cfg(),
-        response_id="r", tool_seq=0, name="x", arguments={},
+        SdkMcpSession(_ErroringSdk()),
+        _cfg(),
+        response_id="r",
+        tool_seq=0,
+        name="x",
+        arguments={},
     )
     assert out.kind == OUTCOME_FAILED
     assert out.error["code"] == ERROR_TOOL_FAILED

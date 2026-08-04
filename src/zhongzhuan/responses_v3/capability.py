@@ -45,6 +45,7 @@ HONEST STUB
   ``emulated=`` 扩展即可，无需改这里。
 * 真正的网络转发不在本模块，见 :mod:`.passthrough`。
 """
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
@@ -81,10 +82,12 @@ PATH_MESSAGES: str = "/v1/messages"
 #:   catch-up 全套语义。
 #:
 #: 其余七项 hosted 能力**没有**本地执行器，故意留空：见模块头 HONEST STUB。
-DEFAULT_EMULATED_CAPABILITIES: frozenset[Capability] = frozenset({
-    Capability.STATEFUL_RESPONSES,
-    Capability.BACKGROUND,
-})
+DEFAULT_EMULATED_CAPABILITIES: frozenset[Capability] = frozenset(
+    {
+        Capability.STATEFUL_RESPONSES,
+        Capability.BACKGROUND,
+    }
+)
 
 #: ``KeyHealth.upstream_mode`` 的字符串取值 -> :class:`ExecutionMode`。
 #: 历史默认值 ``"bonded"`` 表示「未声明」，按最保守的 TRANSLATE 处理。
@@ -152,7 +155,7 @@ class CapabilityGap:
 
     capability: Capability
     reason: str = REASON_NO_UPSTREAM
-    param_path: str = ""           # 例如 "tools[2].type"
+    param_path: str = ""  # 例如 "tools[2].type"
 
     def describe(self) -> str:
         """人类可读的一行描述，用于启动日志与异常消息。"""
@@ -166,7 +169,7 @@ class RouteDecision:
 
     mode: ExecutionMode
     key: KeyHealth
-    upstream_path: str             # /v1/responses | /v1/chat/completions | /v1/messages
+    upstream_path: str  # /v1/responses | /v1/chat/completions | /v1/messages
     granted: frozenset[Capability] = frozenset()
     gaps: tuple[CapabilityGap, ...] = ()
     reason: str = ""
@@ -211,9 +214,7 @@ class StartupCapabilityError(RuntimeError):
     def __init__(self, gaps: Sequence[CapabilityGap]) -> None:
         self.gaps: tuple[CapabilityGap, ...] = tuple(gaps)
         detail = "; ".join(gap.describe() for gap in self.gaps) or "(none)"
-        super().__init__(
-            "capability gaps detected with strict_capability_startup=true: " + detail
-        )
+        super().__init__("capability gaps detected with strict_capability_startup=true: " + detail)
 
 
 # ---------------------------------------------------------------------------
@@ -308,18 +309,12 @@ class CapabilityRouter:
         self._cfg = cfg
         #: 配置强制的执行模式；``responses_native`` 时禁止任何降级（R-P1-44）。
         self._forced_mode: ExecutionMode | None = self._read_forced_mode(cfg)
-        self._strict_default: bool = bool(
-            getattr(cfg, "strict_capability_startup", False)
-        )
+        self._strict_default: bool = bool(getattr(cfg, "strict_capability_startup", False))
         self._emulated: frozenset[Capability] = (
-            coerce_capabilities(emulated)
-            if emulated is not None
-            else DEFAULT_EMULATED_CAPABILITIES
+            coerce_capabilities(emulated) if emulated is not None else DEFAULT_EMULATED_CAPABILITIES
         )
         #: 部署声称要提供的能力；空集合表示「什么都没承诺」，于是没有缺口。
-        self._required: frozenset[Capability] = coerce_capabilities(
-            getattr(cfg, "required_capabilities", None)
-        )
+        self._required: frozenset[Capability] = coerce_capabilities(getattr(cfg, "required_capabilities", None))
 
     # -- 只读属性 --------------------------------------------------------
 
@@ -439,7 +434,9 @@ class CapabilityRouter:
         )
 
     def _pick_native(
-        self, required: frozenset[Capability], available: Sequence[KeyHealth],
+        self,
+        required: frozenset[Capability],
+        available: Sequence[KeyHealth],
     ) -> KeyHealth | None:
         """挑一个声明为 NATIVE 且覆盖全部所需能力的可用 key。"""
         for key in available:
@@ -462,9 +459,11 @@ class CapabilityRouter:
         """构造 400 / 503 —— 两种故障语义完全不同，不可合并。"""
         pool = list(candidates) or list(_all_keys(self._registry))
         undeclared = sorted(
-            (cap for cap in required
-             if cap not in self._emulated
-             and not any(cap in _declared_of(self._registry, k) for k in pool)),
+            (
+                cap
+                for cap in required
+                if cap not in self._emulated and not any(cap in _declared_of(self._registry, k) for k in pool)
+            ),
             key=lambda c: c.value,
         )
         if undeclared:

@@ -10,6 +10,7 @@
   权重连续调用 100 次，分布稳定且与权重成比例。
 * 测试直接调用 ``pick_group_model``，不经过网络。
 """
+
 from __future__ import annotations
 
 from collections import Counter
@@ -35,14 +36,15 @@ def _clean_swrr_state():
 
 def _models(*pairs: tuple[int, bool]) -> dict[int, ModelHealth]:
     """构造 ``{model_id: ModelHealth}``。``(id, available)`` 对。"""
-    return {mid: ModelHealth(model_id=mid, name=f"m{mid}", available=avail)
-            for mid, avail in pairs}
+    return {mid: ModelHealth(model_id=mid, name=f"m{mid}", available=avail) for mid, avail in pairs}
 
 
 def _group(members: list[tuple[int, int, int]], strategy: str) -> Group:
     """``(model_id, weight, ord)`` 列表构造一个 group。"""
     return Group(
-        id=1, name="g", strategy=strategy,
+        id=1,
+        name="g",
+        strategy=strategy,
         members=[GroupMember(model_id=mid, weight=w, ord=o) for mid, w, o in members],
     )
 
@@ -50,6 +52,7 @@ def _group(members: list[tuple[int, int, int]], strategy: str) -> Group:
 # --------------------------------------------------------------------------- #
 # 判据① 上半：round_robin 100 次调用分布
 # --------------------------------------------------------------------------- #
+
 
 def test_round_robin_100_calls_balanced():
     """round_robin：100 次调用在两个可用模型间均匀分布（各 50 次）。"""
@@ -85,6 +88,7 @@ def test_round_robin_skips_unavailable_and_last_model():
 # --------------------------------------------------------------------------- #
 # 判据① 上半 + 判据②：weighted 100 次调用分布（平滑加权轮询）
 # --------------------------------------------------------------------------- #
+
 
 def test_weighted_100_calls_proportional_3_to_1():
     """weighted 3:1 → 100 次调用 ≈75:25（断言落在 70~80 vs 20~30 区间）。
@@ -138,7 +142,7 @@ def test_weighted_maximum_consecutive_picks_bounded():
     # 低权重成员最大等待间隔有界：任何位置往前 4 次调用内必出现一次 model2。
     # （窗口宽度 = total = 3+1 = 4，窗口内 model2 至少 1 次。）
     for start in range(0, len(seq) - 3):
-        window = seq[start:start + 4]
+        window = seq[start : start + 4]
         assert 2 in window, f"low-weight member starved in window {window}"
 
 
@@ -186,6 +190,7 @@ def test_weighted_skips_unavailable_and_returns_none():
 # --------------------------------------------------------------------------- #
 # 判据① 下半：failover 严格遵守 ord 顺序
 # --------------------------------------------------------------------------- #
+
 
 def test_failover_strictly_follows_ord():
     """failover：永远选 ``ord`` 最小的可用成员，无视成员列表顺序。"""

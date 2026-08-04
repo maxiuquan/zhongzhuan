@@ -6,6 +6,7 @@ Distinguishes failure types so the scheduler can skip permanently-bad keys:
   - 5xx      → error (short exponential backoff)
   - network  → error (short backoff, may be transient)
 """
+
 from __future__ import annotations
 
 import time
@@ -183,6 +184,7 @@ def reason_for_exhaustion(keys: list[KeyHealth]) -> str:
     if not keys:
         return "no_keys"
     from .ratelimit import STATE_INVALID, STATE_RATE_LIMITED, STATE_ERROR
+
     has_invalid = any(k.status == STATE_INVALID for k in keys)
     has_rate_limited = any(k.status == STATE_RATE_LIMITED for k in keys)
     has_error = any(k.status == STATE_ERROR for k in keys)

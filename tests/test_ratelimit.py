@@ -1,4 +1,5 @@
 """SlidingWindow tests."""
+
 import time
 
 from zhongzhuan.proxy.ratelimit import SlidingWindow

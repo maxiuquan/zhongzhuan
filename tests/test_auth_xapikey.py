@@ -1,4 +1,5 @@
 """Tests for x-api-key auth in proxy auth middleware."""
+
 import pytest
 import pytest_asyncio
 from aiohttp import web
@@ -71,6 +72,7 @@ async def app_with_auth():
 @pytest.mark.asyncio
 async def test_x_api_key_accepted(app_with_auth):
     from aiohttp import ClientSession
+
     async with ClientSession() as sess:
         async with sess.post(
             f"{app_with_auth}/v1/messages",
@@ -85,11 +87,11 @@ async def test_x_api_key_accepted(app_with_auth):
 @pytest.mark.asyncio
 async def test_bearer_token_accepted(app_with_auth):
     from aiohttp import ClientSession
+
     async with ClientSession() as sess:
         async with sess.post(
             f"{app_with_auth}/v1/chat/completions",
-            headers={"Authorization": "Bearer sk-valid-token",
-                     "Content-Type": "application/json"},
+            headers={"Authorization": "Bearer sk-valid-token", "Content-Type": "application/json"},
             data='{"model":"m","messages":[]}',
         ) as resp:
             assert resp.status == 200
@@ -98,6 +100,7 @@ async def test_bearer_token_accepted(app_with_auth):
 @pytest.mark.asyncio
 async def test_invalid_token_returns_401(app_with_auth):
     from aiohttp import ClientSession
+
     async with ClientSession() as sess:
         async with sess.post(
             f"{app_with_auth}/v1/messages",
@@ -112,6 +115,7 @@ async def test_invalid_token_returns_401(app_with_auth):
 @pytest.mark.asyncio
 async def test_missing_token_returns_401(app_with_auth):
     from aiohttp import ClientSession
+
     async with ClientSession() as sess:
         async with sess.post(
             f"{app_with_auth}/v1/chat/completions",
@@ -125,6 +129,7 @@ async def test_missing_token_returns_401(app_with_auth):
 async def test_v1_models_no_auth_required(app_with_auth):
     """GET /v1/models is publicly accessible for model discovery."""
     from aiohttp import ClientSession
+
     async with ClientSession() as sess:
         async with sess.get(f"{app_with_auth}/v1/models") as resp:
             assert resp.status == 200
@@ -133,6 +138,7 @@ async def test_v1_models_no_auth_required(app_with_auth):
 @pytest.mark.asyncio
 async def test_non_v1_path_no_auth_required(app_with_auth):
     from aiohttp import ClientSession
+
     async with ClientSession() as sess:
         async with sess.get(f"{app_with_auth}/healthz") as resp:
             assert resp.status == 200
@@ -142,6 +148,7 @@ async def test_non_v1_path_no_auth_required(app_with_auth):
 async def test_x_api_key_takes_precedence(app_with_auth):
     """When both headers are present, x-api-key is checked first."""
     from aiohttp import ClientSession
+
     async with ClientSession() as sess:
         # valid x-api-key, invalid Bearer — should succeed.
         async with sess.post(
@@ -174,6 +181,7 @@ async def test_disabled_auth_passes_through(monkeypatch):
     port = site._server.sockets[0].getsockname()[1]
 
     from aiohttp import ClientSession
+
     try:
         async with ClientSession() as sess:
             async with sess.post(

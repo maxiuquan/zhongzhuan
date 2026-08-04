@@ -58,6 +58,7 @@ HONEST STUB
 ``emulated=``（默认集合仍不含它 —— 是否启用 MCP 由部署配置说了算，默认打开一个
 能对外发网络请求的执行器不是安全的默认）。
 """
+
 from __future__ import annotations
 
 from typing import Any, Mapping
@@ -90,9 +91,7 @@ from .capability import DEFAULT_EMULATED_CAPABILITIES, CapabilityError
 HOSTED_TOOL_TYPES: frozenset[str] = frozenset(HOSTED_TOOL_CAPABILITY)
 
 #: 7 类 hosted 能力（去掉别名后的实际能力面）。判据①按这个集合计数。
-HOSTED_CAPABILITIES: frozenset[Capability] = frozenset(
-    HOSTED_TOOL_CAPABILITY.values()
-)
+HOSTED_CAPABILITIES: frozenset[Capability] = frozenset(HOSTED_TOOL_CAPABILITY.values())
 
 #: ``tool_choice`` 的三个字面量取值（R-P1-48）。
 TOOL_CHOICE_LITERALS: frozenset[str] = frozenset({"auto", "none", "required"})
@@ -100,9 +99,7 @@ TOOL_CHOICE_LITERALS: frozenset[str] = frozenset({"auto", "none", "required"})
 #: ``tool_choice`` 为对象时允许的 ``type``。``function`` 是 OpenAI 官方形态；
 #: hosted tool 也可以被点名（``{"type": "web_search"}``），所以 hosted 的
 #: type 全集同样合法。
-_TOOL_CHOICE_OBJECT_TYPES: frozenset[str] = (
-    frozenset({"function", "allowed_tools", "custom"}) | HOSTED_TOOL_TYPES
-)
+_TOOL_CHOICE_OBJECT_TYPES: frozenset[str] = frozenset({"function", "allowed_tools", "custom"}) | HOSTED_TOOL_TYPES
 
 #: §4-Q4 给定的错误消息模板。逐字对齐 PRD 的建议错误体 —— 客户端可以拿
 #: ``capability`` 名去查配置，拿 ``upstream_mode`` 提示去改部署。
@@ -144,6 +141,7 @@ def resolve_mcp_executor(cfg: Any | None = None) -> Any | None:
     if Capability.REMOTE_MCP not in hosted_tool_emulated_capabilities(cfg):
         return None
     from .mcp_client import McpClient  # noqa: PLC0415 - 惰性导入防循环
+
     return McpClient()
 
 
@@ -177,16 +175,19 @@ class HostedToolRecognizer:
             capability = HOSTED_TOOL_CAPABILITY.get(tool_type)
             if capability is None:
                 continue
-            specs.append(HostedToolSpec(
-                tool_type=tool_type,
-                raw=dict(tool),
-                required_capability=capability,
-                param_path="tools[{0}].type".format(index),
-            ))
+            specs.append(
+                HostedToolSpec(
+                    tool_type=tool_type,
+                    raw=dict(tool),
+                    required_capability=capability,
+                    param_path="tools[{0}].type".format(index),
+                )
+            )
         return specs
 
     def required_capabilities(
-        self, specs: list[HostedToolSpec],
+        self,
+        specs: list[HostedToolSpec],
     ) -> frozenset[Capability]:
         """``specs`` 需要的能力集合，可直接填进 ``SanitizedRequest``。"""
         return frozenset(spec.required_capability for spec in specs)
@@ -248,7 +249,9 @@ class HostedToolValidator:
     """请求校验阶段的 hosted tool 可服务性判定。"""
 
     def __init__(
-        self, *, emulated: frozenset[Capability] = DEFAULT_EMULATED_CAPABILITIES,
+        self,
+        *,
+        emulated: frozenset[Capability] = DEFAULT_EMULATED_CAPABILITIES,
     ) -> None:
         #: 桥接自己能完整承载的能力。默认取 T25 的清单（只含真正实现了的两项）；
         #: 后续任务落地新执行器时从构造参数注入，不必改这里。
@@ -308,29 +311,19 @@ def validate_tool_choice(payload: Mapping[str, Any]) -> CapabilityError | None:
 
     if isinstance(choice, str):
         # 字面量与具体工具名都是字符串；空串没有任何含义，判非法。
-        return None if choice.strip() else _invalid_tool_choice(
-            "tool_choice must not be an empty string"
-        )
+        return None if choice.strip() else _invalid_tool_choice("tool_choice must not be an empty string")
 
     if isinstance(choice, Mapping):
         kind = str(choice.get("type") or "")
         if not kind:
             return _invalid_tool_choice("tool_choice object requires a 'type' field")
         if kind not in _TOOL_CHOICE_OBJECT_TYPES:
-            return _invalid_tool_choice(
-                "unknown tool_choice type '{0}'".format(kind)
-            )
+            return _invalid_tool_choice("unknown tool_choice type '{0}'".format(kind))
         if kind == "function" and not _function_name(choice):
-            return _invalid_tool_choice(
-                "tool_choice type 'function' requires function.name"
-            )
+            return _invalid_tool_choice("tool_choice type 'function' requires function.name")
         return None
 
-    return _invalid_tool_choice(
-        "tool_choice must be a string or an object, got {0}".format(
-            type(choice).__name__
-        )
-    )
+    return _invalid_tool_choice("tool_choice must be a string or an object, got {0}".format(type(choice).__name__))
 
 
 def _function_name(choice: Mapping[str, Any]) -> str:

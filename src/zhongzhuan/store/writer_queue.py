@@ -7,6 +7,7 @@ multi-VALUES ``INSERT`` syntax is shared by SQLite and TiDB.
 
 The writer is append-only: it never issues ``UPDATE`` / ``DELETE``.
 """
+
 from __future__ import annotations
 
 from typing import Any, Sequence
@@ -47,9 +48,7 @@ class BatchWriter:
         rows = self._buffer
         self._buffer = []
         n = len(rows)
-        placeholders = ", ".join(
-            "(" + ",".join("?" for _ in self._columns) + ")" for _ in rows
-        )
+        placeholders = ", ".join("(" + ",".join("?" for _ in self._columns) + ")" for _ in rows)
         cols = ", ".join(self._columns)
         sql = f"INSERT INTO {self._table} ({cols}) VALUES {placeholders}"
         params = tuple(v for row in rows for v in row)

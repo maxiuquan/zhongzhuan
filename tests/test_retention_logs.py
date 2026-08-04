@@ -7,6 +7,7 @@ Covers:
   assert the surviving row count.
 * The periodic scheduler actually deletes expired rows and stops cleanly.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -58,11 +59,12 @@ def _seed_logs(store: Store, days_span: int = 30, count: int = 100) -> None:
         # i in [0, count): offset 0..days_span days into the past.
         offset = int((i / count) * days_span * _DAY)
         ts = now - offset
-        _run(store.execute(
-            "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id) "
-            "VALUES(?,?,?,?,?)",
-            (ts, "gpt-4o", 200, 10, f"req-{i}"),
-        ))
+        _run(
+            store.execute(
+                "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id) VALUES(?,?,?,?,?)",
+                (ts, "gpt-4o", 200, 10, f"req-{i}"),
+            )
+        )
 
 
 def _count(store: Store) -> int:
@@ -85,16 +87,18 @@ def test_sqlite_cleanup_removes_old_rows(sqlite_store):
 
 def test_sqlite_cleanup_keeps_recent_rows(sqlite_store):
     now = Store.now()
-    _run(sqlite_store.execute(
-        "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id) "
-        "VALUES(?,?,?,?,?)",
-        (now - 1 * _DAY, "gpt-4o", 200, 10, "req-recent"),
-    ))
-    _run(sqlite_store.execute(
-        "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id) "
-        "VALUES(?,?,?,?,?)",
-        (now - 20 * _DAY, "gpt-4o", 200, 10, "req-old"),
-    ))
+    _run(
+        sqlite_store.execute(
+            "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id) VALUES(?,?,?,?,?)",
+            (now - 1 * _DAY, "gpt-4o", 200, 10, "req-recent"),
+        )
+    )
+    _run(
+        sqlite_store.execute(
+            "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id) VALUES(?,?,?,?,?)",
+            (now - 20 * _DAY, "gpt-4o", 200, 10, "req-old"),
+        )
+    )
     deleted = _run(cleanup_old_logs(sqlite_store, retention_days=14))
     assert deleted == 1
     assert _count(sqlite_store) == 1
@@ -109,9 +113,13 @@ def test_sqlite_cleanup_zero_days_noop(sqlite_store):
 
 def test_sqlite_batch_size_bounds_single_pass(sqlite_store):
     _seed_logs(sqlite_store, days_span=30, count=100)
-    deleted = _run(retention.cleanup_old_logs(
-        sqlite_store, retention_days=14, batch_size=5,
-    ))
+    deleted = _run(
+        retention.cleanup_old_logs(
+            sqlite_store,
+            retention_days=14,
+            batch_size=5,
+        )
+    )
     # 53 rows are over the cutoff; batch_size only bounds each pass, but the
     # loop keeps going until fewer than batch_size remain.
     assert deleted == 53
@@ -172,11 +180,12 @@ def test_tidb_cleanup_removes_old_rows():
     now = Store.now()
     for i in range(100):
         offset = int((i / 100) * 30 * _DAY)
-        _run(store.execute(
-            "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id) "
-            "VALUES(?,?,?,?,?)",
-            (now - offset, "gpt-4o", 200, 10, f"req-{i}"),
-        ))
+        _run(
+            store.execute(
+                "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id) VALUES(?,?,?,?,?)",
+                (now - offset, "gpt-4o", 200, 10, f"req-{i}"),
+            )
+        )
     assert len(store._rows) == 100
 
     deleted = _run(cleanup_old_logs(store, retention_days=14))
@@ -192,7 +201,9 @@ def test_scheduler_cleans_expired_logs(sqlite_store):
     assert _count(sqlite_store) == 100
 
     scheduler = RetentionScheduler(
-        sqlite_store, retention_days=14, interval_seconds=0.05,
+        sqlite_store,
+        retention_days=14,
+        interval_seconds=0.05,
     )
     _run(scheduler.start())
     try:
@@ -210,7 +221,9 @@ def test_scheduler_runs_once_immediately(sqlite_store):
     # A very large interval proves the first pass fires immediately, not after
     # the first sleep.
     scheduler = RetentionScheduler(
-        sqlite_store, retention_days=14, interval_seconds=3600,
+        sqlite_store,
+        retention_days=14,
+        interval_seconds=3600,
     )
     _run(scheduler.start())
     try:

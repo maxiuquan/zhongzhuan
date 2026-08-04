@@ -13,6 +13,7 @@ Acceptance mapping
 
 All timing is event / injectable-clock driven -- no real 120s / 2s waits.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -134,9 +135,9 @@ def _parse_frames(frames: list[bytes]) -> list[tuple[str, dict]]:
         data_lines: list[str] = []
         for line in lines:
             if line.startswith("event: "):
-                event_type = line[len("event: "):]
+                event_type = line[len("event: ") :]
             elif line.startswith("data: "):
-                data_lines.append(line[len("data: "):])
+                data_lines.append(line[len("data: ") :])
         if event_type is None:
             continue
         data = json.loads("\n".join(data_lines)) if data_lines else {}
@@ -164,7 +165,9 @@ async def test_silent_upstream_120s_heartbeats(store):
     sleeper = _make_fake_sleep(clock)
     upstream = SilentAfterFirstUpstream()
     pipeline = ResponsePipeline(
-        "resp_hb", workspace_id="t1", store=_rs(store),
+        "resp_hb",
+        workspace_id="t1",
+        store=_rs(store),
         config=PipelineConfig(heartbeat_seconds=15),
     )
     gen = pipeline.run(upstream, clock=clock, sleep=sleeper)
@@ -204,7 +207,9 @@ async def test_client_cancel_closes_upstream_quickly(store):
     cancel = asyncio.Event()
     upstream = BlockingUpstream()
     pipeline = ResponsePipeline(
-        "resp_c2", workspace_id="t1", store=_rs(store),
+        "resp_c2",
+        workspace_id="t1",
+        store=_rs(store),
         config=PipelineConfig(heartbeat_seconds=15),
     )
     gen = pipeline.run(upstream, client_cancelled=cancel, clock=clock, sleep=sleeper)
@@ -236,8 +241,12 @@ async def test_client_cancel_closes_upstream_quickly(store):
 async def test_client_cancel_does_not_mark_failure(store):
     key = KeyHealth(key_id=1, api_key="sk-test", window=SlidingWindow(0, 0))
     before = (
-        key.status, key.total_failures, key.consecutive_failures,
-        key.cooldown_until, key.recent_429_count, key.success_count,
+        key.status,
+        key.total_failures,
+        key.consecutive_failures,
+        key.cooldown_until,
+        key.recent_429_count,
+        key.success_count,
     )
 
     cancel = asyncio.Event()
@@ -255,8 +264,12 @@ async def test_client_cancel_does_not_mark_failure(store):
     await asyncio.wait_for(task, timeout=1.0)
 
     after = (
-        key.status, key.total_failures, key.consecutive_failures,
-        key.cooldown_until, key.recent_429_count, key.success_count,
+        key.status,
+        key.total_failures,
+        key.consecutive_failures,
+        key.cooldown_until,
+        key.recent_429_count,
+        key.success_count,
     )
     # Positive assertion: NOTHING about the key changed (a mark_failure call
     # would have flipped status/total_failures/cooldown and this test would
@@ -297,7 +310,9 @@ async def test_gzip_skips_sse():
         return web.Response(body=b"x" * 100, content_type="text/event-stream")
 
     req = make_mocked_request(
-        "GET", "/v1/responses", headers={"Accept-Encoding": "gzip"},
+        "GET",
+        "/v1/responses",
+        headers={"Accept-Encoding": "gzip"},
     )
     resp = await mw(req, sse_handler)
     assert "Content-Encoding" not in resp.headers
@@ -317,7 +332,9 @@ async def test_gzip_still_compresses_json_control():
         )
 
     req = make_mocked_request(
-        "GET", "/v1/chat/completions", headers={"Accept-Encoding": "gzip"},
+        "GET",
+        "/v1/chat/completions",
+        headers={"Accept-Encoding": "gzip"},
     )
     resp = await mw(req, json_handler)
     assert resp.headers.get("Content-Encoding") == "gzip"
@@ -367,10 +384,8 @@ async def test_text_truncation_compat(store):
 @pytest.mark.asyncio
 async def test_tool_truncation_compat(store):
     async def upstream():
-        yield {"type": "tool_call", "call_id": "call_1", "name": "web_search",
-               "arguments": '{"query": "北'}
-        yield {"type": "tool_call", "call_id": "call_1", "name": "web_search",
-               "arguments": '京"}'}
+        yield {"type": "tool_call", "call_id": "call_1", "name": "web_search", "arguments": '{"query": "北'}
+        yield {"type": "tool_call", "call_id": "call_1", "name": "web_search", "arguments": '京"}'}
         raise ConnectionError("upstream broke mid-arguments")
 
     pipeline = ResponsePipeline("resp_t6b", workspace_id="t1", store=_rs(store))
@@ -406,7 +421,9 @@ async def test_text_truncation_strict(store):
         raise ConnectionError("upstream broke mid-text")
 
     pipeline = ResponsePipeline(
-        "resp_t7", workspace_id="t1", store=_rs(store),
+        "resp_t7",
+        workspace_id="t1",
+        store=_rs(store),
         config=PipelineConfig(strict_terminal=True),
     )
     frames = [f async for f in pipeline.run(upstream())]
@@ -425,12 +442,13 @@ async def test_text_truncation_strict(store):
 @pytest.mark.asyncio
 async def test_tool_truncation_strict(store):
     async def upstream():
-        yield {"type": "tool_call", "call_id": "call_1", "name": "web_search",
-               "arguments": '{"query": "北'}
+        yield {"type": "tool_call", "call_id": "call_1", "name": "web_search", "arguments": '{"query": "北'}
         raise ConnectionError("upstream broke mid-arguments")
 
     pipeline = ResponsePipeline(
-        "resp_t7b", workspace_id="t1", store=_rs(store),
+        "resp_t7b",
+        workspace_id="t1",
+        store=_rs(store),
         config=PipelineConfig(strict_terminal=True),
     )
     frames = [f async for f in pipeline.run(upstream())]

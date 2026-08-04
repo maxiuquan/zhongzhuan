@@ -5,6 +5,7 @@
 判据⑤：生产模式缺 JWT secret 启动失败（R-P2-04）。
 判据⑥：无有效 key 时生产模式启动失败；开发模式可启动并告警（R-P2-05）。
 """
+
 from __future__ import annotations
 
 import yaml

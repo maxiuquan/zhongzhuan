@@ -6,6 +6,7 @@ Covers acceptance criteria (1) and (3) of T09:
   (3) an upstream error message carrying an API key never reaches the
       downstream response body (R-P1-52).
 """
+
 from __future__ import annotations
 
 import json
@@ -40,29 +41,20 @@ from zhongzhuan.proxy.protocol.responses_models import ErrorClass, TerminalReaso
 
 #: (ErrorClass, http_status, error_type, code) exactly as tabulated in §10.2.
 SPEC_TABLE = [
-    (ErrorClass.INVALID_CLIENT_REQUEST, 400, "invalid_request_error",
-     "invalid_request"),
-    (ErrorClass.UNSUPPORTED_INPUT_BLOCK, 400, "invalid_request_error",
-     "unsupported_input_block"),
-    (ErrorClass.UNSUPPORTED_TOOL_CAPABILITY, 400, "invalid_request_error",
-     "unsupported_tool"),
-    (ErrorClass.CAPABILITY_ROUTE_UNAVAILABLE, 503, "server_error",
-     "capability_route_unavailable"),
-    (ErrorClass.INVALID_TOOL_ARGUMENTS, 400, "invalid_request_error",
-     "invalid_tool_arguments"),
-    (ErrorClass.UPSTREAM_CONNECT_ERROR, 502, "server_error",
-     "upstream_connect_error"),
-    (ErrorClass.UPSTREAM_RATE_LIMITED, 429, "rate_limit_error",
-     "rate_limit_exceeded"),
+    (ErrorClass.INVALID_CLIENT_REQUEST, 400, "invalid_request_error", "invalid_request"),
+    (ErrorClass.UNSUPPORTED_INPUT_BLOCK, 400, "invalid_request_error", "unsupported_input_block"),
+    (ErrorClass.UNSUPPORTED_TOOL_CAPABILITY, 400, "invalid_request_error", "unsupported_tool"),
+    (ErrorClass.CAPABILITY_ROUTE_UNAVAILABLE, 503, "server_error", "capability_route_unavailable"),
+    (ErrorClass.INVALID_TOOL_ARGUMENTS, 400, "invalid_request_error", "invalid_tool_arguments"),
+    (ErrorClass.UPSTREAM_CONNECT_ERROR, 502, "server_error", "upstream_connect_error"),
+    (ErrorClass.UPSTREAM_RATE_LIMITED, 429, "rate_limit_error", "rate_limit_exceeded"),
     (ErrorClass.UPSTREAM_SERVER_ERROR, 502, "server_error", "upstream_error"),
-    (ErrorClass.FIRST_TOKEN_TIMEOUT, 504, "server_error",
-     "first_token_timeout"),
+    (ErrorClass.FIRST_TOKEN_TIMEOUT, 504, "server_error", "first_token_timeout"),
     (ErrorClass.READ_IDLE_TIMEOUT, 504, "server_error", "read_idle_timeout"),
     (ErrorClass.UPSTREAM_TRUNCATED, 200, "", "upstream_truncated"),
     (ErrorClass.INVALID_SSE_FRAME, 502, "server_error", "invalid_sse_frame"),
     (ErrorClass.CLIENT_DISCONNECTED, 499, "", ""),
-    (ErrorClass.INTERNAL_TRANSLATION_ERROR, 500, "server_error",
-     "internal_error"),
+    (ErrorClass.INTERNAL_TRANSLATION_ERROR, 500, "server_error", "internal_error"),
 ]
 
 
@@ -73,9 +65,7 @@ def test_exactly_fourteen_error_classes():
 
 
 @pytest.mark.parametrize("err_class,status,err_type,code", SPEC_TABLE)
-def test_error_class_maps_to_documented_status_type_and_code(
-    err_class, status, err_type, code
-):
+def test_error_class_maps_to_documented_status_type_and_code(err_class, status, err_type, code):
     """T09 criterion (1): one example per class, mapping asserted."""
     spec = get_spec(err_class)
     assert isinstance(spec, ErrorSpec)
@@ -88,9 +78,7 @@ def test_error_class_maps_to_documented_status_type_and_code(
 
 @pytest.mark.parametrize("err_class,status,err_type,code", SPEC_TABLE)
 def test_to_error_response_shape_per_class(err_class, status, err_type, code):
-    got_status, body = to_error_response(
-        err_class, "boom while calling upstream", param="tools[2].type"
-    )
+    got_status, body = to_error_response(err_class, "boom while calling upstream", param="tools[2].type")
     assert got_status == status
     if err_class in NO_BODY_ERROR_CLASSES:
         assert body == {}
@@ -107,9 +95,12 @@ def test_to_error_response_shape_per_class(err_class, status, err_type, code):
 
 
 def test_no_body_classes_are_exactly_the_two_documented_ones():
-    assert NO_BODY_ERROR_CLASSES == frozenset({
-        ErrorClass.UPSTREAM_TRUNCATED, ErrorClass.CLIENT_DISCONNECTED,
-    })
+    assert NO_BODY_ERROR_CLASSES == frozenset(
+        {
+            ErrorClass.UPSTREAM_TRUNCATED,
+            ErrorClass.CLIENT_DISCONNECTED,
+        }
+    )
 
 
 def test_client_disconnected_uses_499():
@@ -118,11 +109,9 @@ def test_client_disconnected_uses_499():
 
 
 def test_include_body_override_forces_a_valid_envelope():
-    status, body = to_error_response(
-        ErrorClass.UPSTREAM_TRUNCATED, "stream cut", include_body=True
-    )
+    status, body = to_error_response(ErrorClass.UPSTREAM_TRUNCATED, "stream cut", include_body=True)
     assert status == 200
-    assert body["error"]["type"] == "server_error"     # non-empty fallback
+    assert body["error"]["type"] == "server_error"  # non-empty fallback
     assert body["error"]["code"] == "upstream_truncated"
 
 
@@ -145,12 +134,14 @@ def test_error_payload_matches_the_documented_example():
 
 
 def test_retryable_whitelist_has_four_members():
-    assert RETRYABLE_ERROR_CLASSES == frozenset({
-        ErrorClass.UPSTREAM_CONNECT_ERROR,
-        ErrorClass.UPSTREAM_RATE_LIMITED,
-        ErrorClass.UPSTREAM_SERVER_ERROR,
-        ErrorClass.FIRST_TOKEN_TIMEOUT,
-    })
+    assert RETRYABLE_ERROR_CLASSES == frozenset(
+        {
+            ErrorClass.UPSTREAM_CONNECT_ERROR,
+            ErrorClass.UPSTREAM_RATE_LIMITED,
+            ErrorClass.UPSTREAM_SERVER_ERROR,
+            ErrorClass.FIRST_TOKEN_TIMEOUT,
+        }
+    )
     assert is_retryable(ErrorClass.UPSTREAM_RATE_LIMITED) is True
     # deltas already flushed downstream -> replay forbidden (R-P0-34)
     assert is_retryable(ErrorClass.READ_IDLE_TIMEOUT) is False
@@ -177,19 +168,14 @@ def test_terminal_reason_to_error_class_targets_are_valid():
     for reason, err_class in TERMINAL_REASON_TO_ERROR_CLASS.items():
         assert isinstance(reason, TerminalReason)
         assert err_class in ERROR_SPECS
-    assert TERMINAL_REASON_TO_ERROR_CLASS[TerminalReason.UPSTREAM_TRUNCATED] \
-        is ErrorClass.UPSTREAM_TRUNCATED
+    assert TERMINAL_REASON_TO_ERROR_CLASS[TerminalReason.UPSTREAM_TRUNCATED] is ErrorClass.UPSTREAM_TRUNCATED
     assert TerminalReason.NORMAL_FINISH not in TERMINAL_REASON_TO_ERROR_CLASS
 
 
 def test_to_incomplete_details():
-    assert to_incomplete_details(TerminalReason.UPSTREAM_TRUNCATED) == \
-        {"reason": "upstream_truncated"}
-    assert to_incomplete_details("max_tool_rounds") == \
-        {"reason": "max_tool_rounds"}
-    details = to_incomplete_details(
-        TerminalReason.MAX_OUTPUT_BUDGET, "budget hit at 200000 tokens"
-    )
+    assert to_incomplete_details(TerminalReason.UPSTREAM_TRUNCATED) == {"reason": "upstream_truncated"}
+    assert to_incomplete_details("max_tool_rounds") == {"reason": "max_tool_rounds"}
+    details = to_incomplete_details(TerminalReason.MAX_OUTPUT_BUDGET, "budget hit at 200000 tokens")
     assert details["reason"] == "max_output_budget"
     assert details["message"] == "budget hit at 200000 tokens"
 
@@ -253,8 +239,8 @@ def test_redact_is_idempotent_and_total():
 
 def test_redact_handles_empty_and_non_string():
     assert redact("") == ""
-    assert redact(None) == ""            # type: ignore[arg-type]
-    assert redact(12345) == "12345"      # type: ignore[arg-type]
+    assert redact(None) == ""  # type: ignore[arg-type]
+    assert redact(12345) == "12345"  # type: ignore[arg-type]
 
 
 def test_redact_preserves_ordinary_text():
@@ -275,11 +261,13 @@ def test_sanitize_message_collapses_whitespace():
 
 
 def test_redact_headers_masks_credentials():
-    out = redact_headers({
-        "Authorization": "Bearer sk-proj-abc123DEF456",
-        "X-Api-Key": "sk-ant-api03-XYZ987654321",
-        "Content-Type": "application/json",
-    })
+    out = redact_headers(
+        {
+            "Authorization": "Bearer sk-proj-abc123DEF456",
+            "X-Api-Key": "sk-ant-api03-XYZ987654321",
+            "Content-Type": "application/json",
+        }
+    )
     assert out["Authorization"] == REDACTED
     assert out["X-Api-Key"] == REDACTED
     assert out["Content-Type"] == "application/json"
@@ -295,9 +283,7 @@ def test_upstream_error_carrying_a_key_never_reaches_the_client():
         "(request headers: Authorization: Bearer {0})"
     ).format(api_key)
 
-    status, body = to_error_response(
-        ErrorClass.UPSTREAM_SERVER_ERROR, upstream_message
-    )
+    status, body = to_error_response(ErrorClass.UPSTREAM_SERVER_ERROR, upstream_message)
     serialized = json.dumps(body, ensure_ascii=False)
 
     assert status == 502
@@ -310,7 +296,7 @@ def test_upstream_error_carrying_a_key_never_reaches_the_client():
 
 
 def test_reasoning_text_is_not_echoed_verbatim_in_error_bodies():
-    reasoning = "Let me think step by step. " * 60   # > MAX_MESSAGE_CHARS
+    reasoning = "Let me think step by step. " * 60  # > MAX_MESSAGE_CHARS
     _, body = to_error_response(
         ErrorClass.INTERNAL_TRANSLATION_ERROR,
         "translation failed on reasoning item: " + reasoning,
@@ -325,7 +311,8 @@ def test_reasoning_text_is_not_echoed_verbatim_in_error_bodies():
 def test_every_class_redacts_its_message(err_class, _status, _type, _code):
     secret = "sk-proj-LEAKLEAKLEAK0001"
     _, body = to_error_response(
-        err_class, "upstream said: bad key {0}".format(secret),
+        err_class,
+        "upstream said: bad key {0}".format(secret),
         include_body=True,
     )
     assert secret not in json.dumps(body)

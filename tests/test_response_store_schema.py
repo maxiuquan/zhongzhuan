@@ -15,6 +15,7 @@ static MySQL/TiDB DDL both satisfy:
 Mirrors the private-loop pattern in ``test_migrations.py`` so pytest-asyncio's
 loop teardown never orphans the migration executor's connection.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -87,9 +88,7 @@ def _table_columns(db, table: str) -> list[str]:
 
 
 def _index_names(db) -> set[str]:
-    rows = _run(db.execute_fetchall(
-        "SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"
-    ))
+    rows = _run(db.execute_fetchall("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'"))
     return {r[0] for r in rows}
 
 
@@ -97,14 +96,15 @@ def _index_names(db) -> set[str]:
 # Runtime (SQLite) — what the migration engine actually produces
 # ---------------------------------------------------------------------------
 
+
 def test_v004_all_tables_present(tmp_db):
     """Fresh DB gets every ResponseStore table, no stale names."""
     db, ex = _executor(tmp_db)
     try:
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
-        rows = _run(db.execute_fetchall(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        ))
+        rows = _run(
+            db.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        )
         names = {r[0] for r in rows}
         for t in V004_TABLES:
             assert t in names, f"missing v004 table {t}"
@@ -144,21 +144,17 @@ def test_v004_idempotent(tmp_db):
     db, ex = _executor(tmp_db)
     try:
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
-        rows_before = _run(db.execute_fetchall(
-            "SELECT version FROM schema_migrations ORDER BY version"
-        ))
+        rows_before = _run(db.execute_fetchall("SELECT version FROM schema_migrations ORDER BY version"))
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
-        rows_after = _run(db.execute_fetchall(
-            "SELECT version FROM schema_migrations ORDER BY version"
-        ))
-        assert [v for v, in rows_before] == [v for v, in rows_after]
+        rows_after = _run(db.execute_fetchall("SELECT version FROM schema_migrations ORDER BY version"))
+        assert [v for (v,) in rows_before] == [v for (v,) in rows_after]
         # Table count is unchanged.
-        names_before = _run(db.execute_fetchall(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        ))
-        names_after = _run(db.execute_fetchall(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        ))
+        names_before = _run(
+            db.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        )
+        names_after = _run(
+            db.execute_fetchall("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        )
         assert {r[0] for r in names_before} == {r[0] for r in names_after}
     finally:
         _run(db.close())
@@ -167,6 +163,7 @@ def test_v004_idempotent(tmp_db):
 # ---------------------------------------------------------------------------
 # Static (MySQL / TiDB) — the dual-backend DDL strings
 # ---------------------------------------------------------------------------
+
 
 def test_mysql_ddl_every_table_has_workspace_id_and_expires_at():
     """Every MySQL CREATE TABLE carries workspace_id + expires_at."""
@@ -195,6 +192,7 @@ def test_mysql_ddl_has_expires_indexes():
 
 def test_sqlite_and_mysql_table_sets_match():
     """Both backends declare the same table set (no drift between them)."""
+
     def _tables(tuple_of_ddl):
         out = []
         for s in tuple_of_ddl:
@@ -208,9 +206,8 @@ def test_sqlite_and_mysql_table_sets_match():
 
     sqlite_tables = set(_tables(SQLITE_TABLES))
     mysql_tables = set(_tables(MYSQL_TABLES))
-    assert sqlite_tables == mysql_tables, (
-        f"backend table drift: sqlite={sqlite_tables} mysql={mysql_tables}"
-    )
+    assert sqlite_tables == mysql_tables, f"backend table drift: sqlite={sqlite_tables} mysql={mysql_tables}"
+
     # Index name sets should also match (excludes the per-table PK indexes).
     def _indexes(tuple_of_ddl):
         out = []
@@ -224,6 +221,4 @@ def test_sqlite_and_mysql_table_sets_match():
 
     sqlite_idx = _indexes(SQLITE_TABLES)
     mysql_idx = _indexes(MYSQL_TABLES)
-    assert sqlite_idx == mysql_idx, (
-        f"backend index drift: sqlite={sqlite_idx} mysql={mysql_idx}"
-    )
+    assert sqlite_idx == mysql_idx, f"backend index drift: sqlite={sqlite_idx} mysql={mysql_idx}"

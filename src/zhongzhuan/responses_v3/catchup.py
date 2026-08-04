@@ -23,6 +23,7 @@ formatting.  Sharing one log makes divergence impossible instead of unlikely.
 the stream or a prelude to live tailing is the caller's decision, and emitting
 a terminator here would make the tailing case malformed.
 """
+
 from __future__ import annotations
 
 from typing import Any, AsyncIterable
@@ -38,14 +39,20 @@ class CatchupStream:
         self._store = store
 
     async def replay(
-        self, response_id: str, *, after_seq: int = -1,
+        self,
+        response_id: str,
+        *,
+        after_seq: int = -1,
     ) -> AsyncIterable[bytes]:
         """Yield every stored event after ``after_seq``, in ``seq`` order."""
         for event in await self._store.list_events(response_id, after_seq=after_seq):
             yield sse_frame(str(event["event_type"]), dict(event["data"]))
 
     async def events(
-        self, response_id: str, *, after_seq: int = -1,
+        self,
+        response_id: str,
+        *,
+        after_seq: int = -1,
     ) -> list[dict[str, Any]]:
         """The raw ``[{seq, event_type, data}, ...]`` behind :meth:`replay`."""
         return await self._store.list_events(response_id, after_seq=after_seq)

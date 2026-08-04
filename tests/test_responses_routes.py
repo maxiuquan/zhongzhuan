@@ -10,6 +10,7 @@ unmatched methods/paths:
 6. GET /v1/responses/{id}/input_items -> INPUT_ITEMS
 7. Wrong methods / unknown sub-resources -> 405 (endpoint=None).
 """
+
 from __future__ import annotations
 
 import pytest

@@ -10,6 +10,7 @@ The output is a flat mapping of dotted field paths (``server.proxy.port``) to
 ``{"value": <redacted>, "source": <label>}`` so tests can assert *exactly one
 field at a time* is correct, and ops can eyeball the whole banner.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -32,8 +33,7 @@ SOURCE_ENV = "env"
 
 #: R-P2-06: 打开 OpenCode Free fallback（外部数据出站）时 UI 必须显示的隐私提示。
 FALLBACK_PRIVACY_NOTICE = (
-    "OpenCode Free 兜底上游会把请求数据发送到外部服务（opencode.ai），"
-    "请确认你的业务允许数据出站后再启用。"
+    "OpenCode Free 兜底上游会把请求数据发送到外部服务（opencode.ai），请确认你的业务允许数据出站后再启用。"
 )
 
 #: Field-name suffixes / prefixes that mark a value as a secret.
@@ -46,8 +46,16 @@ SECRET_FIELD_SUFFIXES = (
     "_secret_key",
 )
 SECRET_FIELD_NAMES = frozenset(
-    {"api_key", "key_value", "jwt_secret", "jwt_previous_secrets", "secret_key",
-     "password", "access_token", "admin_password"}
+    {
+        "api_key",
+        "key_value",
+        "jwt_secret",
+        "jwt_previous_secrets",
+        "secret_key",
+        "password",
+        "access_token",
+        "admin_password",
+    }
 )
 
 
@@ -246,6 +254,7 @@ def log_effective_config(
     """Log the redacted effective config at startup; returns the rendered lines."""
     if logger is None:
         from loguru import logger as _logger
+
         logger = _logger
     lines = format_effective_config(cfg, sources)
     for line in lines:

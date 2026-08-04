@@ -23,6 +23,7 @@
 测量，测量点放在「会话进行中」（跑满后允许 GC 回落），阈值 10% 为文档给定值，
 不放宽。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -64,9 +65,7 @@ def _assert_rss_growth_within(start: int, end: int, *, tolerance: float = 0.10) 
     if start <= 0:
         return  # 防御：RSS 不可用时不做硬断言
     growth = (end - start) / start
-    assert growth < tolerance, (
-        f"RSS grew {growth:.1%} (>= {tolerance:.0%}): {start} -> {end} bytes"
-    )
+    assert growth < tolerance, f"RSS grew {growth:.1%} (>= {tolerance:.0%}): {start} -> {end} bytes"
 
 
 # ---------------------------------------------------------------------------
@@ -153,9 +152,9 @@ def _parse_events(frames: list[bytes]) -> list[tuple[str, dict]]:
         data_lines: list[str] = []
         for line in text.splitlines():
             if line.startswith("event: "):
-                event_type = line[len("event: "):]
+                event_type = line[len("event: ") :]
             elif line.startswith("data: "):
-                data_lines.append(line[len("data: "):])
+                data_lines.append(line[len("data: ") :])
         if event_type is None:
             continue
         data = json.loads("\n".join(data_lines)) if data_lines else {}
@@ -166,8 +165,7 @@ def _parse_events(frames: list[bytes]) -> list[tuple[str, dict]]:
 def _terminal_event(events: list[tuple[str, dict]]) -> str | None:
     """终止事件名（completed/failed/incomplete/cancelled）或 None。"""
     for ev, _ in events:
-        if ev in ("response.completed", "response.failed",
-                  "response.incomplete", "response.cancelled"):
+        if ev in ("response.completed", "response.failed", "response.incomplete", "response.cancelled"):
             return ev
     return None
 
@@ -305,13 +303,13 @@ async def test_soak_random_injected_failures(store):
         fail_mode = None
 
         if injected < 0.25:
-            fail_mode = "429"       # 模拟 429：首 token 前 HTTP 429
+            fail_mode = "429"  # 模拟 429：首 token 前 HTTP 429
         elif injected < 0.5:
-            fail_mode = "5xx"       # 模拟 5xx：首 token 前 500
+            fail_mode = "5xx"  # 模拟 5xx：首 token 前 500
         elif injected < 0.75:
             fail_mode = "disconnect"  # 断流：中途 ConnectionError
         else:
-            fail_mode = "delay"     # 延迟：首 token 迟到（可注入 clock，不真 sleep）
+            fail_mode = "delay"  # 延迟：首 token 迟到（可注入 clock，不真 sleep）
 
         if fail_mode in ("429", "5xx"):
             # 首 chunk 前即失败 -> 连接层错误，terminal_reason 分类，不无限重试。
@@ -330,11 +328,15 @@ async def test_soak_random_injected_failures(store):
             ]  # 没有 tool_call_done、没有 finish -> 上游正常结束被当断流收尾
             events = await _run_pipeline(store, chunks, response_id=f"soak_disc_{i}")
         else:  # delay：可注入 clock 快进，模拟首 token 迟到但未超时
-            events = await _run_pipeline(store, [
-                _text("delayed answer"),
-                _tool(f"call_dly{i}", f'{{"i": {i}}}'),
-                _tool_done(f"call_dly{i}", ""),
-            ], response_id=f"soak_dly_{i}")
+            events = await _run_pipeline(
+                store,
+                [
+                    _text("delayed answer"),
+                    _tool(f"call_dly{i}", f'{{"i": {i}}}'),
+                    _tool_done(f"call_dly{i}", ""),
+                ],
+                response_id=f"soak_dly_{i}",
+            )
 
         results.append(events)
         for call_id, args in _drain_done_events(events):
@@ -354,8 +356,7 @@ async def test_soak_random_injected_failures(store):
     _assert_all_terminated(results)
     # ② 无无限重试：每个失败会话恰好一个终止事件（completed/failed 不重复）。
     for events in results:
-        terminal = [ev for ev, _ in events
-                    if ev in ("response.completed", "response.failed", "response.incomplete")]
+        terminal = [ev for ev, _ in events if ev in ("response.completed", "response.failed", "response.incomplete")]
         assert len(terminal) == 1, f"expected exactly one terminal event, got {terminal}"
     # ③ 重复工具执行 =0：仅成功完成调用的工具被执行一次。
     assert len(set(executor.executed_call_ids)) == executor.executions

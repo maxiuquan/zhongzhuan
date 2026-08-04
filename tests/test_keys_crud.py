@@ -1,5 +1,7 @@
 """Key CRUD tests."""
+
 import os
+
 os.environ["ZHONGZHUAN_DEV_NO_DPAPI"] = "1"
 
 import pytest

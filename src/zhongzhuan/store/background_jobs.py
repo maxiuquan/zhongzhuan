@@ -37,6 +37,7 @@ behaviour ``ResponseStore.lease_task`` has shipped with since T16.  An
 *expired* lease (``0 < lease_until < now``) is still refused, so the anti-steal
 intent of the rule is preserved.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -52,9 +53,7 @@ from .store import Store
 MAX_RECOVERY_ATTEMPTS: int = 2
 
 #: Terminal states of the background state machine (§4.2.4).
-TERMINAL_STATUSES: frozenset[str] = frozenset(
-    {"completed", "failed", "incomplete", "cancelled", "expired"}
-)
+TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "incomplete", "cancelled", "expired"})
 
 #: States a job can be claimed / renewed from.
 ACTIVE_STATUSES: tuple[str, ...] = ("queued", "in_progress")
@@ -62,9 +61,18 @@ ACTIVE_STATUSES: tuple[str, ...] = ("queued", "in_progress")
 #: Column order of ``background_jobs`` (v004 DDL) -- kept in sync manually
 #: because neither backend exposes a portable ``PRAGMA table_info``.
 JOB_COLUMNS: tuple[str, ...] = (
-    "task_id", "response_id", "workspace_id", "status", "created_at",
-    "updated_at", "lease_until", "cancel_requested", "max_wall_seconds",
-    "max_tool_rounds", "attempt", "expires_at",
+    "task_id",
+    "response_id",
+    "workspace_id",
+    "status",
+    "created_at",
+    "updated_at",
+    "lease_until",
+    "cancel_requested",
+    "max_wall_seconds",
+    "max_tool_rounds",
+    "attempt",
+    "expires_at",
 )
 
 #: One claim lock per underlying :class:`Store`.  Two ``BackgroundJobStore``
@@ -118,8 +126,7 @@ class BackgroundJobStore:
             " lease_until, cancel_requested, max_wall_seconds, max_tool_rounds, "
             " attempt, expires_at) "
             "VALUES (?, ?, ?, 'queued', ?, ?, 0, 0, ?, ?, 0, ?)",
-            (task_id, response_id, workspace_id, ts, ts,
-             int(max_wall_seconds), int(max_tool_rounds), int(expires_at)),
+            (task_id, response_id, workspace_id, ts, ts, int(max_wall_seconds), int(max_tool_rounds), int(expires_at)),
         )
 
     # -- claim / lease -------------------------------------------------------
@@ -169,7 +176,8 @@ class BackgroundJobStore:
                 sql += " AND task_id = ?"
                 params += (task_id,)
             row = await self._store.fetchone(
-                sql + " ORDER BY created_at, task_id LIMIT 1", params,
+                sql + " ORDER BY created_at, task_id LIMIT 1",
+                params,
             )
             if row is None:
                 await self._reap_exhausted(ts, task_id=task_id)
@@ -222,7 +230,11 @@ class BackgroundJobStore:
         return expired
 
     async def renew_lease(
-        self, task_id: str, lease_seconds: int = 300, *, now: int | None = None,
+        self,
+        task_id: str,
+        lease_seconds: int = 300,
+        *,
+        now: int | None = None,
     ) -> bool:
         """Heartbeat: push ``lease_until`` forward while the job is still ours.
 
@@ -257,8 +269,7 @@ class BackgroundJobStore:
     async def request_cancel(self, task_id: str, *, now: int | None = None) -> None:
         """Raise the cooperative cancel flag (the worker polls it per round)."""
         await self._store.execute(
-            "UPDATE background_jobs SET cancel_requested = 1, updated_at = ? "
-            "WHERE task_id = ?",
+            "UPDATE background_jobs SET cancel_requested = 1, updated_at = ? WHERE task_id = ?",
             (self._now(now), task_id),
         )
 
@@ -273,7 +284,11 @@ class BackgroundJobStore:
     # -- terminal ------------------------------------------------------------
 
     async def mark_terminal(
-        self, task_id: str, status: str, *, now: int | None = None,
+        self,
+        task_id: str,
+        status: str,
+        *,
+        now: int | None = None,
     ) -> None:
         """Set the job's status (used for both terminal and interim moves)."""
         await self._store.execute(
@@ -298,7 +313,8 @@ class BackgroundJobStore:
         ts = self._now(now)
         await self.mark_terminal(task_id, "failed", now=ts)
         row = await self._store.fetchone(
-            "SELECT response_id FROM background_jobs WHERE task_id = ?", (task_id,),
+            "SELECT response_id FROM background_jobs WHERE task_id = ?",
+            (task_id,),
         )
         response_id = str(row[0]) if row is not None and row[0] else ""
         if not response_id:
@@ -312,7 +328,10 @@ class BackgroundJobStore:
     # -- read ----------------------------------------------------------------
 
     async def get_job(
-        self, task_id: str, *, workspace_id: str = "",
+        self,
+        task_id: str,
+        *,
+        workspace_id: str = "",
     ) -> dict[str, Any] | None:
         """Return the whole row as a dict, scoped to ``workspace_id``."""
         row = await self._store.fetchone(
@@ -326,7 +345,8 @@ class BackgroundJobStore:
     async def get_job_any_tenant(self, task_id: str) -> dict[str, Any] | None:
         """Tenant-agnostic read for the worker itself (it owns every tenant)."""
         row = await self._store.fetchone(
-            "SELECT * FROM background_jobs WHERE task_id = ?", (task_id,),
+            "SELECT * FROM background_jobs WHERE task_id = ?",
+            (task_id,),
         )
         if row is None:
             return None

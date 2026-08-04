@@ -36,6 +36,7 @@ the same name cannot coexist in one directory -- the package shadows the
 module.  Ruling: the engine lives here, in ``store/migration_engine.py``;
 ``store/migrations/`` is the migration *script* package.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -257,8 +258,7 @@ class MySQLMigrationExecutor(MigrationExecutor):
 
     async def table_exists(self, table: str) -> bool:
         row = await self.fetchone(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema=DATABASE() AND table_name=?",
+            "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name=?",
             (table,),
         )
         return row is not None
@@ -372,11 +372,7 @@ class MigrationRunner:
 
     async def ensure_version_table(self) -> None:
         """Create ``schema_migrations`` if it is missing."""
-        ddl = (
-            SQLITE_VERSION_TABLE_DDL
-            if self._ex.dialect == "sqlite"
-            else MYSQL_VERSION_TABLE_DDL
-        )
+        ddl = SQLITE_VERSION_TABLE_DDL if self._ex.dialect == "sqlite" else MYSQL_VERSION_TABLE_DDL
         await self._ex.execute(ddl)
         await self._ex.commit()
 
@@ -391,9 +387,7 @@ class MigrationRunner:
         """Return ``{version: sql_digest}`` as recorded when each ran."""
         if not await self.version_table_exists():
             return {}
-        rows = await self._ex.fetchall(
-            "SELECT version, sql_digest FROM schema_migrations"
-        )
+        rows = await self._ex.fetchall("SELECT version, sql_digest FROM schema_migrations")
         return {int(r[0]): str(r[1] or "") for r in rows}
 
     async def current_version(self) -> int:
@@ -451,10 +445,7 @@ class MigrationRunner:
         report.skipped = [m.version for m in ordered if m.version in applied]
         if not pending:
             report.to_version = report.from_version
-            logger.debug(
-                f"schema up to date at version {report.from_version} "
-                f"({self._ex.dialect})"
-            )
+            logger.debug(f"schema up to date at version {report.from_version} ({self._ex.dialect})")
             return report
 
         report.backup_path = await self.backup_sqlite(report.from_version)
@@ -480,9 +471,7 @@ class MigrationRunner:
         return report
 
     # -- drift detection --------------------------------------------------- #
-    async def warn_digest_drift(
-        self, migrations: Sequence[Migration], applied: set[int]
-    ) -> int:
+    async def warn_digest_drift(self, migrations: Sequence[Migration], applied: set[int]) -> int:
         """Warn when an already-applied migration's SQL has since changed.
 
         The engine's core invariant is **same version => same schema**.  It is
@@ -539,8 +528,7 @@ class MigrationRunner:
         """Flag the drifted row in ``schema_migrations`` (best effort)."""
         try:
             await self._ex.execute(
-                "UPDATE schema_migrations SET status = ? "
-                "WHERE version = ? AND status <> ?",
+                "UPDATE schema_migrations SET status = ? WHERE version = ? AND status <> ?",
                 (STATUS_DIGEST_MISMATCH, version, STATUS_DIGEST_MISMATCH),
             )
             await self._ex.commit()
@@ -566,11 +554,7 @@ class MigrationRunner:
     ) -> None:
         """Execute a single migration inside its own transaction."""
         dialect = self._ex.dialect
-        statements = (
-            migration.baseline_statements(dialect)
-            if baseline
-            else migration.statements(dialect)
-        )
+        statements = migration.baseline_statements(dialect) if baseline else migration.statements(dialect)
         status = STATUS_BASELINED if baseline else STATUS_APPLIED
         started = time.perf_counter()
 
@@ -584,14 +568,9 @@ class MigrationRunner:
                     report.executed_statements.append((migration.version, sql))
                 except Exception as exc:
                     if self._ex.is_ignorable(exc):
-                        logger.debug(
-                            f"v{migration.version:03d} ignorable "
-                            f"({type(exc).__name__}: {exc}): {sql}"
-                        )
+                        logger.debug(f"v{migration.version:03d} ignorable ({type(exc).__name__}: {exc}): {sql}")
                         continue
-                    raise MigrationError(
-                        migration.version, migration.name, sql, exc
-                    ) from exc
+                    raise MigrationError(migration.version, migration.name, sql, exc) from exc
 
             if migration.hook is not None and (not baseline or migration.run_hook_on_baseline):
                 current_sql = f"<python hook {migration.name}>"
@@ -600,9 +579,7 @@ class MigrationRunner:
                 except MigrationError:
                     raise
                 except Exception as exc:
-                    raise MigrationError(
-                        migration.version, migration.name, current_sql, exc
-                    ) from exc
+                    raise MigrationError(migration.version, migration.name, current_sql, exc) from exc
 
             duration_ms = int((time.perf_counter() - started) * 1000)
             current_sql = "INSERT INTO schema_migrations(...)"

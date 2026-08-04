@@ -9,6 +9,7 @@ Covers :func:`zhongzhuan.proxy.protocol.translator_base.finish_translator`:
 * 验收①：模拟无 ``finish_reason`` 断流，产出含 ``response.completed`` + ``[DONE]``，
   日志含 ``terminal_reason=upstream_truncated``。
 """
+
 import asyncio
 import json
 import re
@@ -144,13 +145,11 @@ class TestCompositeFinish:
     async def test_composite_normal_stream(self):
         """上游正常流：Composite.finish_safely 走统一入口，产出 completed + [DONE]。"""
         anthropic_chunk = (
-            b'event: content_block_delta\n'
+            b"event: content_block_delta\n"
             b'data: {"type":"content_block_delta","index":0,'
             b'"delta":{"type":"text_delta","text":"hi"}}\n\n'
         )
-        composite = CompositeStreamTranslator(
-            StreamA2O(model="claude-3-5"), ResponsesStreamTranslator(model="gpt-4o")
-        )
+        composite = CompositeStreamTranslator(StreamA2O(model="claude-3-5"), ResponsesStreamTranslator(model="gpt-4o"))
         out = await composite.feed(anthropic_chunk)
         closing = await finish_translator(composite)
         all_bytes = b"".join(out + closing).decode()
@@ -162,13 +161,11 @@ class TestCompositeFinish:
         """上游截断流（无 message_stop）：仍需产出完成事件 + [DONE]。"""
         # 只喂 content_block_delta，从未发送 message_stop -> 上游未正常结束。
         anthropic_partial = (
-            b'event: content_block_delta\n'
+            b"event: content_block_delta\n"
             b'data: {"type":"content_block_delta","index":0,'
             b'"delta":{"type":"text_delta","text":"partial"}}\n\n'
         )
-        composite = CompositeStreamTranslator(
-            StreamA2O(model="claude-3-5"), ResponsesStreamTranslator(model="gpt-4o")
-        )
+        composite = CompositeStreamTranslator(StreamA2O(model="claude-3-5"), ResponsesStreamTranslator(model="gpt-4o"))
         await composite.feed(anthropic_partial)
         assert composite.done is False
         closing = await finish_translator(composite)
@@ -178,9 +175,7 @@ class TestCompositeFinish:
 
     async def test_concurrent_finish_no_runtime_warning(self):
         """并发 finish 不产生 coroutine never awaited 的 RuntimeWarning。"""
-        composite = CompositeStreamTranslator(
-            StreamA2O(model="claude-3-5"), ResponsesStreamTranslator(model="gpt-4o")
-        )
+        composite = CompositeStreamTranslator(StreamA2O(model="claude-3-5"), ResponsesStreamTranslator(model="gpt-4o"))
         # 并发触发收尾：两个协程都 await 同一 composite。
         results = await asyncio.gather(
             finish_translator(composite),
@@ -206,8 +201,7 @@ class TestAcceptanceTruncatedStream:
         """
         tr = ResponsesStreamTranslator(model="gpt-4o")
         # 喂入内容但无 finish_reason。
-        await tr.feed(_sse({"id": "c1", "choices": [{"index": 0,
-                                                      "delta": {"content": "partial"}}]}))
+        await tr.feed(_sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "partial"}}]}))
         assert tr.done is False
         closing = await finish_translator(tr)
         text = b"".join(closing).decode()
@@ -216,8 +210,8 @@ class TestAcceptanceTruncatedStream:
 
         # 验证 handler 收尾日志的 marker 已写入源码（验收①日志格式）。
         from pathlib import Path
-        handler_src = Path(
-            __file__).resolve().parents[1] / "src" / "zhongzhuan" / "proxy" / "handler.py"
+
+        handler_src = Path(__file__).resolve().parents[1] / "src" / "zhongzhuan" / "proxy" / "handler.py"
         assert "terminal_reason=upstream_truncated" in handler_src.read_text(encoding="utf-8")
 
         # 兜底路径日志：构造一个收尾会抛异常的翻译器，验证同样记录 marker。

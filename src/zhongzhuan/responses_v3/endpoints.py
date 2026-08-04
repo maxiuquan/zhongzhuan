@@ -10,6 +10,7 @@ T22 additions on ``create``: ``previous_response_id`` is resolved through the
 chain guard (R-P0-29) before anything is written, and the persisted request /
 input items are reasoning-redacted first (铁律 1 / R-P1-40).
 """
+
 from __future__ import annotations
 
 import time
@@ -75,7 +76,9 @@ async def create(
             await rs.save_input_items(response_id, input_items)
         if previous_response_id:
             await rs.save_state_chain(
-                response_id, previous_response_id, chain_depth + 1,
+                response_id,
+                previous_response_id,
+                chain_depth + 1,
                 workspace_id=workspace_id,
             )
     obj = {
@@ -103,34 +106,49 @@ async def create(
 
 
 async def retrieve(
-    rs: ResponseStore, *, workspace_id: str, response_id: str,
+    rs: ResponseStore,
+    *,
+    workspace_id: str,
+    response_id: str,
 ) -> tuple[int, dict[str, Any]]:
     rec = await rs.get_response(response_id, workspace_id=workspace_id)
     if rec is None:
         return to_error_object(
-            message=f"Response {response_id} not found", code="not_found", status=404,
+            message=f"Response {response_id} not found",
+            code="not_found",
+            status=404,
         )
     return 200, to_response_object(rec, stored=True)
 
 
 async def delete(
-    rs: ResponseStore, *, workspace_id: str, response_id: str,
+    rs: ResponseStore,
+    *,
+    workspace_id: str,
+    response_id: str,
 ) -> tuple[int, dict[str, Any]]:
     ok = await rs.delete_response(response_id, workspace_id=workspace_id)
     if not ok:
         return to_error_object(
-            message=f"Response {response_id} not found", code="not_found", status=404,
+            message=f"Response {response_id} not found",
+            code="not_found",
+            status=404,
         )
     return 200, {"id": response_id, "object": "response", "deleted": True}
 
 
 async def cancel(
-    rs: ResponseStore, *, workspace_id: str, response_id: str,
+    rs: ResponseStore,
+    *,
+    workspace_id: str,
+    response_id: str,
 ) -> tuple[int, dict[str, Any]]:
     rec = await rs.get_response(response_id, workspace_id=workspace_id)
     if rec is None:
         return to_error_object(
-            message=f"Response {response_id} not found", code="not_found", status=404,
+            message=f"Response {response_id} not found",
+            code="not_found",
+            status=404,
         )
     await rs.set_cancelled(response_id, workspace_id=workspace_id)
     rec = await rs.get_response(response_id, workspace_id=workspace_id)
@@ -138,7 +156,10 @@ async def cancel(
 
 
 async def compact(
-    rs: ResponseStore, *, workspace_id: str, body: dict[str, Any],
+    rs: ResponseStore,
+    *,
+    workspace_id: str,
+    body: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
     # Honest stub: compaction regenerates a summarised conversation via the
     # upstream, which is wired in T24/T28.  Return 501 (not 405) so the endpoint
@@ -161,7 +182,9 @@ async def input_items(
     rec = await rs.get_response(response_id, workspace_id=workspace_id)
     if rec is None:
         return to_error_object(
-            message=f"Response {response_id} not found", code="not_found", status=404,
+            message=f"Response {response_id} not found",
+            code="not_found",
+            status=404,
         )
     limit = max(1, min(int(limit), MAX_PAGE_LIMIT))
     items = await rs.list_input_items(response_id, after_seq=after, limit=limit)

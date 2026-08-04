@@ -16,6 +16,7 @@ Conventions (§10.7):
       this keeps existing string-based call sites (e.g. ``detect.py``) working
       unchanged during the incremental migration.
 """
+
 from __future__ import annotations
 
 import json
@@ -44,12 +45,12 @@ class InboundProtocol(str, Enum):
 class ResponsesEndpoint(str, Enum):
     """The six ``/v1/responses`` endpoints resolved by ``proxy/router.py``."""
 
-    CREATE = "create"              # POST   /v1/responses
-    RETRIEVE = "retrieve"          # GET    /v1/responses/{id}
-    DELETE = "delete"              # DELETE /v1/responses/{id}
-    CANCEL = "cancel"              # POST   /v1/responses/{id}/cancel
-    COMPACT = "compact"            # POST   /v1/responses/compact
-    INPUT_ITEMS = "input_items"    # GET    /v1/responses/{id}/input_items
+    CREATE = "create"  # POST   /v1/responses
+    RETRIEVE = "retrieve"  # GET    /v1/responses/{id}
+    DELETE = "delete"  # DELETE /v1/responses/{id}
+    CANCEL = "cancel"  # POST   /v1/responses/{id}/cancel
+    COMPACT = "compact"  # POST   /v1/responses/compact
+    INPUT_ITEMS = "input_items"  # GET    /v1/responses/{id}/input_items
 
 
 class ResponseStatus(str, Enum):
@@ -63,12 +64,14 @@ class ResponseStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-TERMINAL_RESPONSE_STATUSES: frozenset[ResponseStatus] = frozenset({
-    ResponseStatus.COMPLETED,
-    ResponseStatus.FAILED,
-    ResponseStatus.INCOMPLETE,
-    ResponseStatus.CANCELLED,
-})
+TERMINAL_RESPONSE_STATUSES: frozenset[ResponseStatus] = frozenset(
+    {
+        ResponseStatus.COMPLETED,
+        ResponseStatus.FAILED,
+        ResponseStatus.INCOMPLETE,
+        ResponseStatus.CANCELLED,
+    }
+)
 
 
 class ExecutionMode(str, Enum):
@@ -116,12 +119,14 @@ class EmitterState(str, Enum):
     CANCELLED = "cancelled"
 
 
-TERMINAL_EMITTER_STATES: frozenset[EmitterState] = frozenset({
-    EmitterState.COMPLETED,
-    EmitterState.FAILED,
-    EmitterState.INCOMPLETE,
-    EmitterState.CANCELLED,
-})
+TERMINAL_EMITTER_STATES: frozenset[EmitterState] = frozenset(
+    {
+        EmitterState.COMPLETED,
+        EmitterState.FAILED,
+        EmitterState.INCOMPLETE,
+        EmitterState.CANCELLED,
+    }
+)
 
 #: Legal state transitions (§4.1 "合法转换全表").  ``heartbeat()`` never
 #: transitions (R-P0-21) and therefore does not appear here.
@@ -129,15 +134,19 @@ ALLOWED_TRANSITIONS: dict[EmitterState, frozenset[EmitterState]] = {
     EmitterState.INIT: frozenset({EmitterState.QUEUED, EmitterState.CREATED}),
     EmitterState.QUEUED: frozenset({EmitterState.CREATED}),
     EmitterState.CREATED: frozenset({EmitterState.IN_PROGRESS}),
-    EmitterState.IN_PROGRESS: frozenset({
-        EmitterState.STREAMING,
-        EmitterState.COMPLETING,
-    }),
+    EmitterState.IN_PROGRESS: frozenset(
+        {
+            EmitterState.STREAMING,
+            EmitterState.COMPLETING,
+        }
+    ),
     # Self loop: delta() / open_item() / close_item() keep STREAMING.
-    EmitterState.STREAMING: frozenset({
-        EmitterState.STREAMING,
-        EmitterState.COMPLETING,
-    }),
+    EmitterState.STREAMING: frozenset(
+        {
+            EmitterState.STREAMING,
+            EmitterState.COMPLETING,
+        }
+    ),
     EmitterState.COMPLETING: frozenset(TERMINAL_EMITTER_STATES),
     EmitterState.COMPLETED: frozenset(),
     EmitterState.FAILED: frozenset(),
@@ -283,26 +292,30 @@ class TerminalReason(str, Enum):
 
 
 #: Exactly the ten circuit-breaker reasons enumerated by R-P0-32 / §9.4.
-CIRCUIT_BREAKER_REASONS: frozenset[TerminalReason] = frozenset({
-    TerminalReason.MAX_TOOL_ROUNDS,
-    TerminalReason.MAX_TOTAL_TOOL_CALLS,
-    TerminalReason.REPEATED_TOOL_CALL,
-    TerminalReason.REPEATED_TOOL_FAILURE,
-    TerminalReason.MAX_RESPONSE_TIME,
-    TerminalReason.MAX_OUTPUT_BUDGET,
-    TerminalReason.RESPONSE_CHAIN_CYCLE,
-    TerminalReason.RESPONSE_CHAIN_TOO_DEEP,
-    TerminalReason.RETRY_BUDGET_EXHAUSTED,
-    TerminalReason.BACKGROUND_BUDGET_EXHAUSTED,
-})
+CIRCUIT_BREAKER_REASONS: frozenset[TerminalReason] = frozenset(
+    {
+        TerminalReason.MAX_TOOL_ROUNDS,
+        TerminalReason.MAX_TOTAL_TOOL_CALLS,
+        TerminalReason.REPEATED_TOOL_CALL,
+        TerminalReason.REPEATED_TOOL_FAILURE,
+        TerminalReason.MAX_RESPONSE_TIME,
+        TerminalReason.MAX_OUTPUT_BUDGET,
+        TerminalReason.RESPONSE_CHAIN_CYCLE,
+        TerminalReason.RESPONSE_CHAIN_TOO_DEEP,
+        TerminalReason.RETRY_BUDGET_EXHAUSTED,
+        TerminalReason.BACKGROUND_BUDGET_EXHAUSTED,
+    }
+)
 
 #: The four timeout classes of R-P1-26; all four values differ (T28-4).
-TIMEOUT_REASONS: frozenset[TerminalReason] = frozenset({
-    TerminalReason.UPSTREAM_CONNECT,
-    TerminalReason.FIRST_TOKEN_TIMEOUT,
-    TerminalReason.READ_IDLE_TIMEOUT,
-    TerminalReason.MAX_RESPONSE_TIME,
-})
+TIMEOUT_REASONS: frozenset[TerminalReason] = frozenset(
+    {
+        TerminalReason.UPSTREAM_CONNECT,
+        TerminalReason.FIRST_TOKEN_TIMEOUT,
+        TerminalReason.READ_IDLE_TIMEOUT,
+        TerminalReason.MAX_RESPONSE_TIME,
+    }
+)
 
 #: Reasons that must be reported through ``incomplete_details.reason`` rather
 #: than an HTTP error body (compatibility mode, Q2).
@@ -344,17 +357,19 @@ class ItemType(str, Enum):
 
 
 #: Item types produced by hosted tools -- never generated by the local bridge.
-HOSTED_TOOL_ITEM_TYPES: frozenset[ItemType] = frozenset({
-    ItemType.FILE_SEARCH_CALL,
-    ItemType.WEB_SEARCH_CALL,
-    ItemType.COMPUTER_CALL,
-    ItemType.CODE_INTERPRETER_CALL,
-    ItemType.IMAGE_GENERATION_CALL,
-    ItemType.LOCAL_SHELL_CALL,
-    ItemType.MCP_CALL,
-    ItemType.MCP_LIST_TOOLS,
-    ItemType.MCP_APPROVAL_REQUEST,
-})
+HOSTED_TOOL_ITEM_TYPES: frozenset[ItemType] = frozenset(
+    {
+        ItemType.FILE_SEARCH_CALL,
+        ItemType.WEB_SEARCH_CALL,
+        ItemType.COMPUTER_CALL,
+        ItemType.CODE_INTERPRETER_CALL,
+        ItemType.IMAGE_GENERATION_CALL,
+        ItemType.LOCAL_SHELL_CALL,
+        ItemType.MCP_CALL,
+        ItemType.MCP_LIST_TOOLS,
+        ItemType.MCP_APPROVAL_REQUEST,
+    }
+)
 
 
 class ItemStatus(str, Enum):
@@ -376,7 +391,7 @@ class NormalizedItem:
 
     id: str
     seq: int
-    item_type: str                                # ItemType value; str for forward compat
+    item_type: str  # ItemType value; str for forward compat
     role: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
     redacted: bool = False
@@ -397,9 +412,9 @@ class OutputItem:
     output_index: int
     item_type: ItemType
     status: ItemStatus = ItemStatus.IN_PROGRESS
-    role: str = ""                                # message items only
-    call_id: str = ""                             # function/tool call items only
-    name: str = ""                                # tool name
+    role: str = ""  # message items only
+    call_id: str = ""  # function/tool call items only
+    name: str = ""  # tool name
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -410,7 +425,7 @@ class HostedToolSpec:
     tool_type: str
     raw: dict[str, Any]
     required_capability: Capability
-    param_path: str = ""                          # e.g. "tools[2].type"
+    param_path: str = ""  # e.g. "tools[2].type"
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,7 +438,7 @@ class SanitizedRequest:
     into them while building.
     """
 
-    payload: dict[str, Any]                       # allowlist-constructed upstream body
+    payload: dict[str, Any]  # allowlist-constructed upstream body
     dropped_fields: list[str] = field(default_factory=list)
     normalized_call_ids: dict[str, str] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
@@ -433,7 +448,7 @@ class SanitizedRequest:
     hosted_tools: list[HostedToolSpec] = field(default_factory=list)
     required_capabilities: frozenset[Capability] = frozenset()
     reasoning_event_mode: str = ReasoningEventMode.SUMMARY_TEXT.value
-    text_format: dict[str, Any] | None = None     # Q7: consumed -> response_format
+    text_format: dict[str, Any] | None = None  # Q7: consumed -> response_format
     max_output_tokens: int | None = None
 
 
@@ -443,10 +458,22 @@ class SanitizedRequest:
 
 #: The only keys that may ever appear in an upstream Chat Completions body.
 #: Providers may **narrow** this set, never widen it.
-CHAT_BASE_ALLOWED: frozenset[str] = frozenset({
-    "model", "temperature", "top_p", "max_tokens", "stop", "stream", "tools",
-    "tool_choice", "response_format", "seed", "user", "reasoning_effort",
-})
+CHAT_BASE_ALLOWED: frozenset[str] = frozenset(
+    {
+        "model",
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "stream",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "seed",
+        "user",
+        "reasoning_effort",
+    }
+)
 
 #: Per-provider narrowing of :data:`CHAT_BASE_ALLOWED`.  T11 owns any further
 #: refinement; every value here is asserted to be a subset by the unit tests.
@@ -456,8 +483,12 @@ PROVIDER_CAPABILITIES: dict[str, frozenset[str]] = {
     # DeepSeek rejects seed/user and has no reasoning_effort knob.
     "deepseek": CHAT_BASE_ALLOWED - {"seed", "user", "reasoning_effort"},
     # Anthropic (post-translation) has no seed/response_format/reasoning_effort.
-    "anthropic": CHAT_BASE_ALLOWED - {
-        "seed", "response_format", "reasoning_effort", "user",
+    "anthropic": CHAT_BASE_ALLOWED
+    - {
+        "seed",
+        "response_format",
+        "reasoning_effort",
+        "user",
     },
 }
 

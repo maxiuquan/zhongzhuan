@@ -22,6 +22,7 @@ Two responsibilities, both mandated by §11.2 of the architecture document:
    characters are cut, otherwise cutting could leave a recognisable fragment
    of the secret in the log.
 """
+
 from __future__ import annotations
 
 import json
@@ -181,15 +182,9 @@ def sanitize_value(value: Any, *, field_name: str = "", max_chars: int = MAX_LOG
     if isinstance(value, str):
         return sanitize_text(value, field_name=field_name, max_chars=max_chars)
     if isinstance(value, list):
-        return [
-            sanitize_text(str(item), field_name=field_name, max_chars=max_chars)
-            for item in value
-        ]
+        return [sanitize_text(str(item), field_name=field_name, max_chars=max_chars) for item in value]
     if isinstance(value, Mapping):
-        return {
-            str(k): sanitize_value(v, field_name=str(k), max_chars=max_chars)
-            for k, v in value.items()
-        }
+        return {str(k): sanitize_value(v, field_name=str(k), max_chars=max_chars) for k, v in value.items()}
     return value  # bool / int / float / None -- no secret material
 
 

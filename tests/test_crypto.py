@@ -1,5 +1,7 @@
 """Crypto tests."""
+
 import os
+
 os.environ["ZHONGZHUAN_DEV_NO_DPAPI"] = "1"
 
 import pytest
@@ -11,6 +13,7 @@ from zhongzhuan.crypto import encrypt, decrypt, mask, init
 def _init_crypto(tmp_path):
     """每个测试前初始化 crypto（生成临时 secret.key）。"""
     import asyncio
+
     asyncio.run(init(tmp_path))
 
 

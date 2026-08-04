@@ -1,4 +1,5 @@
 """Rate limiter: sliding window + Key health state machine."""
+
 from __future__ import annotations
 
 import time

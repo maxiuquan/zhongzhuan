@@ -1,4 +1,5 @@
 """T20 tests: EventLog append-only + concurrency + lint (R-P0-11 / R-P1-14 / R-P1-29 / R-P1-64)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -14,10 +15,7 @@ from zhongzhuan.store.event_log import EventLog
 from zhongzhuan.store.response_store import ResponseStore
 from zhongzhuan.store.store import create_store
 
-EVENT_LOG_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "src" / "zhongzhuan" / "store" / "event_log.py"
-)
+EVENT_LOG_PATH = pathlib.Path(__file__).resolve().parent.parent / "src" / "zhongzhuan" / "store" / "event_log.py"
 
 
 @pytest.fixture
@@ -49,9 +47,7 @@ async def test_concurrent_1000_no_gaps(store):
     log = EventLog(store)
 
     async def one(i):
-        return await log.append_event(
-            response_id="r1", event_type="response.output_text.delta", data={"i": i}
-        )
+        return await log.append_event(response_id="r1", event_type="response.output_text.delta", data={"i": i})
 
     seqs = await asyncio.gather(*(one(i) for i in range(1000)))
     assert len(seqs) == 1000
@@ -90,9 +86,7 @@ async def test_reasoning_not_persisted(store):
         event_type="response.output_text.delta",
         data={"type": "response.output_text.delta", "delta": "hello"},
     )
-    row = await store.fetchone(
-        "SELECT data FROM response_events WHERE response_id = ? ORDER BY seq", ("r1",)
-    )
+    row = await store.fetchone("SELECT data FROM response_events WHERE response_id = ? ORDER BY seq", ("r1",))
     raw = row[0]
     assert "reasoning" not in raw.lower()
     assert "reasoning" not in json.loads(raw)

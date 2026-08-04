@@ -3,6 +3,7 @@
 Pure functions: translate OpenAI requests to Anthropic requests, and Anthropic
 non-streaming responses back to OpenAI format.
 """
+
 from __future__ import annotations
 
 import json
@@ -70,19 +71,23 @@ def _convert_content_o2a(content: Any) -> list[dict]:
                     except Exception:
                         media_type = "image/png"
                         data = url
-                    blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": data,
-                        },
-                    })
+                    blocks.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data,
+                            },
+                        }
+                    )
                 else:
-                    blocks.append({
-                        "type": "image",
-                        "source": {"type": "url", "url": url},
-                    })
+                    blocks.append(
+                        {
+                            "type": "image",
+                            "source": {"type": "url", "url": url},
+                        }
+                    )
         return blocks
     return [{"type": "text", "text": str(content)}]
 
@@ -122,8 +127,7 @@ def _convert_tool_choice_o2a(tool_choice: Any) -> Any:
             return {"type": "auto"}
         if tool_choice == "none":
             logger.warning(
-                "translate_request_o2a: OpenAI tool_choice='none' has no Anthropic "
-                "equivalent; mapping to {type:auto}"
+                "translate_request_o2a: OpenAI tool_choice='none' has no Anthropic equivalent; mapping to {type:auto}"
             )
             return {"type": "auto"}
         if tool_choice == "required":
@@ -172,9 +176,7 @@ def _merge_consecutive_same_role(messages: list[dict]) -> list[dict]:
     return [m for m in merged if m.get("content")]
 
 
-def translate_request_o2a(
-    body: dict, anthropic_version: str = "2023-06-01"
-) -> dict:
+def translate_request_o2a(body: dict, anthropic_version: str = "2023-06-01") -> dict:
     """Translate an OpenAI Chat Completions request body to Anthropic format.
 
     Pure function — no side effects beyond logging warnings for dropped fields.
@@ -204,14 +206,18 @@ def translate_request_o2a(
             # OpenAI tool result -> Anthropic user message with tool_result block
             tool_call_id = msg.get("tool_call_id", "")
             content_text = _content_to_text(msg.get("content"))
-            converted_messages.append({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": tool_call_id,
-                    "content": content_text,
-                }],
-            })
+            converted_messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_call_id,
+                            "content": content_text,
+                        }
+                    ],
+                }
+            )
             continue
 
         if role == "assistant":
@@ -225,17 +231,16 @@ def translate_request_o2a(
                 try:
                     args_obj = json.loads(args_str) if args_str else {}
                 except (json.JSONDecodeError, ValueError):
-                    logger.warning(
-                        "translate_request_o2a: failed to parse tool_call "
-                        "arguments, using empty object"
-                    )
+                    logger.warning("translate_request_o2a: failed to parse tool_call arguments, using empty object")
                     args_obj = {}
-                blocks.append({
-                    "type": "tool_use",
-                    "id": tc.get("id", ""),
-                    "name": fn.get("name", ""),
-                    "input": args_obj,
-                })
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "input": args_obj,
+                    }
+                )
             if blocks:
                 converted_messages.append({"role": "assistant", "content": blocks})
             continue
@@ -257,9 +262,7 @@ def translate_request_o2a(
     if "max_tokens" in body and body["max_tokens"] is not None:
         out["max_tokens"] = body["max_tokens"]
     else:
-        logger.info(
-            "translate_request_o2a: max_tokens missing, using default 4096"
-        )
+        logger.info("translate_request_o2a: max_tokens missing, using default 4096")
         out["max_tokens"] = 4096
 
     if "temperature" in body and body["temperature"] is not None:
@@ -289,8 +292,13 @@ def translate_request_o2a(
     # Dropped fields with no Anthropic equivalent.
     dropped = []
     for field in (
-        "n", "presence_penalty", "frequency_penalty", "logprobs",
-        "top_logprobs", "seed", "stream_options",
+        "n",
+        "presence_penalty",
+        "frequency_penalty",
+        "logprobs",
+        "top_logprobs",
+        "seed",
+        "stream_options",
     ):
         if field in body and body[field] is not None:
             dropped.append(field)
@@ -334,9 +342,7 @@ def translate_response_a2o(resp: dict, model: str = "") -> dict:
                 "type": "function",
                 "function": {
                     "name": t.get("name", ""),
-                    "arguments": json.dumps(
-                        t.get("input") or {}, ensure_ascii=False
-                    ),
+                    "arguments": json.dumps(t.get("input") or {}, ensure_ascii=False),
                 },
             }
             for t in tool_uses
@@ -352,6 +358,7 @@ def translate_response_a2o(resp: dict, model: str = "") -> dict:
     output_tokens = usage_in.get("output_tokens", 0) or 0
 
     import time
+
     created = int(time.time())
 
     out: dict[str, Any] = {

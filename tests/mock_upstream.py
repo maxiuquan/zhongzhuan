@@ -1,4 +1,5 @@
 """Test mock upstream server."""
+
 from __future__ import annotations
 
 import sys
@@ -7,25 +8,32 @@ from aiohttp import web
 
 async def chat_completions(request: web.Request) -> web.Response:
     auth = request.headers.get("Authorization", "")
-    return web.json_response({
-        "id": "mock",
-        "model": "x",
-        "choices": [{"message": {"role": "assistant", "content": f"echo; auth={auth}"}}],
-    })
+    return web.json_response(
+        {
+            "id": "mock",
+            "model": "x",
+            "choices": [{"message": {"role": "assistant", "content": f"echo; auth={auth}"}}],
+        }
+    )
 
 
 async def completions(request: web.Request) -> web.Response:
-    return web.json_response({
-        "id": "mock", "model": "x",
-        "choices": [{"text": "echo", "index": 0}],
-    })
+    return web.json_response(
+        {
+            "id": "mock",
+            "model": "x",
+            "choices": [{"text": "echo", "index": 0}],
+        }
+    )
 
 
 async def embeddings(request: web.Request) -> web.Response:
-    return web.json_response({
-        "data": [{"embedding": [0.0] * 128, "index": 0}],
-        "model": "x",
-    })
+    return web.json_response(
+        {
+            "data": [{"embedding": [0.0] * 128, "index": 0}],
+            "model": "x",
+        }
+    )
 
 
 def make_app() -> web.Application:

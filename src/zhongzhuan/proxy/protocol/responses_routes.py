@@ -27,11 +27,10 @@ Deviations / notes:
   is queried generically -- for now it is treated as unknown (405) until the
   official API adds it.
 """
+
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
-from typing import Any
 
 from .responses_models import ResponsesEndpoint
 
@@ -79,7 +78,7 @@ def resolve_responses_endpoint(method: str, path: str) -> RouteMatch:
     if not path.startswith(_PREFIX + "/"):
         return RouteMatch(None, reason="not_responses_path")
 
-    head = path[len(_PREFIX) + 1:]
+    head = path[len(_PREFIX) + 1 :]
     segments = [s for s in head.split("/") if s]
 
     # POST /v1/responses/compact

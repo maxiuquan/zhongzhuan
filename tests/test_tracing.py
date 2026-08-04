@@ -4,6 +4,7 @@ R-P2-09：trace span 含 5 类属性：TTFT / 每事件延迟 / 重试原因 / �
 熔断原因。OTel SDK 未安装时 :class:`Tracer` 降级为内存 recorder，测试不依赖
 真实 exporter。
 """
+
 from __future__ import annotations
 
 import time
@@ -41,11 +42,11 @@ def test_span_has_all_five_attribute_classes():
     """一个 span 注入 5 类属性后，attributes 含全部 5 类键（R-P2-09）。"""
     tracer = Tracer()
     span = tracer.start_span("stream.round_1")
-    record_ttft(span, 1234.5)                     # 1. TTFT
+    record_ttft(span, 1234.5)  # 1. TTFT
     record_event_latency(span, "output_text.delta", 42.1)  # 2. 每事件延迟
-    record_retry_reason(span, "429")              # 3. 重试原因
+    record_retry_reason(span, "429")  # 3. 重试原因
     record_capability_routing(span, "translate", reason="deepseek_reasoning")  # 4. 能力路由
-    record_breaker_reason(span, "too_many_429")   # 5. 熔断原因
+    record_breaker_reason(span, "too_many_429")  # 5. 熔断原因
     tracer.end_span(span)
 
     attrs = span.attributes

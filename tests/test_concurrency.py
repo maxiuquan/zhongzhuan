@@ -11,6 +11,7 @@ Criterion mapping
 * ⑦ a second *live* SQLite instance is detected at startup -> **startup error**
   (multi-instance SQLite is explicitly rejected by R-P1-64 / PRD §3.3 #15).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -58,9 +59,7 @@ def _p99(values: list[float]) -> float:
 # --------------------------------------------------------------------------- #
 
 
-async def _run_concurrent(
-    gate: ConcurrencyGate, n: int, *, tenant: str, model: str
-) -> tuple[bool, int]:
+async def _run_concurrent(gate: ConcurrencyGate, n: int, *, tenant: str, model: str) -> tuple[bool, int]:
     """Run *n* scoped model requests concurrently.
 
     Returns ``(all_succeeded, max_observed_active)``.
@@ -93,9 +92,7 @@ async def test_global_layer_queues_instead_of_rejecting():
 
 
 async def test_tenant_layer_serializes_within_tenant():
-    gate = ConcurrencyGate(
-        GateConfig(global_limit=100, tenant_limit=1, queue_timeout_seconds=10)
-    )
+    gate = ConcurrencyGate(GateConfig(global_limit=100, tenant_limit=1, queue_timeout_seconds=10))
     # Tenant A's only slot is taken.
     hold_a = await gate.acquire_model(tenant="ws-a", model="m")
     # A different tenant is unaffected by A's saturation.
@@ -118,9 +115,7 @@ async def test_tenant_layer_serializes_within_tenant():
 
 
 async def test_model_layer_serializes_same_model():
-    gate = ConcurrencyGate(
-        GateConfig(global_limit=100, model_limit=1, queue_timeout_seconds=10)
-    )
+    gate = ConcurrencyGate(GateConfig(global_limit=100, model_limit=1, queue_timeout_seconds=10))
     hold_m1 = await gate.acquire_model(tenant="ws-a", model="m1")
     # A different model is independent of m1's saturation.
     async with gate.model_scope(tenant="ws-a", model="m2"):
@@ -148,9 +143,7 @@ async def test_model_layer_serializes_same_model():
 async def test_queue_timeout_immediate_zero_wait():
     """An already-expired deadline fails immediately (injectable clock)."""
     clock = _FakeClock()
-    gate = ConcurrencyGate(
-        GateConfig(global_limit=1, queue_timeout_seconds=5.0), clock=clock
-    )
+    gate = ConcurrencyGate(GateConfig(global_limit=1, queue_timeout_seconds=5.0), clock=clock)
     hold = await gate.acquire_model(tenant="ws-a", model="m")  # take the slot
     with pytest.raises(QueueTimeout) as excinfo:
         await gate.acquire_model(tenant="ws-a", model="m", timeout=0.0)

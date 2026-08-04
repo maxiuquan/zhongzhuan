@@ -39,6 +39,7 @@ Every field can be overridden by an environment variable named
 Precedence is ``env > YAML > default``; :func:`resolve_timeouts` reports the
 winning source for every field so the startup banner can be audited by ops.
 """
+
 from __future__ import annotations
 
 import os
@@ -107,17 +108,13 @@ class TimeoutPolicy:
 
     def _validate(self) -> None:
         """Enforce positivity, the 300s floors and internal consistency."""
-        for name in ("connect_seconds", "first_token_seconds", "read_idle_seconds",
-                     "write_seconds", "pool_seconds"):
+        for name in ("connect_seconds", "first_token_seconds", "read_idle_seconds", "write_seconds", "pool_seconds"):
             value = getattr(self, name)
             if value <= 0:
-                raise TimeoutConfigError(
-                    f"timeouts.{name} must be > 0 seconds, got {value!r}"
-                )
+                raise TimeoutConfigError(f"timeouts.{name} must be > 0 seconds, got {value!r}")
         if self.total_seconds < 0:
             raise TimeoutConfigError(
-                f"timeouts.total_seconds must be >= 0 (0 disables the hard limit), "
-                f"got {self.total_seconds!r}"
+                f"timeouts.total_seconds must be >= 0 (0 disables the hard limit), got {self.total_seconds!r}"
             )
         if self.first_token_seconds < MIN_FIRST_TOKEN_SECONDS:
             raise TimeoutConfigError(
@@ -177,12 +174,8 @@ def _coerce_seconds(value: Any, name: str) -> float:
         try:
             return float(text)
         except ValueError as exc:
-            raise TimeoutConfigError(
-                f"timeouts.{name} must be a number, got {value!r}"
-            ) from exc
-    raise TimeoutConfigError(
-        f"timeouts.{name} must be a number, got {type(value).__name__} {value!r}"
-    )
+            raise TimeoutConfigError(f"timeouts.{name} must be a number, got {value!r}") from exc
+    raise TimeoutConfigError(f"timeouts.{name} must be a number, got {type(value).__name__} {value!r}")
 
 
 # NOTE: this module-level instance must be defined *after* ``_coerce_seconds``,
@@ -225,9 +218,7 @@ def resolve_timeouts(
 
     if yaml_section:
         if not isinstance(yaml_section, Mapping):
-            raise TimeoutConfigError(
-                f"'timeouts' must be a mapping, got {type(yaml_section).__name__}"
-            )
+            raise TimeoutConfigError(f"'timeouts' must be a mapping, got {type(yaml_section).__name__}")
         unknown = [str(k) for k in yaml_section.keys() if str(k) not in _FIELD_NAMES]
         if unknown:
             raise TimeoutConfigError(
@@ -274,6 +265,7 @@ def log_effective_timeouts(
     """
     if logger is None:
         from loguru import logger as _logger
+
         logger = _logger
     lines = format_effective_timeouts(policy, sources)
     for line in lines:

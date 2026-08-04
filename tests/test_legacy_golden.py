@@ -51,35 +51,34 @@ _CASES: list[tuple[str, str, UpstreamBehavior, dict, int]] = [
         "chat2chat_text_stream",
         "/v1/chat/completions",
         UpstreamBehavior(stream_payload=openai_text_stream()),
-        {"model": "x", "stream": True,
-         "messages": [{"role": "user", "content": "hi"}]},
+        {"model": "x", "stream": True, "messages": [{"role": "user", "content": "hi"}]},
         200,
     ),
     (
         "chat2chat_tool_stream",
         "/v1/chat/completions",
         UpstreamBehavior(stream_payload=openai_tool_stream()),
-        {"model": "x", "stream": True,
-         "messages": [{"role": "user", "content": "weather?"}],
-         "tools": [{"type": "function", "function": {
-             "name": "get_weather", "parameters": {"type": "object"}}}],
-         "tool_choice": "auto"},
+        {
+            "model": "x",
+            "stream": True,
+            "messages": [{"role": "user", "content": "weather?"}],
+            "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}],
+            "tool_choice": "auto",
+        },
         200,
     ),
     (
         "chat2chat_text_json",
         "/v1/chat/completions",
         UpstreamBehavior(json_payload=openai_text_json()),
-        {"model": "x", "stream": False,
-         "messages": [{"role": "user", "content": "hi"}]},
+        {"model": "x", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
         200,
     ),
     (
         "chat2chat_error_json",
         "/v1/chat/completions",
         UpstreamBehavior(status=400, error_body=openai_error_json()),
-        {"model": "x", "stream": False,
-         "messages": [{"role": "user", "content": "hi"}]},
+        {"model": "x", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
         400,
     ),
     # ---- Chat -> Anthropic (OpenAI client -> Anthropic upstream) ----
@@ -87,35 +86,34 @@ _CASES: list[tuple[str, str, UpstreamBehavior, dict, int]] = [
         "chat2anthropic_text_stream",
         "/v1/chat/completions",
         UpstreamBehavior(stream_payload=anthropic_text_stream()),
-        {"model": "x", "stream": True,
-         "messages": [{"role": "user", "content": "hi"}]},
+        {"model": "x", "stream": True, "messages": [{"role": "user", "content": "hi"}]},
         200,
     ),
     (
         "chat2anthropic_tool_stream",
         "/v1/chat/completions",
         UpstreamBehavior(stream_payload=anthropic_tool_stream()),
-        {"model": "x", "stream": True,
-         "messages": [{"role": "user", "content": "weather?"}],
-         "tools": [{"type": "function", "function": {
-             "name": "get_weather", "parameters": {"type": "object"}}}],
-         "tool_choice": "auto"},
+        {
+            "model": "x",
+            "stream": True,
+            "messages": [{"role": "user", "content": "weather?"}],
+            "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}],
+            "tool_choice": "auto",
+        },
         200,
     ),
     (
         "chat2anthropic_text_json",
         "/v1/chat/completions",
         UpstreamBehavior(json_payload=anthropic_text_json()),
-        {"model": "x", "stream": False,
-         "messages": [{"role": "user", "content": "hi"}]},
+        {"model": "x", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
         200,
     ),
     (
         "chat2anthropic_error_json",
         "/v1/chat/completions",
         UpstreamBehavior(status=429, error_body=anthropic_error_json()),
-        {"model": "x", "stream": False,
-         "messages": [{"role": "user", "content": "hi"}]},
+        {"model": "x", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
         429,
     ),
     # ---- Anthropic -> Chat (Anthropic client -> OpenAI upstream) ----
@@ -123,35 +121,35 @@ _CASES: list[tuple[str, str, UpstreamBehavior, dict, int]] = [
         "anthropic2chat_text_stream",
         "/v1/messages",
         UpstreamBehavior(stream_payload=openai_text_stream()),
-        {"model": "x", "stream": True, "max_tokens": 1024,
-         "messages": [{"role": "user", "content": "hi"}]},
+        {"model": "x", "stream": True, "max_tokens": 1024, "messages": [{"role": "user", "content": "hi"}]},
         200,
     ),
     (
         "anthropic2chat_tool_stream",
         "/v1/messages",
         UpstreamBehavior(stream_payload=openai_tool_stream()),
-        {"model": "x", "stream": True, "max_tokens": 1024,
-         "messages": [{"role": "user", "content": "weather?"}],
-         "tools": [{"type": "function", "function": {
-             "name": "get_weather", "parameters": {"type": "object"}}}],
-         "tool_choice": "auto"},
+        {
+            "model": "x",
+            "stream": True,
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "weather?"}],
+            "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}],
+            "tool_choice": "auto",
+        },
         200,
     ),
     (
         "anthropic2chat_text_json",
         "/v1/messages",
         UpstreamBehavior(json_payload=openai_text_json()),
-        {"model": "x", "stream": False, "max_tokens": 1024,
-         "messages": [{"role": "user", "content": "hi"}]},
+        {"model": "x", "stream": False, "max_tokens": 1024, "messages": [{"role": "user", "content": "hi"}]},
         200,
     ),
     (
         "anthropic2chat_error_json",
         "/v1/messages",
         UpstreamBehavior(status=400, error_body=openai_error_json()),
-        {"model": "x", "stream": False, "max_tokens": 1024,
-         "messages": [{"role": "user", "content": "hi"}]},
+        {"model": "x", "stream": False, "max_tokens": 1024, "messages": [{"role": "user", "content": "hi"}]},
         400,
     ),
 ]
@@ -209,12 +207,10 @@ async def _proxy_harness():
             pass
 
 
-@pytest.mark.parametrize("case_id,path,behavior,body,expected_status", _CASES,
-                         ids=_CASE_IDS)
+@pytest.mark.parametrize("case_id,path,behavior,body,expected_status", _CASES, ids=_CASE_IDS)
 @pytest.mark.asyncio
 @pytest.mark.golden
-async def test_legacy_golden(case_id, path, behavior, body, expected_status,
-                             _proxy_harness):
+async def test_legacy_golden(case_id, path, behavior, body, expected_status, _proxy_harness):
     golden = GOLDEN_DIR / f"{case_id}.sse"
     status_file = GOLDEN_DIR / f"{case_id}.sse.status"
     assert golden.exists(), f"missing golden fixture {golden}"
@@ -222,16 +218,14 @@ async def test_legacy_golden(case_id, path, behavior, body, expected_status,
     expected_status_from_file = int(status_file.read_text().strip())
 
     proxy_url, upstream_url = await _proxy_harness(behavior)
-    assert expected_status == expected_status_from_file, (
-        "test case status must match golden .status file"
-    )
+    assert expected_status == expected_status_from_file, "test case status must match golden .status file"
 
     import aiohttp
+
     async with aiohttp.ClientSession() as sess:
         async with sess.post(
             f"{proxy_url}{path}",
-            headers={"Content-Type": "application/json",
-                     "Accept": "text/event-stream"},
+            headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
             json=body,
             timeout=60.0,
         ) as resp:
@@ -239,10 +233,7 @@ async def test_legacy_golden(case_id, path, behavior, body, expected_status,
             raw = await resp.read()
 
     assert actual_status == expected_status, (
-        f"status mismatch: expected {expected_status}, got {actual_status}: "
-        f"{raw[:300]!r}"
+        f"status mismatch: expected {expected_status}, got {actual_status}: {raw[:300]!r}"
     )
     normalized = normalize_for_golden(raw)
-    assert normalized == golden.read_bytes(), (
-        f"golden mismatch for {case_id}: bytes differ from {golden.name}"
-    )
+    assert normalized == golden.read_bytes(), f"golden mismatch for {case_id}: bytes differ from {golden.name}"
