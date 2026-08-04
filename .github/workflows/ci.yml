@@ -19,6 +19,7 @@ name: CI
 #  10. lifecycle       Windows/Linux 进程级启停 + /healthz
 #  11. sdk-contract    OpenAI SDK 合约测试（Python 直连真实 ProxyServer.app()
 #                      + MockUpstream；TS 直连本地 mock server；零真实网络）
+#  12. compat-report   T38 兼容报告生成器 --check 覆盖度校验（R-P1-50）
 
 on:
   push:
@@ -277,4 +278,23 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm test
+
+  # ------------------------------------------------------------------ #
+  # 12. compat-report：T38 兼容报告覆盖度校验（R-P1-50 判据②）
+  #
+  # 以 --check 模式重跑生成器并比对提交物：drift 即失败，强制报告与
+  # 生成器状态矩阵保持一致。禁止手改 docs/v3/03-兼容报告.md。
+  # ------------------------------------------------------------------ #
+  compat-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[test]
+      - name: Regenerate compat report and check drift
+        run: python scripts/gen_compat_report.py --check
   # ------------------------------------------------------------------ #
