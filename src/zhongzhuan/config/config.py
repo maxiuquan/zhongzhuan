@@ -449,14 +449,15 @@ def load_config(
 
     # Six-layer timeout policy (T01): default < YAML < env.
     timeouts_section = yaml_data.get("timeouts") or {}
-    cfg.timeouts, cfg.timeout_sources = resolve_timeouts(timeouts_section, os.environ)
+    cfg.timeouts, _sources = resolve_timeouts(timeouts_section, os.environ)
+    object.__setattr__(cfg, "timeout_sources", _sources)
 
     # Deprecation notice for the old single-value timeout.
     if isinstance(yaml_data, dict) and "proxy_request_timeout" in (yaml_data.get("limits") or {}):
         _warn_deprecated_proxy_timeout(cfg.limits.proxy_request_timeout)
 
     # Per-field source annotation (R-P1-62 来源标注)。
-    cfg.config_sources = collect_sources(cfg, yaml_data, os.environ)
+    object.__setattr__(cfg, "config_sources", collect_sources(cfg, yaml_data, os.environ))
 
     # Fail-closed production safety checks.
     validate_production_ready(cfg, api_key_count=api_key_count)

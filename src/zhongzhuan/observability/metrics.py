@@ -56,6 +56,16 @@ class _BaseMetric:
         self.labelnames: tuple[str, ...] = tuple(labelnames)
         self._lock = threading.Lock()
 
+    # -- interface implemented by subclasses -----------------------------
+
+    def render(self) -> list[str]:
+        """Render this metric's lines in Prometheus text exposition format."""
+        raise NotImplementedError
+
+    def reset(self) -> None:
+        """Zero this metric (test isolation / config reload)."""
+        raise NotImplementedError
+
     # -- helpers ----------------------------------------------------------
 
     def _label_key(self, labels: Mapping[str, Any]) -> tuple[str, ...]:
@@ -115,6 +125,10 @@ class Counter(_BaseMetric):
             )
         return lines
 
+    def reset(self) -> None:
+        with self._lock:
+            self._values.clear()
+
 
 class Histogram(_BaseMetric):
     """A Prometheus histogram (cumulative buckets + sum + count)."""
@@ -172,6 +186,10 @@ class Histogram(_BaseMetric):
             lines.append("{0}_sum {1}".format(base, _format_number(entry[len(self._buckets) + 1])))
             lines.append("{0}_count {1}".format(base, _format_number(entry[len(self._buckets) + 2])))
         return lines
+
+    def reset(self) -> None:
+        with self._lock:
+            self._data.clear()
 
 
 def _format_number(value: float) -> str:
@@ -308,7 +326,7 @@ def render_metrics() -> str:
 def reset_metrics() -> None:
     """Zero every metric (test isolation / config reload)."""
     for metric in ALL_METRICS:
-        metric._values.clear() if isinstance(metric, Counter) else metric._data.clear()  # noqa: SLF001
+        metric.reset()
 
 
 # ---------------------------------------------------------------------------

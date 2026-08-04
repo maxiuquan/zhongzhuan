@@ -258,14 +258,14 @@ class StrictConfig(BaseModel):
 
     env: EnvMode = "development"
     server: ServerSchema = Field(default_factory=ServerSchema)
-    limits: LimitsSchema = Field(default_factory=LimitsSchema)
-    storage: StorageSchema = Field(default_factory=StorageSchema)
+    limits: LimitsSchema = Field(default_factory=LimitsSchema)  # type: ignore[arg-type]
+    storage: StorageSchema = Field(default_factory=StorageSchema)  # type: ignore[arg-type]
     windows_service: WinSvcSchema = Field(default_factory=WinSvcSchema)
-    fallback: FallbackSchema = Field(default_factory=FallbackSchema)
+    fallback: FallbackSchema = Field(default_factory=FallbackSchema)  # type: ignore[arg-type]
     hosted_tools: HostedToolsSchema = Field(default_factory=HostedToolsSchema)
     cors: CorsSchema = Field(default_factory=CorsSchema)
-    auth: AuthSchema = Field(default_factory=AuthSchema)
-    security: SecuritySchema = Field(default_factory=SecuritySchema)
+    auth: AuthSchema = Field(default_factory=AuthSchema)  # type: ignore[arg-type]
+    security: SecuritySchema = Field(default_factory=SecuritySchema)  # type: ignore[arg-type]
     #: Validated separately by ``timeouts.resolve_timeouts`` (T01 hard floors).
     timeouts: dict[str, Any] = Field(default_factory=dict)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 from aiohttp import web
 
@@ -562,7 +563,7 @@ class ProxyHandler:
                 _lg.exception("health snapshot loop error")
                 await asyncio.sleep(60)
 
-    async def __call__(self, request: web.Request) -> web.Response:
+    async def __call__(self, request: web.Request) -> web.StreamResponse:
         _request_start = time.time()
         store = self.store
 
@@ -610,8 +611,8 @@ class ProxyHandler:
 
         # Base headers (filter hop-by-hop)
         base_headers = {}
-        for k, v in request.headers.items():
-            kl = k.lower()
+        for hk, hv in request.headers.items():
+            kl = hk.lower()
             if kl not in (
                 "host",
                 "connection",
@@ -627,7 +628,7 @@ class ProxyHandler:
                 "x-forwarded-for",
                 "x-forwarded-proto",
             ):
-                base_headers[k] = v
+                base_headers[hk] = hv
 
         if not is_anthropic:
             # Keep original auth header if present
@@ -823,7 +824,7 @@ class ProxyHandler:
                         asyncio.create_task(
                             log_request(
                                 self.store,
-                                client_ip=request.remote,
+                                client_ip=request.remote or "",
                                 model_name=requested_model or "",
                                 key_id=k.key_id,
                                 status=resp.status_code,
@@ -888,8 +889,8 @@ class ProxyHandler:
                     _resp_obj = json.loads(data)
                     _usage = _resp_obj.get("usage") if isinstance(_resp_obj, dict) else None
                     if isinstance(_usage, dict):
-                        _tokens_in = int(_usage.get("prompt_tokens", _usage.get("input_tokens", 0)))
-                        _tokens_out = int(_usage.get("completion_tokens", _usage.get("output_tokens", 0)))
+                        _tokens_in = int(_usage.get("prompt_tokens") or _usage.get("input_tokens") or 0)
+                        _tokens_out = int(_usage.get("completion_tokens") or _usage.get("output_tokens") or 0)
                         k.record_tokens(_tokens_in, _tokens_out)
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
@@ -908,7 +909,7 @@ class ProxyHandler:
                     asyncio.create_task(
                         self._log_and_deduct(
                             self.store,
-                            client_ip=request.remote,
+                            client_ip=request.remote or "",
                             model_name=requested_model or "",
                             key_id=k.key_id,
                             status=resp.status_code,
@@ -948,7 +949,7 @@ class ProxyHandler:
         inbound_protocol: str,
         requested_model: str,
         session_key: str = "",
-    ) -> web.Response:
+    ) -> web.StreamResponse:
         _stream_start = time.time()
         resp = web.StreamResponse(status=200)
         resp.headers["Content-Type"] = "text/event-stream; charset=utf-8"
@@ -1148,7 +1149,7 @@ class ProxyHandler:
                             )
 
                             # Create stream translator if needed
-                            stream_translator = None
+                            stream_translator: Any = None
                             if need_translation:
                                 if inbound_protocol == "responses":
                                     # Chat Completions SSE (or Anthropic SSE) -> Responses SSE
@@ -1223,7 +1224,7 @@ class ProxyHandler:
                                 asyncio.create_task(
                                     self._log_and_deduct(
                                         self.store,
-                                        client_ip=request.remote,
+                                        client_ip=request.remote or "",
                                         model_name=requested_model or "",
                                         key_id=k.key_id,
                                         status=200,

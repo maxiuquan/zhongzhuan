@@ -20,6 +20,7 @@ import time
 
 import jwt
 from aiohttp import web
+from aiohttp.typedefs import Middleware
 
 from ..config import ConfigError
 
@@ -317,7 +318,7 @@ def _wrap(request: web.Request, resp: web.StreamResponse) -> web.StreamResponse:
     return resp
 
 
-def make_auth_middleware() -> web.middleware:
+def make_auth_middleware() -> Middleware:
     """Create the admin security middleware (JWT + CSRF + rate limit + headers)."""
 
     @web.middleware

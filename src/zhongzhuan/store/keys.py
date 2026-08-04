@@ -80,7 +80,8 @@ async def delete_key(s: Store, key_id: int) -> None:
 async def update_key(
     s: Store, key_id: int, *, label: str | None = None, enabled: bool | None = None, priority: int | None = None
 ) -> None:
-    sets, params = [], []
+    sets: list[str] = []
+    params: list[str | int] = []
     if label is not None:
         sets.append("label=?")
         params.append(label)

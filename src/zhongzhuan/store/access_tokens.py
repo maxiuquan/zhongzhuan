@@ -463,7 +463,7 @@ async def get_token_by_value(s: Store, token: str) -> AccessToken | None:
 async def verify_token(s: Store, token: str) -> bool:
     """Return ``True`` when *token* exists, is enabled and is not revoked."""
     at = await get_token_by_value(s, token)
-    return bool(at) and at.enabled and at.revoked_at == 0
+    return at is not None and at.enabled and at.revoked_at == 0
 
 
 async def touch_last_used(s: Store, token_id: int, previous: int = 0) -> None:

@@ -30,11 +30,9 @@ from typing import Any, Mapping
 
 from .store import Store
 
-_JSON = dict(ensure_ascii=False, separators=(",", ":"))
-
 
 def _dumps(obj: Any) -> str:
-    return json.dumps(obj, **_JSON) if obj is not None else ""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")) if obj is not None else ""
 
 
 def _loads(text: str, default: Any = None) -> Any:

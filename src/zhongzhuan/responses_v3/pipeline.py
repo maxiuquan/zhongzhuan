@@ -269,20 +269,20 @@ class ResponsePipeline:
 
         elif kind == "tool_call_done":
             call_id = str(chunk.get("call_id") or "")
-            acc = self._tools.get(call_id=call_id)
-            if acc is not None:
-                acc.append_arguments(str(chunk.get("arguments") or ""))
-                valid = acc.validate_arguments()
-                item_id = make_function_call_item_id(acc.call_id)
+            done_acc = self._tools.get(call_id=call_id)
+            if done_acc is not None:
+                done_acc.append_arguments(str(chunk.get("arguments") or ""))
+                valid = done_acc.validate_arguments()
+                item_id = make_function_call_item_id(done_acc.call_id)
                 if valid:
                     frames.append(
                         await self._emit(
                             "response.function_call_arguments.done",
                             {
                                 "type": "response.function_call_arguments.done",
-                                "output_index": acc.output_index,
-                                "call_id": acc.call_id,
-                                "arguments": acc.arguments,
+                                "output_index": done_acc.output_index,
+                                "call_id": done_acc.call_id,
+                                "arguments": done_acc.arguments,
                             },
                         )
                     )
@@ -291,19 +291,19 @@ class ResponsePipeline:
                             "response.output_item.done",
                             {
                                 "type": "response.output_item.done",
-                                "output_index": acc.output_index,
+                                "output_index": done_acc.output_index,
                                 "item": {
                                     "id": item_id,
                                     "type": "function_call",
                                     "status": "completed",
-                                    "call_id": acc.call_id,
-                                    "name": acc.name,
-                                    "arguments": acc.arguments,
+                                    "call_id": done_acc.call_id,
+                                    "name": done_acc.name,
+                                    "arguments": done_acc.arguments,
                                 },
                             },
                         )
                     )
-                    acc.mark_item_done()
+                    done_acc.mark_item_done()
                 else:
                     # Truncated / invalid arguments: close the item safely but
                     # NEVER emit arguments.done (R-P1-22) -- a client that
@@ -314,19 +314,19 @@ class ResponsePipeline:
                             "response.output_item.done",
                             {
                                 "type": "response.output_item.done",
-                                "output_index": acc.output_index,
+                                "output_index": done_acc.output_index,
                                 "item": {
                                     "id": item_id,
                                     "type": "function_call",
                                     "status": "incomplete",
-                                    "call_id": acc.call_id,
-                                    "name": acc.name,
-                                    "arguments": acc.arguments,
+                                    "call_id": done_acc.call_id,
+                                    "name": done_acc.name,
+                                    "arguments": done_acc.arguments,
                                 },
                             },
                         )
                     )
-                    acc.mark_item_done()
+                    done_acc.mark_item_done()
 
         # "finish" is a no-op marker: the natural-end handler sees it and
         # reports a graceful completion instead of a truncation.

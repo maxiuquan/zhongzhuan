@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -31,12 +32,9 @@ from .background_jobs import JOB_COLUMNS, BackgroundJobStore
 from .event_log import EventLog
 from .store import Store
 
-#: JSON encoding used for all stored payloads (stable, compact).
-_JSON = dict(ensure_ascii=False, separators=(",", ":"))
-
 
 def _dumps(obj: Any) -> str:
-    return json.dumps(obj, **_JSON) if obj is not None else ""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":")) if obj is not None else ""
 
 
 def _loads(text: str, default: Any = None) -> Any:
@@ -178,7 +176,7 @@ class ResponseStore:
     async def save_input_items(
         self,
         response_id: str,
-        items: list[Mapping[str, Any]],
+        items: Sequence[Mapping[str, Any]],
     ) -> None:
         for seq, item in enumerate(items):
             await self._store.execute(

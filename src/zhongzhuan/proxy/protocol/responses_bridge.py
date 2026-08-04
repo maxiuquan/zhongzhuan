@@ -404,7 +404,7 @@ class ResponsesTurnBridge:
         new_call_id = tc.get("id")
         func_name = tc.get("function", {}).get("name")
 
-        acc = self._acc.tools.get(call_id=new_call_id, source_index=tc_idx)
+        acc = self._acc.tools.get(call_id=new_call_id or "", source_index=tc_idx)
         if acc is None:
             acc = self._acc.open_tool_call(
                 call_id=new_call_id or "",

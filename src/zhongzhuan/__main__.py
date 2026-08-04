@@ -124,7 +124,7 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             kh.status = sh.status
             kh.cooldown_until = sh.cooldown_until
             kh.success_count = sh.success_count
-            kh.failure_count = sh.failure_count
+            kh.total_failures = sh.failure_count
             kh.recent_429_count = sh.recent_429_count
             # 恢复学到的更严格限额
             if sh.rpm_limit > 0 and (kh.rpm_limit == 0 or sh.rpm_limit < kh.rpm_limit):
@@ -202,8 +202,10 @@ async def _sync_fallback_models(store, cfg, model_ids: list[str]) -> list[int]:
             existing.is_fallback = True
             # 若之前被禁用（因上游消失），重新拉取到则恢复启用
             existing.enabled = True
-            await update_model(store, existing.id, existing)
-            upserted_ids.append(existing.id)
+            existing_id = existing.id
+            if existing_id is not None:
+                await update_model(store, existing_id, existing)
+                upserted_ids.append(existing_id)
         else:
             m = Model(
                 name=name,
@@ -215,7 +217,8 @@ async def _sync_fallback_models(store, cfg, model_ids: list[str]) -> list[int]:
                 enabled=True,
             )
             m = await create_model(store, m)
-            upserted_ids.append(m.id)
+            if m.id is not None:
+                upserted_ids.append(m.id)
         # 为兜底模型创建 api_key（若该模型下还没有 key）
         existing_keys = await list_keys(store, upserted_ids[-1])
         if not existing_keys:
@@ -235,7 +238,7 @@ async def _sync_fallback_models(store, cfg, model_ids: list[str]) -> list[int]:
     valid_names = {f"{prefix}{mid}" for mid in model_ids}
     for m in all_models:
         if m.is_fallback and m.name not in valid_names:
-            if m.enabled:
+            if m.enabled and m.id is not None:
                 m.enabled = False
                 await update_model(store, m.id, m)
     return upserted_ids
@@ -459,11 +462,11 @@ async def run_foreground(
         # 优雅关闭：先停止接收新请求，等待现有请求完成（最多 30s），再释放资源
         logger.info("shutting down (graceful, timeout=30s)...")
         try:
-            await asyncio.wait_for(proxy_runner.shutdown(timeout=30.0), timeout=35.0)
+            await asyncio.wait_for(proxy_runner.shutdown(), timeout=35.0)
         except asyncio.TimeoutError:
             logger.warning("proxy shutdown timed out, forcing close")
         try:
-            await asyncio.wait_for(admin_runner.shutdown(timeout=5.0), timeout=8.0)
+            await asyncio.wait_for(admin_runner.shutdown(), timeout=8.0)
         except asyncio.TimeoutError:
             logger.warning("admin shutdown timed out, forcing close")
         await proxy_runner.cleanup()

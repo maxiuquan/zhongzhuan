@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 
 from aiohttp import web
+from aiohttp.typedefs import Middleware
 
 _ALLOW_METHODS = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
 _ALLOW_HEADERS = (
@@ -56,7 +57,7 @@ def _echo_origin(origin: str, origins: list[str]) -> str:
     return origin
 
 
-def make_cors_middleware(allow_origins: list[str] | None = None) -> web.middleware:
+def make_cors_middleware(allow_origins: list[str] | None = None) -> Middleware:
     """创建 CORS 中间件。
 
     Args:

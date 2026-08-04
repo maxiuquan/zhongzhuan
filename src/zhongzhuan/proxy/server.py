@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from aiohttp import web
+from aiohttp.payload import Payload
 
 from .auth import make_proxy_auth_middleware
 from .cors import make_cors_middleware
@@ -239,7 +240,7 @@ def _make_gzip_middleware(min_size: int = 1024):
             return resp
 
         body = resp.body
-        if body is None or len(body) < min_size:
+        if body is None or isinstance(body, Payload) or len(body) < min_size:
             return resp
 
         # 只压缩 JSON / text 类响应

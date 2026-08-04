@@ -15,6 +15,7 @@ import json
 import os
 
 from aiohttp import web
+from aiohttp.typedefs import Middleware
 
 from ..store.access_tokens import get_token_by_value
 
@@ -24,7 +25,7 @@ def proxy_auth_enabled() -> bool:
     return os.getenv("ZHONGZHUAN_PROXY_AUTH", "").lower() == "true"
 
 
-def make_proxy_auth_middleware(store) -> web.middleware:
+def make_proxy_auth_middleware(store) -> Middleware:
     """Create middleware that validates access tokens for /v1/* endpoints."""
 
     @web.middleware

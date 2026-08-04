@@ -152,6 +152,12 @@ async def cancel(
         )
     await rs.set_cancelled(response_id, workspace_id=workspace_id)
     rec = await rs.get_response(response_id, workspace_id=workspace_id)
+    if rec is None:
+        return to_error_object(
+            message=f"Response {response_id} not found",
+            code="not_found",
+            status=404,
+        )
     return 200, to_response_object(rec, stored=True)
 
 
