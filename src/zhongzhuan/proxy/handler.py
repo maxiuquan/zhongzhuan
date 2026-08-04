@@ -932,12 +932,14 @@ class ProxyHandler:
             headers_list = getattr(key, "custom_headers", None) or []
         else:
             from .client_presets import get_headers
+
             headers_list = get_headers(preset_name)
 
         if not headers_list:
             return headers
 
         from .header_templates import render
+
         for name, value_tpl in headers_list:
             if name:  # 防御：跳过空 name
                 headers[name] = render(value_tpl)

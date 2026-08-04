@@ -46,13 +46,15 @@ PRESETS: dict[str, dict[str, Any]] = {
 
 #: 受控头黑名单：自定义模式下禁止设置这些头，防止误操作覆盖关键头。
 #: P0 禁止 Authorization（走 key 注入逻辑）；P1 可考虑放开。
-_FORBIDDEN_HEADERS = frozenset({
-    "content-length",
-    "transfer-encoding",
-    "host",
-    "connection",
-    "authorization",
-})
+_FORBIDDEN_HEADERS = frozenset(
+    {
+        "content-length",
+        "transfer-encoding",
+        "host",
+        "connection",
+        "authorization",
+    }
+)
 
 
 def get_headers(preset_name: str) -> list[tuple[str, str]]:

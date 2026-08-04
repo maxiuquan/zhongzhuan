@@ -126,7 +126,7 @@ async def test_sqlite_migrations_apply_all_versions(tmp_path):
     store = await SqliteStore.create(str(tmp_path / "matrix.db"))
     try:
         rows = await store.fetchall("SELECT version FROM schema_migrations ORDER BY version")
-        assert [int(r[0]) for r in rows] == [1, 3, 4, 5, 6, 7, 8]
+        assert [int(r[0]) for r in rows] == [1, 3, 4, 5, 6, 7, 8, 9]
         row = await store.fetchone("SELECT name FROM sqlite_master WHERE type='table' AND name='route_bindings'")
         assert row is not None, "route_bindings 表（v008）缺失"
         row = await store.fetchone(
@@ -285,7 +285,7 @@ async def test_backend_matrix_migration_parity(tidb_store, tmp_path):
     SQLite 已在上文独立用例断言；此处对 TiDB 断言，能连则两后端互证。
     """
     rows = await tidb_store.fetchall("SELECT version FROM schema_migrations ORDER BY version")
-    assert [int(r[0]) for r in rows] == [1, 3, 4, 5, 6, 7, 8]
+    assert [int(r[0]) for r in rows] == [1, 3, 4, 5, 6, 7, 8, 9]
     row = await tidb_store.fetchone(
         "SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='route_bindings'"
     )

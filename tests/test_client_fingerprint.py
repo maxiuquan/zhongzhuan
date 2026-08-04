@@ -35,6 +35,7 @@ from zhongzhuan.proxy.ratelimit import KeyHealth, SlidingWindow
 # header_templates.render
 # ---------------------------------------------------------------------------
 
+
 class TestRender:
     def test_no_template_returns_as_is(self):
         assert render("plain value") == "plain value"
@@ -55,7 +56,7 @@ class TestRender:
         out = render("id={{uuid}}&ts=now")
         assert out.startswith("id=")
         assert out.endswith("&ts=now")
-        body = out[len("id="):-len("&ts=now")]
+        body = out[len("id=") : -len("&ts=now")]
         uuid.UUID(body)  # 合法即不抛
 
     def test_unknown_var_preserved(self):
@@ -76,6 +77,7 @@ class TestRender:
 # ---------------------------------------------------------------------------
 # client_presets
 # ---------------------------------------------------------------------------
+
 
 class TestClientPresets:
     def test_workbuddy_preset_exists(self):
@@ -131,8 +133,15 @@ class TestClientPresets:
         assert validate_custom_header_name("   ") is not None
 
     def test_validate_custom_header_name_forbidden(self):
-        for h in ("Authorization", "authorization", "Host", "host",
-                  "Content-Length", "Transfer-Encoding", "Connection"):
+        for h in (
+            "Authorization",
+            "authorization",
+            "Host",
+            "host",
+            "Content-Length",
+            "Transfer-Encoding",
+            "Connection",
+        ):
             assert validate_custom_header_name(h) is not None, h
 
 
@@ -178,6 +187,7 @@ class TestParseCustomHeaders:
 # ProxyHandler._apply_client_fingerprint
 # ---------------------------------------------------------------------------
 
+
 def _make_key(preset: str = "", custom: list[tuple[str, str]] | None = None) -> KeyHealth:
     """构造测试用 KeyHealth。"""
     return KeyHealth(
@@ -192,6 +202,7 @@ def _make_key(preset: str = "", custom: list[tuple[str, str]] | None = None) -> 
 def _make_handler():
     """构造一个最小 ProxyHandler 实例（只需 _apply_client_fingerprint 方法）。"""
     from zhongzhuan.proxy.handler import ProxyHandler
+
     return ProxyHandler.__new__(ProxyHandler)
 
 
@@ -275,44 +286,56 @@ class TestApplyClientFingerprint:
 # DB 迁移 + Model CRUD 往返
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_model_client_preset_crud_roundtrip(store):
     """v009 列 client_preset / custom_headers 的 CRUD 往返。"""
     from zhongzhuan.store.models import Model, create_model, get_model, update_model
 
-    m = await create_model(store, Model(
-        name="workbuddy-model",
-        upstream_base="https://work.freemodel.dev",
-        upstream_model="gpt-5.6-sol",
-        client_preset="workbuddy",
-        custom_headers='[{"name":"X-Stash","value":"saved"}]',
-    ))
+    m = await create_model(
+        store,
+        Model(
+            name="workbuddy-model",
+            upstream_base="https://work.freemodel.dev",
+            upstream_model="gpt-5.6-sol",
+            client_preset="workbuddy",
+            custom_headers='[{"name":"X-Stash","value":"saved"}]',
+        ),
+    )
     got = await get_model(store, "workbuddy-model")
     assert got is not None
     assert got.client_preset == "workbuddy"
     assert got.custom_headers == '[{"name":"X-Stash","value":"saved"}]'
 
     # 切换到 custom, 验证 custom_headers 可独立修改
-    await update_model(store, m.id, Model(
-        name="workbuddy-model",
-        upstream_base="https://work.freemodel.dev",
-        upstream_model="gpt-5.6-sol",
-        client_preset="custom",
-        custom_headers='[{"name":"X-Custom","value":"v1"}]',
-    ))
+    await update_model(
+        store,
+        m.id,
+        Model(
+            name="workbuddy-model",
+            upstream_base="https://work.freemodel.dev",
+            upstream_model="gpt-5.6-sol",
+            client_preset="custom",
+            custom_headers='[{"name":"X-Custom","value":"v1"}]',
+        ),
+    )
     got2 = await get_model(store, "workbuddy-model")
     assert got2 is not None
     assert got2.client_preset == "custom"
     assert got2.custom_headers == '[{"name":"X-Custom","value":"v1"}]'
 
     # 切换回不模拟, custom_headers 保留（不丢失）
-    await update_model(store, m.id, Model(
-        name="workbuddy-model",
-        upstream_base="https://work.freemodel.dev",
-        upstream_model="gpt-5.6-sol",
-        client_preset="",
-        custom_headers='[{"name":"X-Custom","value":"v1"}]',
-    ))
+    await update_model(
+        store,
+        m.id,
+        Model(
+            name="workbuddy-model",
+            upstream_base="https://work.freemodel.dev",
+            upstream_model="gpt-5.6-sol",
+            client_preset="",
+            custom_headers='[{"name":"X-Custom","value":"v1"}]',
+        ),
+    )
     got3 = await get_model(store, "workbuddy-model")
     assert got3 is not None
     assert got3.client_preset == ""
@@ -323,9 +346,11 @@ async def test_model_client_preset_crud_roundtrip(store):
 # 管理端 API 校验
 # ---------------------------------------------------------------------------
 
+
 class TestApiValidation:
     def _validate(self, data: dict) -> str | None:
         from zhongzhuan.admin.api_models import _validate_payload
+
         return _validate_payload(data)
 
     def test_valid_empty_preset(self):
@@ -339,33 +364,41 @@ class TestApiValidation:
 
     def test_valid_custom_with_headers(self):
         raw = '[{"name":"X-Foo","value":"bar"}]'
-        assert self._validate({"name": "m", "upstream_base": "https://x",
-                               "client_preset": "custom", "custom_headers": raw}) is None
+        assert (
+            self._validate(
+                {"name": "m", "upstream_base": "https://x", "client_preset": "custom", "custom_headers": raw}
+            )
+            is None
+        )
 
     def test_invalid_preset_name(self):
         err = self._validate({"name": "m", "upstream_base": "https://x", "client_preset": "bogus"})
         assert err is not None and "无效" in err
 
     def test_invalid_custom_headers_json(self):
-        err = self._validate({"name": "m", "upstream_base": "https://x",
-                              "client_preset": "custom", "custom_headers": "not json"})
+        err = self._validate(
+            {"name": "m", "upstream_base": "https://x", "client_preset": "custom", "custom_headers": "not json"}
+        )
         assert err is not None and "JSON" in err
 
     def test_custom_headers_not_array(self):
-        err = self._validate({"name": "m", "upstream_base": "https://x",
-                              "client_preset": "custom", "custom_headers": '{"a":1}'})
+        err = self._validate(
+            {"name": "m", "upstream_base": "https://x", "client_preset": "custom", "custom_headers": '{"a":1}'}
+        )
         assert err is not None and "数组" in err
 
     def test_custom_headers_forbidden_name(self):
         raw = '[{"name":"Authorization","value":"Bearer x"}]'
-        err = self._validate({"name": "m", "upstream_base": "https://x",
-                              "client_preset": "custom", "custom_headers": raw})
+        err = self._validate(
+            {"name": "m", "upstream_base": "https://x", "client_preset": "custom", "custom_headers": raw}
+        )
         assert err is not None and "受控头" in err
 
     def test_custom_headers_empty_name_rejected(self):
         raw = '[{"name":"","value":"x"}]'
-        err = self._validate({"name": "m", "upstream_base": "https://x",
-                              "client_preset": "custom", "custom_headers": raw})
+        err = self._validate(
+            {"name": "m", "upstream_base": "https://x", "client_preset": "custom", "custom_headers": raw}
+        )
         assert err is not None
 
     def test_missing_name_rejected(self):
