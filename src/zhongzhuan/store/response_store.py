@@ -201,7 +201,7 @@ class ResponseStore:
     async def save_output_items(
         self,
         response_id: str,
-        items: list[Mapping[str, Any]],
+        items: Sequence[Mapping[str, Any]],
     ) -> None:
         for idx, item in enumerate(items):
             await self._store.execute(

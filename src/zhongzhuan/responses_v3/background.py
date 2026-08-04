@@ -193,9 +193,7 @@ class _JobRun:
     def tool_item(self, acc: ToolCallAccumulator) -> dict[str, Any]:
         """One accumulated tool call as it must appear in ``output``."""
         return {
-            "id": acc.item_id or make_function_call_item_id_stable(
-                self.response_id, acc.output_index
-            ),
+            "id": acc.item_id or make_function_call_item_id_stable(self.response_id, acc.output_index),
             "type": "function_call",
             # ``arguments_done`` records what actually happened during the run
             # rather than re-parsing here: a fresh validation could disagree

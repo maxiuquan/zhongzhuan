@@ -393,9 +393,7 @@ async def _seed_parent_turn(astore, *, workspace_id: str, response_id: str, text
         status="completed",
         request={
             "model": "gpt-4o",
-            "input": [
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
-            ],
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}],
         },
     )
     await rs.update_status(
@@ -481,7 +479,8 @@ async def test_previous_response_id_restore_chain_reaches_upstream(astore):
 
         # 工具调用 + 工具输出被恢复（经 Chat 转换后成为 assistant tool_calls + tool 消息）。
         assert any(
-            m.get("role") == "assistant" and any(tc.get("function", {}).get("name") == "get_weather" for tc in (m.get("tool_calls") or []))
+            m.get("role") == "assistant"
+            and any(tc.get("function", {}).get("name") == "get_weather" for tc in (m.get("tool_calls") or []))
             for m in messages
         )
         assert any(
@@ -493,9 +492,7 @@ async def test_previous_response_id_restore_chain_reaches_upstream(astore):
         # 合法 arguments 被完整保留（Chat 转换后 arguments 是 JSON 字符串，
         # 直接对 blob 做子串匹配会因转义失败，改为结构化断言）。
         tool_calls_flat = [
-            tc.get("function", {}).get("arguments", "")
-            for m in messages
-            for tc in (m.get("tool_calls") or [])
+            tc.get("function", {}).get("arguments", "") for m in messages for tc in (m.get("tool_calls") or [])
         ]
         assert any(json.loads(a) == {"city": "Beijing"} for a in tool_calls_flat if a)
 

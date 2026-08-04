@@ -59,9 +59,7 @@ PROTOCOL_RESPONSES: str = "responses"
 _ANTHROPIC_STOP_EVENTS: frozenset[str] = frozenset({"message_stop"})
 
 #: Native Responses terminal events.
-_NATIVE_TERMINAL_EVENTS: frozenset[str] = frozenset(
-    {"response.completed", "response.failed", "response.incomplete"}
-)
+_NATIVE_TERMINAL_EVENTS: frozenset[str] = frozenset({"response.completed", "response.failed", "response.incomplete"})
 
 
 def _loads(data: str) -> dict[str, Any] | None:

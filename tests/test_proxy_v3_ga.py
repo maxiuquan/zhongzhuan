@@ -234,7 +234,9 @@ def _event_types(raw: bytes) -> list[str]:
 
 
 def _joined(raw: bytes, event_type: str, field: str = "delta") -> str:
-    return "".join(str(e.get(field) or "") for e in _events(raw) if e.get(field) is not None and e.get("type") == event_type)
+    return "".join(
+        str(e.get(field) or "") for e in _events(raw) if e.get(field) is not None and e.get("type") == event_type
+    )
 
 
 def _response_id(raw: bytes) -> str:
@@ -728,9 +730,9 @@ async def test_t4_tool_identity_and_arguments_survive_any_chunking(astore, strat
     "arg_pieces,label",
     [
         (('{"cit', 'y": "Bei'), "truncated_json"),
-        (('{"city": "Beijing"', ), "missing_close_brace"),
-        (("not json at all", ), "not_json"),
-        (('{"city": }', ), "syntactically_invalid"),
+        (('{"city": "Beijing"',), "missing_close_brace"),
+        (("not json at all",), "not_json"),
+        (('{"city": }',), "syntactically_invalid"),
     ],
 )
 @pytest.mark.asyncio
@@ -889,9 +891,7 @@ async def test_t7_previous_response_id_injects_history_into_upstream(astore):
     await up.start()
     p = await _start_proxy(up.url, astore)
     try:
-        status, first = await _post_json(
-            p, "/v1/responses", {"model": "gpt-4o", "input": "remember: the code is 4271"}
-        )
+        status, first = await _post_json(p, "/v1/responses", {"model": "gpt-4o", "input": "remember: the code is 4271"})
         assert status == 200, first
         rid1 = first["id"]
 
@@ -989,9 +989,7 @@ async def test_t7_instructions_are_not_inherited(astore):
     p = await _start_proxy(up.url, astore)
     try:
         marker = "ANCESTOR-ONLY-SYSTEM-PROMPT"
-        _, first = await _post_json(
-            p, "/v1/responses", {"model": "gpt-4o", "input": "hi", "instructions": marker}
-        )
+        _, first = await _post_json(p, "/v1/responses", {"model": "gpt-4o", "input": "hi", "instructions": marker})
         _, _ = await _post_json(
             p,
             "/v1/responses",
@@ -1173,11 +1171,11 @@ async def test_t8_a_background_event_log_uses_unified_vocabulary(astore):
 
         # (A4) A tool round must produce tool item events, not text deltas.
         assert "response.function_call_arguments.delta" in names or "response.output_item.added" in names, (
-            "P0-6 REGRESSION: a background tool call was flattened into text events; "
-            f"log={names}"
+            f"P0-6 REGRESSION: a background tool call was flattened into text events; log={names}"
         )
         text_deltas = [
-            e for e in events
+            e
+            for e in events
             if str((e.get("data") or {}).get("type") or e.get("event_type") or "") == "response.output_text.delta"
         ]
         empty_deltas = [e for e in text_deltas if not str((e.get("data") or {}).get("delta") or "")]
@@ -1548,11 +1546,7 @@ async def test_t10_chat_to_chat_golden_is_byte_identical(astore, tmp_path, monke
         body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
         off = await _chat_bytes(astore, up.url, body, path="/v1/chat/completions", v3="0")
         on = await _chat_bytes(astore, up.url, body, path="/v1/chat/completions", v3="1")
-        assert on == off, (
-            "v3 changed a Chat->Chat response body:\n"
-            f"v3=0: {off!r}\n"
-            f"v3=1: {on!r}"
-        )
+        assert on == off, f"v3 changed a Chat->Chat response body:\nv3=0: {off!r}\nv3=1: {on!r}"
     finally:
         await up.stop()
 
@@ -1572,11 +1566,7 @@ async def test_t10_chat_streaming_golden_is_byte_identical(astore):
         body = {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}], "stream": True}
         off = await _chat_bytes(astore, up.url, body, path="/v1/chat/completions", v3="0")
         on = await _chat_bytes(astore, up.url, body, path="/v1/chat/completions", v3="1")
-        assert on == off, (
-            "v3 changed a Chat->Chat streaming body:\n"
-            f"v3=0: {off!r}\n"
-            f"v3=1: {on!r}"
-        )
+        assert on == off, f"v3 changed a Chat->Chat streaming body:\nv3=0: {off!r}\nv3=1: {on!r}"
     finally:
         await up.stop()
 
@@ -1602,11 +1592,7 @@ async def test_t10_anthropic_messages_golden_is_byte_identical(astore):
         }
         off = await _chat_bytes(astore, up.url, body, path="/v1/messages", v3="0")
         on = await _chat_bytes(astore, up.url, body, path="/v1/messages", v3="1")
-        assert on == off, (
-            "v3 changed an Anthropic /v1/messages body:\n"
-            f"v3=0: {off!r}\n"
-            f"v3=1: {on!r}"
-        )
+        assert on == off, f"v3 changed an Anthropic /v1/messages body:\nv3=0: {off!r}\nv3=1: {on!r}"
     finally:
         await up.stop()
 

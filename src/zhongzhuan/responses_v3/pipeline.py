@@ -721,9 +721,7 @@ class ResponsePipeline:
                     # mislabelled every one of them as a truncation.
                     if not self._saw_provider_finish:
                         terminal_reason = (
-                            TerminalReason.UPSTREAM_TRUNCATED
-                            if produced
-                            else TerminalReason.UPSTREAM_CONNECT
+                            TerminalReason.UPSTREAM_TRUNCATED if produced else TerminalReason.UPSTREAM_CONNECT
                         )
                     break
         finally:

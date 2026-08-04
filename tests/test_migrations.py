@@ -684,8 +684,9 @@ def test_v003_mysql_dialect_clears_legacy_tokens_to_null(tmp_db):
     from zhongzhuan.store.migrations.v003_token_hash import MIGRATION as V003
 
     db = _run(aiosqlite.connect(tmp_db))
-    _run(db.execute(
-        """
+    _run(
+        db.execute(
+            """
         CREATE TABLE access_tokens (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             token           TEXT UNIQUE,          -- v001 UNIQUE, now nullable
@@ -705,15 +706,20 @@ def test_v003_mysql_dialect_clears_legacy_tokens_to_null(tmp_db):
             revoked_by      TEXT NOT NULL DEFAULT ''
         )
         """
-    ))
-    _run(db.execute(
-        "INSERT INTO access_tokens (token, label, enabled, created_at) VALUES (?, ?, 1, ?)",
-        ("zz-legacy-one", "legacy1", 1),
-    ))
-    _run(db.execute(
-        "INSERT INTO access_tokens (token, label, enabled, created_at) VALUES (?, ?, 1, ?)",
-        ("zz-legacy-two", "legacy2", 2),
-    ))
+        )
+    )
+    _run(
+        db.execute(
+            "INSERT INTO access_tokens (token, label, enabled, created_at) VALUES (?, ?, 1, ?)",
+            ("zz-legacy-one", "legacy1", 1),
+        )
+    )
+    _run(
+        db.execute(
+            "INSERT INTO access_tokens (token, label, enabled, created_at) VALUES (?, ?, 1, ?)",
+            ("zz-legacy-two", "legacy2", 2),
+        )
+    )
     _run(db.commit())
 
     mysql_ex = _MySqlDialectExecutor(db)
@@ -722,9 +728,7 @@ def test_v003_mysql_dialect_clears_legacy_tokens_to_null(tmp_db):
         _run(V003.hook(mysql_ex))
 
         async def _rows():
-            cur = await db.execute(
-                "SELECT token, token_prefix, token_hash FROM access_tokens ORDER BY id"
-            )
+            cur = await db.execute("SELECT token, token_prefix, token_hash FROM access_tokens ORDER BY id")
             return await cur.fetchall()
 
         rows = _run(_rows())

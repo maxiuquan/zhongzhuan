@@ -66,19 +66,16 @@ def _scan_production_signals(directory: Path) -> list[str]:
         prod_env_signals = [
             name
             for name in (
-                "zhongzhuan_tidb_",           # TiDB Cloud 生产凭据
-                "zhongzhuan_proxy_port=8443", # 生产 HTTPS 端口
-                "zhongzhuan_tls_",            # 证书 / key 路径
+                "zhongzhuan_tidb_",  # TiDB Cloud 生产凭据
+                "zhongzhuan_proxy_port=8443",  # 生产 HTTPS 端口
+                "zhongzhuan_tls_",  # 证书 / key 路径
                 "zhongzhuan_env=production",  # 显式生产模式
-                "zhongzhuan_jwt_secret",      # 生产鉴权密钥
+                "zhongzhuan_jwt_secret",  # 生产鉴权密钥
             )
             if name in env_lower
         ]
         if prod_env_signals:
-            signals.append(
-                f"{env_path}: production env overrides present "
-                f"({', '.join(sorted(prod_env_signals))})"
-            )
+            signals.append(f"{env_path}: production env overrides present ({', '.join(sorted(prod_env_signals))})")
 
     secret_path = directory / "secret.key"
     if secret_path.is_file():

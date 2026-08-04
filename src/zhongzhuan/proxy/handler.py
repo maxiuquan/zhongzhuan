@@ -679,8 +679,7 @@ class ProxyHandler:
                 # request gets to try it again (same rule as the non-stream path).
                 mark_success(key)
             _lg.info(
-                f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} "
-                f"body={error_body[:300]!r}"
+                f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} body={error_body[:300]!r}"
             )
             await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
             return web.Response(
@@ -917,7 +916,7 @@ class ProxyHandler:
     async def _prepare_v3_upstream_call(
         self,
         *,
-        request: web.Request,
+        request: web.Request | _BackgroundRequest,
         body_obj: dict,
         final_body: bytes,
         decision,
@@ -1573,9 +1572,7 @@ class ProxyHandler:
         worker = self._v3_background_worker()
         if worker is not None:
             self._bg_tasks.append(
-                asyncio.create_task(
-                    worker.start(upstream_factory=self._v3_background_upstream_factory)
-                )
+                asyncio.create_task(worker.start(upstream_factory=self._v3_background_upstream_factory))
             )
             _lg.info("[v3] background worker started")
         _lg.info(f"started {len(self._bg_tasks)} background tasks")
@@ -1700,9 +1697,7 @@ class ProxyHandler:
             # Evaluated ONCE (R-P0-22) and written to the context before any
             # dispatch, so every downstream branch — including the fallbacks
             # below — carries an honest label instead of a guess.
-            v3_ok = bool(
-                self._v3 is not None and (self._feature_flags is None or self._feature_flags.v3_enabled(ctx))
-            )
+            v3_ok = bool(self._v3 is not None and (self._feature_flags is None or self._feature_flags.v3_enabled(ctx)))
             ctx.responses_implementation = "v3" if v3_ok else "v2_emergency"
             if v3_ok:
                 # Only CREATE consumes an upstream candidate.  Store-backed

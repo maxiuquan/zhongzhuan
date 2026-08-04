@@ -152,18 +152,14 @@ class TestToolCallCloseSafety:
                             {
                                 "index": 0,
                                 "delta": {
-                                    "tool_calls": [
-                                        {"index": 0, "id": call_id, "function": {"arguments": piece}}
-                                    ]
+                                    "tool_calls": [{"index": 0, "id": call_id, "function": {"arguments": piece}}]
                                 },
                             }
                         ],
                     }
                 )
             )
-        chunks.append(
-            _sse({"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]})
-        )
+        chunks.append(_sse({"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}))
         return chunks
 
     def _events(self, text: str) -> list[dict]:
