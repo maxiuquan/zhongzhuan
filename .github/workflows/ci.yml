@@ -1,11 +1,34 @@
 name: CI
 
+# T36 (R-P2-13)：9 项 required check，全部为独立 job。
+#
+# GitHub 的 branch protection 无法在 YAML 文件内声明 "required"，只能靠
+# repo settings 里把下列 job 全部勾选为 required。新增 job 后请在
+# Settings -> Branches 里同步勾选，否则 PR 仍可绕过（诚实标注此限制）。
+#
+# job 清单：
+#   1. test            pytest（py 3.10/3.11/3.12 矩阵，skip live）
+#   2. ruff            ruff check + ruff format --check
+#   3. mypy            mypy src/zhongzhuan
+#   4. coverage        pytest + --cov + --cov-fail-under
+#   5. hypothesis      Hypothesis 属性测试（T31 判据②）
+#   6. bandit-audit    bandit -ll + pip-audit
+#   7. clean-install   wheel/sdist 干净 venv 安装（R-P0-08/09，T05）
+#   8. golden          旧协议字节级 golden 基线（T08）
+#   9. backend-matrix  SQLite 全跑 + MySQL(TiDB 兼容) service container
+#  10. lifecycle       Windows/Linux 进程级启停 + /healthz
+#
+# T37（OpenAI SDK contract tests）预留 job 位：`sdk-contract`，由 T37 补。
+
 on:
   push:
     branches: [main, master]
   pull_request:
 
 jobs:
+  # ------------------------------------------------------------------ #
+  # 1. test：主测试矩阵（skip live）
+  # ------------------------------------------------------------------ #
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -30,8 +53,46 @@ jobs:
       - name: Pytest collect-only sanity (zero errors)
         run: python -m pytest tests/ --collect-only -q --ignore=tests/test_proxy_live.py
 
-  # 旧协议字节级 golden 基线：确保搬迁 legacy 时未悄悄改变协议行为
-  golden:
+  # ------------------------------------------------------------------ #
+  # 2. ruff：lint + format（T36 / R-P2-13）
+  # ------------------------------------------------------------------ #
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] 2>/dev/null || pip install "ruff>=0.4"
+      - name: ruff check
+        run: python -m ruff check src/zhongzhuan tests/
+      - name: ruff format --check
+        run: python -m ruff format --check src/zhongzhuan tests/
+
+  # ------------------------------------------------------------------ #
+  # 3. mypy：静态类型检查（T36 / R-P2-13）
+  # ------------------------------------------------------------------ #
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] 2>/dev/null || pip install "mypy>=1.9"
+      - name: mypy
+        run: python -m mypy src/zhongzhuan
+
+  # ------------------------------------------------------------------ #
+  # 4. coverage：pytest + 覆盖率门槛（T36 / R-P2-13）
+  # ------------------------------------------------------------------ #
+  coverage:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,10 +103,52 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
-      - name: Run golden baseline tests
-        run: python -m pytest tests/test_legacy_golden.py -q -m "golden"
+      # --cov-fail-under 取当前实测值（本地 TOTAL 80%）留余量防 PR 波动误红。
+      - name: pytest with coverage
+        run: python -m pytest tests/ -q -m "not live" --cov=zhongzhuan \
+          --cov-report=term-missing --cov-fail-under=70
 
-  # clean-install：在干净 venv 下验证打包与安装（R-P0-08/09，T05）
+  # ------------------------------------------------------------------ #
+  # 5. hypothesis：Hypothesis 属性测试（T36 / R-P2-13；T31 判据②）
+  # ------------------------------------------------------------------ #
+  hypothesis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
+      - name: Hypothesis property tests
+        run: python -m pytest tests/test_responses_integration_property.py -q
+
+  # ------------------------------------------------------------------ #
+  # 6. bandit-audit：bandit + 依赖漏洞扫描（T36 / R-P2-13）
+  # ------------------------------------------------------------------ #
+  bandit-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] 2>/dev/null || pip install "bandit>=1.7" "pip-audit>=2.7"
+      # -ll：仅 High 及以上失败（当前 0 High；Medium 的 B608 是动态表名白名单
+      # 场景的误报倾向项，不阻断——诚实标注：非零 Medium 为存量）。
+      - name: bandit security scan
+        run: python -m bandit -ll -r src/zhongzhuan -c pyproject.toml
+      - name: pip-audit dependency vulnerabilities
+        run: python -m pip_audit -r requirements.txt --skip-editable
+
+  # ------------------------------------------------------------------ #
+  # 7. clean-install：wheel/sdist 干净 venv 安装（R-P0-08/09，T05）
+  # ------------------------------------------------------------------ #
   clean-install:
     runs-on: ubuntu-latest
     strategy:
@@ -72,3 +175,92 @@ jobs:
           python -m build
       - name: Requirements sync check
         run: python scripts/check_requirements_sync.py
+
+  # ------------------------------------------------------------------ #
+  # 8. golden：旧协议字节级 golden 基线（T08）
+  # ------------------------------------------------------------------ #
+  golden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
+      - name: Run golden baseline tests
+        run: python -m pytest tests/test_legacy_golden.py -q -m "golden"
+
+  # ------------------------------------------------------------------ #
+  # 9. backend-matrix：SQLite/TiDB 双后端集成（T36 / R-P2-13）
+  #
+  # SQLite 侧永远真跑；MySQL(TiDB 兼容协议) 侧由 mysql:8 service container
+  # 提供。TiDB 协议兼容 MySQL，用 MySQL 8 做 dialect 兼容代理。
+  # 测试通过 ZHONGZHUAN_TIDB_DSN 探测连接，连不上则 skip（本地无容器时）。
+  # ------------------------------------------------------------------ #
+  backend-matrix:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: zhongzhuan
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] 2>/dev/null || pip install "aiomysql>=0.2"
+      - name: Backend matrix tests (SQLite + MySQL/TiDB-compat)
+        run: |
+          python -m pytest tests/test_backend_matrix.py -q \
+            -m "backend_matrix"
+        env:
+          ZHONGZHUAN_TIDB_DSN: 127.0.0.1:3306:root:root:zhongzhuan
+
+  # ------------------------------------------------------------------ #
+  # 10. lifecycle：Windows/Linux 进程级启停 + /healthz（T36 / R-P2-13）
+  # ------------------------------------------------------------------ #
+  lifecycle:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev] 2>/dev/null || pip install -r requirements.txt
+      - name: Lifecycle start/stop + /healthz
+        run: python -m pytest tests/test_lifecycle.py -q -m "lifecycle"
+
+  # ------------------------------------------------------------------ #
+  # T37：OpenAI SDK contract tests（R-P1-49）——由 T37 补充此 job 位。
+  #   sdk-contract:
+  #     runs-on: ubuntu-latest
+  #     steps:
+  #       - uses: actions/checkout@v4
+  #       - uses: actions/setup-python@v5
+  #         with: { python-version: "3.12" }
+  #       - uses: actions/setup-node@v4
+  #         with: { node-version: "20" }
+  #       - name: Python + TypeScript SDK contract tests
+  #         run: ...
+  # ------------------------------------------------------------------ #

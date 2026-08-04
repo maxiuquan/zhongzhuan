@@ -79,6 +79,8 @@ markers = [
     "golden: 旧协议字节级 golden 基线对比",
     "live: 需要真实网络/真实上游，默认不在 CI 运行",
     "soak: 长稳 nightly（T31 判据④），默认跳过，pytest -m soak 显式运行",
+    "backend_matrix: SQLite/TiDB 双后端集成矩阵（T36 / R-P2-13）",
+    "lifecycle: 进程级启停 + /healthz 探测（T36 / R-P2-13）",
 ]
 
 [tool.ruff]
