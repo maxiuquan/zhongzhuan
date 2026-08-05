@@ -652,7 +652,7 @@ function showModelModal(model) {
     <div class="form-group"><label>上游完整地址覆盖 <span style="color:var(--text-subtle)">(留空自动拼接,可填路径或完整URL)</span></label><input id="f_upstream_path_override" placeholder="/openai/v1/chat/completions" value="${isEdit ? esc(model.upstream_path_override||"") : ""}"></div>
     <div class="form-group"><label>模型别名 <span style="color:var(--text-subtle)">(逗号分隔,客户端用别名请求时也会路由到此模型)</span></label><input id="f_aliases" placeholder="gpt-4, gpt4, chatgpt" value="${isEdit ? esc(model.aliases||"") : ""}"></div>
     <div class="form-row-3">
-      <div class="form-group"><label>上游协议</label><select id="f_protocol"><option value="openai" ${isEdit && model.protocol === "openai" ? "selected" : ""}>OpenAI</option><option value="anthropic" ${isEdit && model.protocol === "anthropic" ? "selected" : ""}>Anthropic</option></select></div>
+      <div class="form-group"><label>上游协议</label><select id="f_protocol"><option value="openai" ${isEdit && model.protocol === "openai" ? "selected" : ""}>OpenAI</option><option value="anthropic" ${isEdit && model.protocol === "anthropic" ? "selected" : ""}>Anthropic</option><option value="responses" ${isEdit && model.protocol === "responses" ? "selected" : ""}>Responses</option></select></div>
       <div class="form-group"><label>RPM 限制</label><input id="f_rpm" type="number" value="${isEdit ? model.rpm_limit : 0}"></div>
       <div class="form-group"><label>TPM 限制</label><input id="f_tpm" type="number" value="${isEdit ? model.tpm_limit : 0}"></div>
     </div>
