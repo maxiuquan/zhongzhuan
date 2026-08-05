@@ -113,3 +113,7 @@ ignore = []
 python_version = "3.10"
 ignore_missing_imports = true
 follow_imports = "silent"
+# mypy >=1.18 把 "Library stubs not installed" 拆为独立的 import-untyped
+# 错误码，不再被 ignore_missing_imports 静音（PyYAML 等无官方 stub 的库会
+# 误报）。沿用项目历史口径：缺 stub 不阻断 CI。
+disable_error_code = ["import-untyped"]

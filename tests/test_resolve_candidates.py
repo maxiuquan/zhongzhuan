@@ -13,7 +13,9 @@ from zhongzhuan.proxy.ratelimit import KeyHealth, SlidingWindow
 from zhongzhuan.proxy.retry import mark_auth_failure
 
 
-def _mk(key_id: int, model_name: str, *, model_id: int | None = None, available: bool = True, aliases: str = "") -> KeyHealth:
+def _mk(
+    key_id: int, model_name: str, *, model_id: int | None = None, available: bool = True, aliases: str = ""
+) -> KeyHealth:
     k = KeyHealth(
         key_id=key_id,
         api_key=f"sk-test-{key_id}",

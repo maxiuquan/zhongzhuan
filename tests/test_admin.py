@@ -266,11 +266,11 @@ async def test_ui_serves(store):
                 # 令牌复制：按钮按 id 调用 reveal 接口（不再把掩码当 Key 复制）
                 assert 'onclick="copyToken(${t.id})"' in text
                 assert 'api("/api/tokens/" + id + "/reveal"' in text
-                assert "document.execCommand(\"copy\")" in text
+                assert 'document.execCommand("copy")' in text
                 # 新建令牌弹窗：新布局包含完整 Key 一次性展示与复制按钮
                 assert "创建访问令牌" in text
                 assert 'id="newTokenVal"' in text
                 assert "复制 Key" in text
-                assert 'onclick="copyText(document.getElementById(\'newTokenVal\').textContent)"' in text
+                assert "onclick=\"copyText(document.getElementById('newTokenVal').textContent)\"" in text
     finally:
         await runner.cleanup()

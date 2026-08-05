@@ -284,8 +284,7 @@ def _add_security_headers(resp: web.StreamResponse) -> None:
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
     )
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
 

@@ -537,7 +537,7 @@ async function loadModels() {
   const custom = models.filter(m => !m.is_fallback);
   const fb = models.filter(m => m.is_fallback);
   const fbCollapsed = localStorage.getItem("fbModelsCollapsed") !== "0";
-  const arrow = fbCollapsed ? "\u25B6" : "\u25BC";
+  const arrow = fbCollapsed ? "\u25b6" : "\u25bc";
   let html = "";
   if (custom.length > 0) {
     html += custom.map(m => `
