@@ -17,8 +17,9 @@ from .v006_tool_executions import MIGRATION as M006
 from .v007_schema_realign import MIGRATION as M007
 from .v008_route_bindings import MIGRATION as M008
 from .v009_client_fingerprint import MIGRATION as M009
+from .v010_token_cipher import MIGRATION as M010
 
 #: Ordered migration registry.  Keep ascending by ``version``.
-MIGRATIONS: tuple[Migration, ...] = (M001, M003, M004, M005, M006, M007, M008, M009)
+MIGRATIONS: tuple[Migration, ...] = (M001, M003, M004, M005, M006, M007, M008, M009, M010)
 
 __all__ = ["MIGRATIONS", "Migration"]

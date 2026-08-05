@@ -9,6 +9,7 @@ from ..store.access_tokens import (
     create_token,
     delete_token,
     update_token,
+    reveal_token,
 )
 
 
@@ -74,7 +75,31 @@ def register_routes(app: web.Application, ctx) -> None:
         await update_token(ctx.store, token_id, **kwargs)
         return web.json_response({"ok": True})
 
+    async def reveal(request):
+        """Return the plaintext token for the copy button.
+
+        The list endpoint stays masked; the full key is only delivered here,
+        behind the same JWT + CSRF guards as every other admin write.  A token
+        created before v010 has no recoverable plaintext -- we answer 404 with
+        a clear message instead of guessing or rotating the key.
+        """
+        token_id = int(request.match_info["id"])
+        plaintext = await reveal_token(ctx.store, token_id)
+        if plaintext is None:
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "该令牌创建于安全哈希迁移之前，原始 Key 未留存，无法复制。"
+                        "可在使用该 Key 的下游客户端中复制原值后，重新创建同名令牌。",
+                        "type": "token_not_recoverable",
+                    }
+                },
+                status=404,
+            )
+        return web.json_response({"id": token_id, "token": plaintext})
+
     app.router.add_get("/api/tokens", list_)
     app.router.add_post("/api/tokens", create)
     app.router.add_delete("/api/tokens/{id}", delete)
     app.router.add_put("/api/tokens/{id}", update)
+    app.router.add_post("/api/tokens/{id}/reveal", reveal)

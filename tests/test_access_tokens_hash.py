@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import asyncio
 
-import aiosqlite
 import pytest
 
 from zhongzhuan.store.access_tokens import (
     compare_token_hash,
     create_token,
     generate_token,
-    get_token_by_value,
     hash_token,
     list_tokens,
     mask_token,
@@ -20,7 +18,6 @@ from zhongzhuan.store.access_tokens import (
     token_prefix_of,
     verify_token,
 )
-from zhongzhuan.store.schema import SCHEMA
 from zhongzhuan.store.sqlite_store import SqliteStore
 
 
@@ -43,6 +40,10 @@ def _run(coro):
 def store(tmp_path):
     db_path = str(tmp_path / "tokens.db")
     s = _run(SqliteStore.create(db_path))
+    # v010 起 create_token 需写入 AES 密文；初始化 crypto（与 conftest 一致）
+    from zhongzhuan.crypto import init as crypto_init
+
+    _run(crypto_init(tmp_path))
     yield s
     _run(s.close())
 

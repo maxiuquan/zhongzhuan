@@ -1018,7 +1018,7 @@ async function loadTokens() {
       const wl = t.model_whitelist ? '<code>' + esc(t.model_whitelist) + '</code>' : '<span style="color:var(--text-subtle)">全部</span>';
       return `<tr>
         <td>${esc(t.label)}</td>
-        <td><code class="token-value">${esc(t.token)}</code> <button class="btn small ghost" onclick="copyToken('${t.token}')">复制</button></td>
+        <td><code class="token-value">${esc(t.token)}</code> <button class="btn small ghost" onclick="copyToken(${t.id})">复制</button></td>
         <td style="min-width:160px">${quotaCell}</td>
         <td>${wl}</td>
         <td>${expiry}</td>
@@ -1028,32 +1028,112 @@ async function loadTokens() {
     }).join("");
 }
 
-function copyToken(token) { navigator.clipboard.writeText(token).then(() => alert("已复制到剪贴板")); }
+function copyToken(id) {
+  api("/api/tokens/" + id + "/reveal", {method:"POST"}).then(r => {
+    if (r === null || !r.token) { alert("复制失败：无法获取完整 Key（历史令牌可能未留存原始 Key）"); return; }
+    copyText(r.token);
+  });
+}
+
+function copyText(text) {
+  const done = () => alert("已复制到剪贴板");
+  const fallback = () => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (ok) { done(); return; }
+      alert("复制失败：浏览器不允许自动复制，请手动复制：\\n\\n" + text);
+    } catch (e) {
+      alert("复制失败：请手动复制：\\n\\n" + text);
+    }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(fallback);
+  } else {
+    fallback();
+  }
+}
 
 function showTokenModal() {
   document.getElementById("modalContent").innerHTML = `
-    <h3>创建访问令牌</h3>
-    <div class="form-group"><label>标签</label><input id="f_tlabel" placeholder="例如:Trae 专用"></div>
-    <div class="form-row">
-      <div class="form-group"><label>Token 配额</label><input id="f_quota" type="number" value="-1"><div class="form-hint">-1 = 无限,正数 = 限制总 token 数</div></div>
-      <div class="form-group"><label>有效期 (天)</label><input id="f_expires" type="number" value="0"><div class="form-hint">0 = 永久</div></div>
+    <h3 style="display:flex;align-items:center;gap:8px">创建访问令牌
+      <span class="tag" style="background:rgba(47,129,247,0.15);color:var(--accent)">下游 API Key</span>
+    </h3>
+    <div class="form-group"><label>标签</label>
+      <input id="f_tlabel" placeholder="例如：Trae 专用" autocomplete="off">
+      <div class="form-hint">用于识别该令牌的用途，仅后台可见</div>
     </div>
-    <div class="form-group"><label>模型白名单</label><input id="f_whitelist" placeholder="留空 = 允许全部,逗号分隔 = 限制模型"><div class="form-hint">例如:gpt-4o,claude-3-opus</div></div>
-    <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="addToken()">创建</button></div>`;
+    <div class="form-row">
+      <div class="form-group"><label>Token 配额</label>
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <button type="button" class="btn small qpick" data-q="-1">无限</button>
+          <button type="button" class="btn small qpick" data-q="10000">1万</button>
+          <button type="button" class="btn small qpick" data-q="100000">10万</button>
+          <button type="button" class="btn small qpick" data-q="custom">自定义</button>
+        </div>
+        <input id="f_quota" type="number" value="-1">
+        <div class="form-hint">达到配额后该令牌将拒绝请求</div>
+      </div>
+      <div class="form-group"><label>有效期</label>
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <button type="button" class="btn small epick" data-d="0">永久</button>
+          <button type="button" class="btn small epick" data-d="7">7天</button>
+          <button type="button" class="btn small epick" data-d="30">30天</button>
+          <button type="button" class="btn small epick" data-d="90">90天</button>
+        </div>
+        <input id="f_expires" type="number" value="0">
+        <div class="form-hint">从创建时刻起的有效天数，0 = 永久</div>
+      </div>
+    </div>
+    <div class="form-group"><label>模型白名单</label>
+      <input id="f_whitelist" placeholder="留空 = 允许全部" autocomplete="off">
+      <div class="form-hint">逗号分隔，例如 <code>gpt-4o,claude-3-opus</code>；留空表示不限制</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">取消</button>
+      <button class="btn primary" onclick="addToken()" id="tokenCreateBtn">创建令牌</button>
+    </div>`;
   document.getElementById("modal").classList.add("show");
+  // 快捷选项联动
+  document.querySelectorAll(".qpick").forEach(b => b.addEventListener("click", () => {
+    const v = b.dataset.q;
+    document.getElementById("f_quota").value = v === "custom" ? "" : v;
+  }));
+  document.querySelectorAll(".epick").forEach(b => b.addEventListener("click", () => {
+    document.getElementById("f_expires").value = b.dataset.d;
+  }));
 }
 
 async function addToken() {
+  const btn = document.getElementById("tokenCreateBtn");
+  if (!btn || btn.disabled) return;
+  btn.disabled = true; btn.textContent = "创建中...";
   const r = await api("/api/tokens", {method:"POST", body:JSON.stringify({
     label: document.getElementById("f_tlabel").value,
     quota_tokens: parseInt(document.getElementById("f_quota").value)||-1,
     expires_days: parseInt(document.getElementById("f_expires").value)||0,
     model_whitelist: document.getElementById("f_whitelist").value.trim(),
   })});
-  if (r !== null) {
-    closeModal(); loadTokens();
-    alert("令牌已创建:\\n" + r.token);
-  }
+  btn.disabled = false; btn.textContent = "创建令牌";
+  if (r === null) return;
+  // 创建成功：内嵌展示完整 Key，一次性，可复制
+  document.getElementById("modalContent").innerHTML = `
+    <h3 style="color:var(--success)">✓ 令牌已创建</h3>
+    <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px">
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">完整 Key（仅显示这一次，请妥善保存）</div>
+      <div class="token-value" id="newTokenVal" style="font-size:13px">${esc(r.token)}</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:4px">
+      <button class="btn primary" onclick="copyText(document.getElementById('newTokenVal').textContent)">复制 Key</button>
+      <button class="btn" onclick="closeModal()">完成</button>
+    </div>
+    <div class="form-hint">该 Key 已保存为安全加密，之后列表中只会显示掩码；需要时点击「复制」即可取回。</div>`;
+  loadTokens();
 }
 
 function editToken(id) {

@@ -80,7 +80,7 @@ def test_migrations_apply_in_order(tmp_db):
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         rows = _run(db.execute_fetchall("SELECT version FROM schema_migrations ORDER BY version"))
         names = _run(db.execute_fetchall("SELECT name FROM schema_migrations ORDER BY version"))
-        assert [v for (v,) in rows] == [1, 3, 4, 5, 6, 7, 8, 9]
+        assert [v for (v,) in rows] == [1, 3, 4, 5, 6, 7, 8, 9, 10]
         assert [n for (n,) in names] == [
             "baseline",
             "token_hash",
@@ -90,6 +90,7 @@ def test_migrations_apply_in_order(tmp_db):
             "schema_realign",
             "route_bindings",
             "client_fingerprint",
+            "token_cipher",
         ]
     finally:
         _run(db.close())

@@ -183,13 +183,27 @@ async def get_usage_stats(s: Store, days: int = 7) -> dict:
             }
         )
 
-    # 按模型聚合
+    # 按模型聚合。仪表盘只展示已配置模型的切片：聚合 SQL 保持方言中立，
+    # 在 Python 侧剔除“未解析到任何已配置模型”的探测/脏请求（如部署自检
+    # 直接写入的 model_name="x"）。已配置模型按 name + aliases 判定，避免
+    # 误伤正常别名流量（mf / agnes 等）。
     model_rows = await s.fetchall(
         "SELECT model_name, COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(cost) "
         "FROM request_logs WHERE ts>=? AND status>=200 AND status<300 "
         "GROUP BY model_name ORDER BY COUNT(*) DESC LIMIT 20",
         (since,),
     )
+    configured_names: set[str] = set()
+    try:
+        from .models import list_models
+
+        for m in await list_models(s):
+            configured_names.add(m.name)
+            if m.aliases:
+                configured_names.update(a.strip() for a in m.aliases.split(",") if a.strip())
+    except Exception:
+        # 模型表不可用时不丢弃数据，仅保留 SQL 聚合结果。
+        pass
     by_model = [
         {
             "model_name": r[0] or "unknown",
@@ -199,6 +213,7 @@ async def get_usage_stats(s: Store, days: int = 7) -> dict:
             "cost": round(float(r[4] or 0), 4),
         }
         for r in model_rows
+        if not configured_names or (r[0] or "") in configured_names
     ]
 
     # 总计

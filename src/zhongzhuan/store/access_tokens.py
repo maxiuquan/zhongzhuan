@@ -42,6 +42,7 @@ from dataclasses import dataclass
 
 from loguru import logger
 
+from ..crypto import encrypt as _aes_encrypt, decrypt as _aes_decrypt
 from .store import Store
 
 #: Environment variable holding the HMAC key (raw text or hex).
@@ -62,6 +63,10 @@ _HASHED_COLUMNS: str = (
     "model_whitelist, expires_at, created_at, rotation_of, last_used_at, "
     "created_by, revoked_at, revoked_by"
 )
+
+#: Columns with the v010 ``token_cipher`` column appended (nullable; NULL for
+#: tokens created before v010, whose plaintext can no longer be recovered).
+_HASHED_COLUMNS_WITH_CIPHER: str = _HASHED_COLUMNS + ", token_cipher"
 
 #: Legacy (pre-v003) column list -- kept so that stubs and not-yet-migrated
 #: databases keep working.  See :func:`get_token_by_value`.
@@ -332,13 +337,14 @@ async def create_token(
     prefix = token_prefix_of(plaintext)
     key = await resolve_hmac_key(s)
     digest = hash_token(plaintext, key)
+    cipher = _aes_encrypt(plaintext.encode("utf-8"))
     now = Store.now()
     tid = await s.execute(
         "INSERT INTO access_tokens("
         "token_prefix, token_hash, label, enabled, quota_tokens, used_tokens, "
         "model_whitelist, expires_at, created_at, rotation_of, last_used_at, "
-        "created_by, revoked_at, revoked_by) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "created_by, revoked_at, revoked_by, token_cipher) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             prefix,
             digest,
@@ -354,6 +360,7 @@ async def create_token(
             created_by,
             0,
             "",
+            cipher,
         ),
     )
     return AccessToken(
@@ -488,6 +495,35 @@ async def touch_last_used(s: Store, token_id: int, previous: int = 0) -> None:
 async def delete_token(s: Store, token_id: int) -> None:
     """Delete an access token."""
     await s.execute("DELETE FROM access_tokens WHERE id=?", (token_id,))
+
+
+async def reveal_token(s: Store, token_id: int) -> str | None:
+    """Return the plaintext of *token_id*, or ``None`` when it is unrecoverable.
+
+    Only tokens created after the v010 migration carry ``token_cipher``; the
+    legacy ones (v003..v009) store just an irreversible hash, so their
+    plaintext can never be reconstructed.  Callers must treat ``None`` as
+    "historical key not retained", never as an excuse to rotate or revoke the
+    token.
+
+    Raises:
+        RuntimeError: When the stored ciphertext cannot be decrypted (e.g. the
+            AES key changed), so the caller can surface a clear error instead
+            of silently degrading.
+    """
+    row = await s.fetchone(
+        f"SELECT {_HASHED_COLUMNS_WITH_CIPHER} FROM access_tokens WHERE id=?",
+        (token_id,),
+    )
+    if not row:
+        return None
+    cipher = row[15]
+    if not cipher:
+        return None
+    try:
+        return _aes_decrypt(cipher).decode("utf-8")
+    except Exception as exc:  # noqa: BLE001 - surface any driver/crypto error
+        raise RuntimeError(f"cannot decrypt token #{token_id}: {exc}") from exc
 
 
 async def revoke_token(s: Store, token_id: int, revoked_by: str = "") -> None:

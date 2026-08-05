@@ -167,6 +167,73 @@ def test_usage_stats_mysql_day_bucket_and_decimal_results_are_json_safe():
     json.dumps(result)
 
 
+@pytest.mark.asyncio
+async def test_usage_stats_filters_unconfigured_probe_models(store, monkeypatch):
+    """仪表盘模型分布必须过滤掉未配置的探测模型（如 'x'），不误伤正常模型。"""
+    from zhongzhuan.store.models import create_model, Model
+
+    now = Store.now()
+    await create_model(store, Model(name="mf", upstream_base="http://x", upstream_model="mf"))
+    await create_model(store, Model(name="agnes", upstream_base="http://x", upstream_model="agnes"))
+
+    # 正常模型请求（resolved_model_id 为空是生产常态——代理不写该列）
+    for ts, model, rid in [
+        (now - 3600, "mf", "r1"),
+        (now - 3600, "agnes", "r2"),
+        (now - 3600, "x", "r3"),  # 部署探测的脏数据
+    ]:
+        await store.execute(
+            "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id, "
+            "tokens_in, tokens_out, cost) VALUES(?,?,?,?,?,?,?,?)",
+            (ts, model, 200, 10, rid, 10, 20, 0.1),
+        )
+
+    result = await get_usage_stats(store, days=7)
+    names = [m["model_name"] for m in result["by_model"]]
+    assert "mf" in names
+    assert "agnes" in names
+    assert "x" not in names
+    # totals 是全部成功请求（不受展示过滤影响）
+    assert result["totals"]["requests"] == 3
+
+
+@pytest.mark.asyncio
+async def test_token_create_stores_cipher_and_reveal_roundtrip(store):
+    """新建令牌必须同时保存哈希与可解密密文，复制接口返回完整 Key。"""
+    from zhongzhuan.store.access_tokens import create_token, reveal_token, list_tokens
+
+    t = await create_token(store, label="copy-test")
+    assert t.token.startswith("zz-")
+
+    # 列表保持脱敏：token 字段是掩码，绝不出现完整 Key
+    listed = await list_tokens(store)
+    assert len(listed) == 1
+    assert listed[0]["token"] == listed[0]["token_masked"]
+    assert "***" in listed[0]["token"]
+    assert t.token not in listed[0]["token"]
+    assert all(t.token not in str(v) for v in listed[0].values())
+
+    # 复制接口（reveal）能取回完整 Key
+    plain = await reveal_token(store, t.id)
+    assert plain == t.token
+
+
+@pytest.mark.asyncio
+async def test_legacy_token_without_cipher_reveals_none(store):
+    """v010 之前创建的令牌无密文，reveal 返回 None（不可恢复），不换 Key 不废止。"""
+    from zhongzhuan.store.access_tokens import create_token, reveal_token
+
+    t = await create_token(store, label="legacy")
+    # 模拟 v010 之前的令牌：清空密文列，只留哈希
+    await store.execute("UPDATE access_tokens SET token_cipher=NULL WHERE id=?", (t.id,))
+    assert await reveal_token(store, t.id) is None
+    # 令牌仍然有效
+    from zhongzhuan.store.access_tokens import get_token_by_value
+
+    at = await get_token_by_value(store, t.token)
+    assert at is not None and at.id == t.id
+
+
 def test_service_status_does_not_call_sc_on_linux(monkeypatch):
     monkeypatch.setattr(api_service.sys, "platform", "linux")
     monkeypatch.setattr(api_service, "_sc", lambda *_args: pytest.fail("sc.exe must not run on Linux"))
@@ -196,5 +263,14 @@ async def test_ui_serves(store):
                 assert "btn.disabled = true" in text
                 assert "btn.disabled = false" in text
                 assert "刚刚同步" in text
+                # 令牌复制：按钮按 id 调用 reveal 接口（不再把掩码当 Key 复制）
+                assert 'onclick="copyToken(${t.id})"' in text
+                assert 'api("/api/tokens/" + id + "/reveal"' in text
+                assert "document.execCommand(\"copy\")" in text
+                # 新建令牌弹窗：新布局包含完整 Key 一次性展示与复制按钮
+                assert "创建访问令牌" in text
+                assert 'id="newTokenVal"' in text
+                assert "复制 Key" in text
+                assert 'onclick="copyText(document.getElementById(\'newTokenVal\').textContent)"' in text
     finally:
         await runner.cleanup()
