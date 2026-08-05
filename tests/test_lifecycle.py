@@ -66,8 +66,18 @@ def _wait_healthz(port: int, timeout: float = 60.0, proc: subprocess.Popen | Non
     diag = ""
     if proc is not None:
         try:
+            # 进程可能已退出（启动失败），communicate 会立即返回；
+            # 也可能还在运行，给 2s 让它吐完缓冲区。
             stdout, stderr = proc.communicate(timeout=2.0)
-            diag = f"\n--- proc stdout ---\n{stdout or '(empty)'}\n--- proc stderr ---\n{stderr or '(empty)'}"
+            diag = f"\n--- proc returncode: {proc.returncode} ---\n--- proc stdout ---\n{stdout or '(empty)'}\n--- proc stderr ---\n{stderr or '(empty)'}"
+        except subprocess.TimeoutExpired:
+            # 进程仍在运行，非阻塞读取已有输出
+            try:
+                stdout = proc.stdout.read() if proc.stdout else ""
+                stderr = proc.stderr.read() if proc.stderr else ""
+                diag = f"\n--- proc still running ---\n--- proc stdout ---\n{stdout or '(empty)'}\n--- proc stderr ---\n{stderr or '(empty)'}"
+            except Exception:
+                diag = "\n(proc output unavailable, still running)"
         except Exception:
             diag = "\n(proc output unavailable)"
     raise AssertionError(f"/healthz not ready within {timeout}s (last: {last_err}){diag}")
