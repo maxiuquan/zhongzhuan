@@ -85,17 +85,30 @@ class TestClientPresets:
         assert "label" in PRESETS["workbuddy"]
         assert "headers" in PRESETS["workbuddy"]
 
-    def test_workbuddy_has_six_fingerprint_headers(self):
-        headers = get_headers("workbuddy")
-        names = [n for n, _ in headers]
-        assert names == [
+    def test_workbuddy_has_real_client_fingerprint_headers(self):
+        """预设必须含真实 WorkBuddy 客户端抓包所得的关键指纹头（2026-08-05）。
+
+        缺失这些头时 freemodel.dev 返回 403 unsupported_client。
+        """
+        headers = dict(get_headers("workbuddy"))
+        names = list(headers.keys())
+        # 关键身份头必须在预设中
+        for required in (
             "User-Agent",
-            "X-Client-Name",
-            "X-Client-Version",
+            "X-Requested-With",
             "X-Request-ID",
-            "Accept",
-            "Cache-Control",
-        ]
+            "X-IDE-Type",
+            "X-IDE-Name",
+            "X-IDE-Version",
+            "X-CodeBuddy-Request",
+            "X-Domain",
+            "X-Product",
+            "X-Stainless-Lang",
+        ):
+            assert required in names, f"缺少指纹头: {required}"
+        assert headers["User-Agent"].startswith("WorkBuddy/5.3.8")
+        assert headers["X-IDE-Type"] == "WorkBuddy"
+        assert headers["X-CodeBuddy-Request"] == "1"
 
     def test_workbuddy_x_request_id_uses_uuid_template(self):
         headers = dict(get_headers("workbuddy"))
@@ -216,16 +229,17 @@ class TestApplyClientFingerprint:
         assert result == original
         assert result is headers  # 同一对象
 
-    def test_workbuddy_preset_injects_six_headers(self):
+    def test_workbuddy_preset_injects_real_client_headers(self):
         h = _make_handler()
         key = _make_key(preset="workbuddy")
         headers = {"Authorization": "Bearer xxx"}
         h._apply_client_fingerprint(headers, key)
-        assert headers["User-Agent"] == "WorkBuddy/1.0.0 (Windows NT 10.0; Win64; x64)"
-        assert headers["X-Client-Name"] == "workbuddy"
-        assert headers["X-Client-Version"] == "1.0.0"
-        assert headers["Accept"] == "text/event-stream"
-        assert headers["Cache-Control"] == "no-cache"
+        assert headers["User-Agent"] == "WorkBuddy/5.3.8 WorkBuddy/5.3.8 CLI/2.115.0"
+        assert headers["X-IDE-Type"] == "WorkBuddy"
+        assert headers["X-IDE-Name"] == "WorkBuddy"
+        assert headers["X-CodeBuddy-Request"] == "1"
+        assert headers["X-Domain"] == "www.codebuddy.cn"
+        assert headers["X-Product"] == "SaaS"
         # X-Request-ID 是动态 UUID
         uuid.UUID(headers["X-Request-ID"])
         # Authorization 不被覆盖（预设不含 Authorization）

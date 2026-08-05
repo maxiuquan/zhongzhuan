@@ -188,7 +188,11 @@ def register_routes(app: web.Application, ctx) -> None:
             if fname:
                 headers[fname] = render(fvalue)
 
-        # 极简请求体（OpenAI 格式）
+        # 极简请求体（OpenAI 格式）。
+        # 注意：模型配置了客户端模拟时，携带一条 system 消息。部分上游
+        # （如 freemodel.dev）通过请求体中的 system 消息识别客户端来源
+        # （WorkBuddy 请求必带系统提示词），缺失会返回 403 unsupported_client。
+        has_fingerprint = bool(model.client_preset or "")
         if protocol == "anthropic":
             payload = {
                 "model": upstream_model,
@@ -196,10 +200,16 @@ def register_routes(app: web.Application, ctx) -> None:
                 "messages": [{"role": "user", "content": "hi"}],
             }
         else:
+            messages = [{"role": "user", "content": "hi"}]
+            if has_fingerprint:
+                messages.insert(
+                    0,
+                    {"role": "system", "content": "This conversation is powered by " + upstream_model},
+                )
             payload = {
                 "model": upstream_model,
                 "max_tokens": 1,
-                "messages": [{"role": "user", "content": "hi"}],
+                "messages": messages,
                 "stream": False,
             }
 

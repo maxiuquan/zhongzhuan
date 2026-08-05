@@ -76,9 +76,10 @@ def test_build_fingerprint_headers_presets_and_custom():
     hdrs = _build_fingerprint_headers("workbuddy", "")
     names = [n for n, _ in hdrs]
     assert "User-Agent" in names
-    assert "X-Client-Name" in names
+    assert "X-IDE-Type" in names
+    assert "X-CodeBuddy-Request" in names
     assert "X-Request-ID" in names
-    assert dict(hdrs)["User-Agent"].startswith("WorkBuddy/")
+    assert dict(hdrs)["User-Agent"].startswith("WorkBuddy/5.3.8")
 
     # custom → 解析 JSON 自定义头
     raw = '[{"name":"X-Foo","value":"bar"},{"name":"X-Request-ID","value":"{{uuid}}"}]'

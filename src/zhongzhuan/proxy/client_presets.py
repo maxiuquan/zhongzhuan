@@ -33,12 +33,29 @@ _log = logging.getLogger(__name__)
 PRESETS: dict[str, dict[str, Any]] = {
     "workbuddy": {
         "label": "WorkBuddy (freemodel.dev 限免)",
+        # 以下头为真实 WorkBuddy 5.3.8 客户端抓包所得（2026-08-05 实测，
+        # 缺失这些指纹头时 freemodel.dev 返回 403 unsupported_client）。
+        # 动态变量 {{uuid}} 每次请求生成新值；X-Conversation-* 用固定模板
+        # 即可通过校验（上游校验存在性，不校验会话一致性）。
         "headers": [
-            ("User-Agent", "WorkBuddy/1.0.0 (Windows NT 10.0; Win64; x64)"),
-            ("X-Client-Name", "workbuddy"),
-            ("X-Client-Version", "1.0.0"),
+            ("User-Agent", "WorkBuddy/5.3.8 WorkBuddy/5.3.8 CLI/2.115.0"),
+            ("X-Requested-With", "XMLHttpRequest"),
             ("X-Request-ID", "{{uuid}}"),
-            ("Accept", "text/event-stream"),
+            ("X-IDE-Type", "WorkBuddy"),
+            ("X-IDE-Name", "WorkBuddy"),
+            ("X-IDE-Version", "5.3.8"),
+            ("X-CodeBuddy-Request", "1"),
+            ("X-Domain", "www.codebuddy.cn"),
+            ("X-Product", "SaaS"),
+            ("X-Conversation-ID", "{{uuid}}"),
+            ("X-Conversation-Request-ID", "{{uuid}}"),
+            ("X-Stainless-Arch", "x64"),
+            ("X-Stainless-Lang", "js"),
+            ("X-Stainless-Os", "Windows"),
+            ("X-Stainless-Package-Version", "6.25.0"),
+            ("X-Stainless-Runtime", "node"),
+            ("X-Stainless-Runtime-Version", "v22.21.1"),
+            ("Accept", "application/json"),
             ("Cache-Control", "no-cache"),
         ],
     },
