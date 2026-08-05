@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from urllib.parse import urlparse
 
 import httpx
 from aiohttp import web
@@ -11,6 +12,44 @@ from ..crypto import mask
 from ..store.keys import ApiKey, create_key, list_keys, delete_key, update_key, get_key_cipher
 from ..store.models import get_model_by_id
 from .notify import notify_proxy_reload
+
+
+def _build_upstream_url(
+    upstream_base: str,
+    path_override: str,
+    protocol: str,
+) -> str:
+    """Build the full upstream URL exactly like the proxy hot path.
+
+    The proxy sends requests through :class:`UpstreamClient`, which strips a
+    base path prefix (e.g. ``/v1``) before handing the path to httpx so that
+    ``base_url`` merging never duplicates it.  The admin "test key" endpoint
+    must produce the same URL or it will wrongly report healthy keys as
+    failing (e.g. ``https://host/v1`` + ``/v1/chat/completions`` ->
+    ``/v1/v1/...``).
+
+    ``path_override`` may be a full URL, an absolute path (``/zen/v1/...``) or
+    empty.
+    """
+    base = (upstream_base or "").rstrip("/")
+    override = (path_override or "").strip()
+    if override.startswith("http://") or override.startswith("https://"):
+        return override
+    if override:
+        path = override if override.startswith("/") else "/" + override
+        # Same dedup as UpstreamClient.request: strip the base path prefix.
+        base_path = urlparse(base).path.rstrip("/")
+        if base_path and path.startswith(base_path):
+            path = path[len(base_path) :] or "/"
+        return base + path
+    if protocol == "anthropic":
+        path = "/v1/messages"
+    else:
+        path = "/v1/chat/completions"
+    base_path = urlparse(base).path.rstrip("/")
+    if base_path and path.startswith(base_path):
+        path = path[len(base_path) :] or "/"
+    return base + path
 
 
 def register_routes(app: web.Application, ctx) -> None:
@@ -97,18 +136,13 @@ def register_routes(app: web.Application, ctx) -> None:
         upstream_model = model.upstream_model or model.name
         protocol = model.protocol or "openai"
 
-        # 决定请求 URL
-        if model.upstream_path_override:
-            override = model.upstream_path_override
-            if override.startswith("http://") or override.startswith("https://"):
-                url = override
-            else:
-                url = upstream_base + override
-        else:
-            if protocol == "anthropic":
-                url = upstream_base + "/v1/messages"
-            else:
-                url = upstream_base + "/v1/chat/completions"
+        # 决定请求 URL（与代理主流程 UpstreamClient 相同的路径规范化，
+        # 避免 base 已含 /v1 时重复成 /v1/v1/...）
+        url = _build_upstream_url(
+            upstream_base,
+            model.upstream_path_override or "",
+            protocol,
+        )
 
         # 请求头
         headers = {"Content-Type": "application/json"}
