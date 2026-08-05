@@ -100,8 +100,21 @@ async def test_detect_anthropic_by_path():
 
 @pytest.mark.asyncio
 async def test_detect_anthropic_by_header():
-    ctx = await RequestContextBuilder().build(_request(headers={"x-api-key": "secret"}))
+    # Path 优先级高于 headers（detect.py docstring）：OpenAI 专属路径
+    # (/v1/chat/completions 等) 即使携带 x-api-key 也判为 openai；要触发
+    # header-based 检测必须用一个不在 OpenAI 专属列表里的路径。
+    ctx = await RequestContextBuilder().build(_request(path="/v1/foo", headers={"x-api-key": "secret"}))
     assert ctx.inbound_protocol == "anthropic"
+
+
+@pytest.mark.asyncio
+async def test_openai_path_wins_over_anthropic_headers():
+    # /v1/chat/completions + x-api-key 必须判为 openai，否则 OpenAI 请求体
+    # 会被误当 Anthropic 格式转换（detect.py 注释）。
+    ctx = await RequestContextBuilder().build(
+        _request(headers={"x-api-key": "secret", "anthropic-version": "2023-06-01"})
+    )
+    assert ctx.inbound_protocol == "openai"
 
 
 @pytest.mark.asyncio

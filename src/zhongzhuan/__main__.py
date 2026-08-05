@@ -441,8 +441,8 @@ async def run_foreground(
     await admin_site.start()
     logger.info(f"admin listening on {cfg.server.admin.host}:{cfg.server.admin.port}")
 
-    # Open browser in foreground mode
-    if not as_service:
+    # Open browser in foreground mode (skip in CI / headless via env var)
+    if not as_service and not os.getenv("ZHONGZHUAN_NO_BROWSER"):
         try:
             webbrowser.open(f"http://127.0.0.1:{cfg.server.admin.port}")
         except Exception:

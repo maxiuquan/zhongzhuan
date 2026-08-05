@@ -132,9 +132,7 @@ async def test_sqlite_migrations_apply_all_versions(tmp_path):
         )
         assert row is not None, "idx_route_bindings_expires 索引缺失"
         # v010：access_tokens.token_cipher 列存在
-        row = await store.fetchone(
-            "SELECT name FROM pragma_table_info('access_tokens') WHERE name='token_cipher'"
-        )
+        row = await store.fetchone("SELECT name FROM pragma_table_info('access_tokens') WHERE name='token_cipher'")
         assert row is not None, "token_cipher 列（v010）缺失"
     finally:
         await store.close()

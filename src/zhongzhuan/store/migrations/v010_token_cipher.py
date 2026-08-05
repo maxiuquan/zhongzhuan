@@ -33,14 +33,10 @@ from __future__ import annotations
 from ..migration_engine import Migration
 
 #: SQLite: BLOB 直接存 AES 密文（prefix + nonce + tag + data）。
-SQLITE_ALTERS: tuple[str, ...] = (
-    "ALTER TABLE access_tokens ADD COLUMN token_cipher BLOB",
-)
+SQLITE_ALTERS: tuple[str, ...] = ("ALTER TABLE access_tokens ADD COLUMN token_cipher BLOB",)
 
 #: MySQL / TiDB: VARBINARY 512 足够容纳 AES-GCM 密文（~100 bytes）。
-MYSQL_ALTERS: tuple[str, ...] = (
-    "ALTER TABLE access_tokens ADD COLUMN token_cipher VARBINARY(512)",
-)
+MYSQL_ALTERS: tuple[str, ...] = ("ALTER TABLE access_tokens ADD COLUMN token_cipher VARBINARY(512)",)
 
 
 MIGRATION = Migration(

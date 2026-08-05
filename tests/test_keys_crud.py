@@ -32,33 +32,20 @@ def test_build_upstream_url_dedups_base_path():
     会产生 /v1/v1 双重复，导致真实可用的 Key 被误报为失败。
     """
     # base 含 /v1 → 去重，避免 /v1/v1
-    assert (
-        _build_upstream_url("https://macc.eu.cc/v1", "", "openai")
-        == "https://macc.eu.cc/v1/chat/completions"
-    )
-    assert (
-        _build_upstream_url("https://macc.eu.cc/v1", "", "anthropic")
-        == "https://macc.eu.cc/v1/messages"
-    )
+    assert _build_upstream_url("https://macc.eu.cc/v1", "", "openai") == "https://macc.eu.cc/v1/chat/completions"
+    assert _build_upstream_url("https://macc.eu.cc/v1", "", "anthropic") == "https://macc.eu.cc/v1/messages"
     # base 不含 /v1 → 正常追加
-    assert (
-        _build_upstream_url("https://api.example.com", "", "openai")
-        == "https://api.example.com/v1/chat/completions"
-    )
+    assert _build_upstream_url("https://api.example.com", "", "openai") == "https://api.example.com/v1/chat/completions"
     # path override（相对路径，如 opencode 的 /zen/v1/...）
     assert (
         _build_upstream_url("https://opencode.ai", "/zen/v1/chat/completions", "openai")
         == "https://opencode.ai/zen/v1/chat/completions"
     )
     # path override 是完整 URL → 原样返回
-    assert (
-        _build_upstream_url("https://opencode.ai", "https://full.url/chat", "openai")
-        == "https://full.url/chat"
-    )
+    assert _build_upstream_url("https://opencode.ai", "https://full.url/chat", "openai") == "https://full.url/chat"
     # base 与 override 都带 /v1 → 仍去重
     assert (
-        _build_upstream_url("https://h.com/v1", "/v1/chat/completions", "openai")
-        == "https://h.com/v1/chat/completions"
+        _build_upstream_url("https://h.com/v1", "/v1/chat/completions", "openai") == "https://h.com/v1/chat/completions"
     )
 
 

@@ -40,14 +40,24 @@ def _free_port() -> int:
     return port
 
 
-def _wait_healthz(port: int, timeout: float = 30.0) -> str:
-    """轮询 ``GET /healthz`` 直到 200；超时抛 AssertionError。"""
+def _wait_healthz(port: int, timeout: float = 60.0, proc: subprocess.Popen | None = None) -> str:
+    """轮询 ``GET /healthz`` 直到 200；超时或子进程退出时抛 AssertionError。
+
+    若 ``proc`` 在轮询期间退出（启动失败），立即读取 server.log 并报错。
+    """
     import urllib.request
 
     url = f"http://127.0.0.1:{port}/healthz"
     deadline = time.monotonic() + timeout
     last_err: Exception | None = None
     while time.monotonic() < deadline:
+        # 子进程已退出 → 服务启动失败，立即读取日志并报错
+        if proc is not None and proc.poll() is not None:
+            log_text = _read_server_log(proc)
+            raise AssertionError(
+                f"server process exited (code={proc.returncode}) before /healthz responded\n"
+                f"--- server.log ---\n{log_text}"
+            )
         try:
             with urllib.request.urlopen(url, timeout=2.0) as resp:
                 if resp.status == 200:
@@ -56,7 +66,28 @@ def _wait_healthz(port: int, timeout: float = 30.0) -> str:
         except Exception as exc:  # 连接拒绝 / 超时等，继续轮询
             last_err = exc
         time.sleep(0.5)
-    raise AssertionError(f"/healthz not ready within {timeout}s (last: {last_err})")
+
+    # 超时：读取日志帮助定位
+    log_text = _read_server_log(proc) if proc else ""
+    rc = proc.poll() if proc else None
+    raise AssertionError(
+        f"/healthz not ready within {timeout}s (last: {last_err}, proc rc={rc})\n--- server.log ---\n{log_text}"
+    )
+
+
+def _read_server_log(proc: subprocess.Popen) -> str:
+    """读取 server.log 文件内容（flush 后即可见）。"""
+    log_path = getattr(proc, "_log_path", None)
+    if log_path is None or not log_path.exists():
+        return "(no log file)"
+    try:
+        # flush 文件缓冲区（进程可能仍在写）
+        lf = getattr(proc, "_log_file", None)
+        if lf:
+            lf.flush()
+        return log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+    except Exception:
+        return "(read error)"
 
 
 def _write_isolated_config(workdir: Path, port: int) -> Path:
@@ -99,23 +130,31 @@ def _start_server(workdir: Path, port: int) -> subprocess.Popen:
     env["ZHONGZHUAN_DATA_DIR"] = str(workdir / "data")
     # 明确开发模式 + 关闭会联网的功能（fallback 默认已关，这里再显式确认）。
     env["ZHONGZHUAN_ENV"] = "development"
+    env["ZHONGZHUAN_NO_BROWSER"] = "1"  # CI / headless：禁止 webbrowser.open() 阻塞
     env.pop("ZHONGZHUAN_TIDB_HOST", None)
 
     cmd = [sys.executable, "-m", "zhongzhuan", "--config", str(cfg), "--port", str(port)]
+    # 把 stdout+stderr 写到文件而非 PIPE：PIPE 缓冲区满会死锁，且文件可在
+    # 测试失败时直接读取，不依赖 communicate()。
+    log_path = workdir / "server.log"
+    log_file = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 - 随 proc 生命周期
     proc = subprocess.Popen(
         cmd,
         cwd=str(workdir),
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
         text=True,
     )
+    proc._log_file = log_file  # type: ignore[attr-defined]
+    proc._log_path = log_path  # type: ignore[attr-defined]
     return proc
 
 
 def _stop_server(proc: subprocess.Popen) -> None:
     """终止进程；Windows/Linux 均先 SIGTERM，超时再强杀。"""
     if proc.poll() is not None:
+        _close_log(proc)
         return
     if sys.platform == "win32":
         proc.terminate()
@@ -123,12 +162,23 @@ def _stop_server(proc: subprocess.Popen) -> None:
         try:
             os.kill(proc.pid, signal.SIGTERM)
         except ProcessLookupError:  # pragma: no cover - 已退出
+            _close_log(proc)
             return
     try:
         proc.wait(timeout=15.0)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait(timeout=5.0)
+    _close_log(proc)
+
+
+def _close_log(proc: subprocess.Popen) -> None:
+    lf = getattr(proc, "_log_file", None)
+    if lf:
+        try:
+            lf.close()
+        except Exception:
+            pass
 
 
 def test_healthz_200_on_start(tmp_path):
@@ -136,7 +186,7 @@ def test_healthz_200_on_start(tmp_path):
     port = _free_port()
     proc = _start_server(tmp_path, port)
     try:
-        body = _wait_healthz(port)
+        body = _wait_healthz(port, proc=proc)
         # liveness 载荷应含基本字段（不深断言，避免绑定实现细节）。
         assert "status" in body or "ok" in body.lower()
     finally:
@@ -171,7 +221,7 @@ def test_server_survives_two_healthz_checks(tmp_path):
     port = _free_port()
     proc = _start_server(tmp_path, port)
     try:
-        _wait_healthz(port)
+        _wait_healthz(port, proc=proc)
         _wait_healthz(port)
     finally:
         _stop_server(proc)
@@ -183,7 +233,7 @@ def test_lifecycle_isolated_data_dir(tmp_path):
     port = _free_port()
     proc = _start_server(tmp_path, port)
     try:
-        _wait_healthz(port)
+        _wait_healthz(port, proc=proc)
     finally:
         _stop_server(proc)
     # 服务在隔离目录里建出自己的 SQLite DB（而不是根目录 data.db）。

@@ -75,6 +75,10 @@ async def sdk_env(tmp_path, monkeypatch) -> AsyncIterator[dict]:
     cfg.storage.sqlite_db_path = cfg.storage.db_path
     cfg.tidb = None
     store = await create_store(cfg)
+    # v010 起 create_token 需写入 AES 密文；初始化 crypto（与 conftest 一致）
+    from zhongzhuan.crypto import init as crypto_init
+
+    await crypto_init(tmp_path)
     rs = ResponseStore(store)
 
     # A valid access token: the auth middleware injects ``token_id`` and the

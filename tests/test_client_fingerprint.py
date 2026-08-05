@@ -14,6 +14,7 @@ import json
 import os
 import re
 import uuid
+
 os.environ.setdefault("ZHONGZHUAN_DEV_NO_DPAPI", "1")
 
 import pytest
@@ -312,7 +313,10 @@ class TestInjectSystemMessage:
         原 system 被挤到第二位（指令仍生效），否则上游 403 unsupported_client。"""
         h = _make_handler()
         orig = [
-            {"role": "system", "content": "You are a powerful code assistant, powered by a proprietary model from TRAE."},
+            {
+                "role": "system",
+                "content": "You are a powerful code assistant, powered by a proprietary model from TRAE.",
+            },
             {"role": "user", "content": "hi"},
         ]
         out = h._inject_system_message(self._body(orig), self._make_key("workbuddy"), "gpt-5.6-sol")
