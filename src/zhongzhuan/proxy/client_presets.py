@@ -39,7 +39,11 @@ PRESETS: dict[str, dict[str, Any]] = {
         # 即可通过校验（上游校验存在性，不校验会话一致性）。
         # require_system=True：上游（freemodel.dev）还通过请求体里的 system
         # 消息识别 WorkBuddy 来源，转发/测试时请求体缺 system 需自动补一条。
+        # fingerprint_system：特征 system 内容模板，{model} 会被替换为上游模型名。
+        # 注意：请求体自带非特征 system（如 Trae 的 "powered by TRAE"）也会被
+        # 上游识别为异类而 403，因此注入逻辑会把该内容强制放在 messages 最前面。
         "require_system": True,
+        "fingerprint_system": "This conversation is powered by {model}",
         "headers": [
             ("User-Agent", "WorkBuddy/5.3.8 WorkBuddy/5.3.8 CLI/2.115.0"),
             ("X-Requested-With", "XMLHttpRequest"),
@@ -100,6 +104,26 @@ def needs_system_message(preset_name: str) -> bool:
     if not preset:
         return False
     return bool(preset.get("require_system", False))
+
+
+def get_fingerprint_system_prefix(preset_name: str, model_name: str = "") -> str:
+    """返回预设要求的 system 消息特征内容（``fingerprint_system`` 模板）。
+
+    用于 ``require_system`` 预设：无论请求体缺 system 还是自带非特征 system
+    （如 Trae 的 "powered by TRAE"），都必须在 messages 最前面放一条该内容，
+    上游才能识别为目标客户端。支持 ``{model}`` 占位符。
+    无模板时返回默认的 "This conversation is powered by {model}"。
+    """
+    preset = PRESETS.get(preset_name)
+    tpl = ""
+    if preset:
+        tpl = str(preset.get("fingerprint_system", "") or "")
+    if not tpl:
+        tpl = "This conversation is powered by {model}"
+    try:
+        return tpl.replace("{model}", str(model_name or ""))
+    except Exception:
+        return tpl
 
 
 def list_presets() -> list[dict[str, str]]:

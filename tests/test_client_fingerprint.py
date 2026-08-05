@@ -296,12 +296,44 @@ class TestInjectSystemMessage:
         assert msgs[0]["content"] == "This conversation is powered by gpt-5.6-sol"
         assert len(msgs) == 2
 
-    def test_workbuddy_does_not_duplicate_existing_system(self):
+    def test_workbuddy_does_not_duplicate_when_first_system_is_fingerprint(self):
+        """第一条 system 已是特征内容 → 原样返回（不重复注入）。"""
         h = _make_handler()
-        orig = [{"role": "system", "content": "已有"}, {"role": "user", "content": "hi"}]
+        orig = [
+            {"role": "system", "content": "This conversation is powered by gpt-5.6-sol"},
+            {"role": "user", "content": "hi"},
+        ]
         raw = self._body(orig)
         out = h._inject_system_message(raw, self._make_key("workbuddy"), "gpt-5.6-sol")
         assert out is raw  # 原样返回
+
+    def test_workbuddy_prepends_fingerprint_when_system_is_foreign(self):
+        """请求体自带非特征 system（如 Trae 的 "powered by TRAE"）→ 最前面插入特征 system，
+        原 system 被挤到第二位（指令仍生效），否则上游 403 unsupported_client。"""
+        h = _make_handler()
+        orig = [
+            {"role": "system", "content": "You are a powerful code assistant, powered by a proprietary model from TRAE."},
+            {"role": "user", "content": "hi"},
+        ]
+        out = h._inject_system_message(self._body(orig), self._make_key("workbuddy"), "gpt-5.6-sol")
+        msgs = json.loads(out)["messages"]
+        assert len(msgs) == 3
+        assert msgs[0]["role"] == "system"
+        assert msgs[0]["content"] == "This conversation is powered by gpt-5.6-sol"
+        assert "TRAE" in msgs[1]["content"]  # 原 system 保留在后面
+
+    def test_workbuddy_prepends_when_first_message_is_not_system(self):
+        """第一条消息不是 system（如直接 user）→ 也前置插入特征 system。"""
+        h = _make_handler()
+        out = h._inject_system_message(
+            self._body([{"role": "user", "content": "hi"}]),
+            self._make_key("workbuddy"),
+            "gpt-5.6-sol",
+        )
+        msgs = json.loads(out)["messages"]
+        assert msgs[0]["role"] == "system"
+        assert msgs[0]["content"] == "This conversation is powered by gpt-5.6-sol"
+        assert len(msgs) == 2
 
     def test_no_preset_zero_impact(self):
         h = _make_handler()

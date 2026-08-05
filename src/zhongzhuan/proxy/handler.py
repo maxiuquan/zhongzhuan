@@ -915,14 +915,16 @@ class ProxyHandler:
 
     @staticmethod
     def _inject_system_message(final_body: bytes, key, upstream_model: str | None = None) -> bytes:
-        """按预设的 ``require_system`` 标记，为请求体补一条 system 消息。
+        """按预设的 ``require_system`` 标记，确保请求体第一条 system 消息是客户端特征内容。
 
         部分上游（如 freemodel.dev）通过请求体中的 system 消息识别客户端来源
-        （WorkBuddy 请求必带系统提示词），缺失会返回 403 unsupported_client。
-        仅在以下条件同时满足时补：
-        * 模型配置了内置客户端预设且预设要求 system 消息（``needs_system_message``）；
-        * 出站协议为 OpenAI（``/v1/chat/completions`` 的 messages 结构）；
-        * 请求体解析成功为 dict、含 ``messages`` 列表、且其中没有任何 system 消息。
+        （WorkBuddy 请求必带系统提示词）。上游校验的是**特征内容**：
+        * 请求体完全没有 system → 补一条（历史行为）；
+        * 请求体有 system 但**第一条不是客户端特征**（如 Trae 自带
+          "powered by TRAE"）→ 上游识别出不是目标客户端 → 403 unsupported_client。
+          此时在**最前面插入**一条客户端特征 system，把原 system 挤到后面
+          （原指令仍生效，但上游看到的第一条 system 是目标客户端特征）。
+        * 第一条 system 已是特征内容 → 原样返回（零影响）。
 
         返回新 bytes；不满足条件时原样返回 ``final_body``（零影响）。
         """
@@ -930,7 +932,7 @@ class ProxyHandler:
         if not preset_name:
             return final_body
         try:
-            from .client_presets import needs_system_message
+            from .client_presets import needs_system_message, get_fingerprint_system_prefix
 
             if not needs_system_message(preset_name):
                 return final_body
@@ -940,10 +942,19 @@ class ProxyHandler:
             messages = body_obj.get("messages")
             if not isinstance(messages, list):
                 return final_body
-            if any(isinstance(m, dict) and m.get("role") == "system" for m in messages):
-                return final_body
             model_name = upstream_model or body_obj.get("model") or ""
-            messages.insert(0, {"role": "system", "content": "This conversation is powered by " + str(model_name)})
+            prefix = get_fingerprint_system_prefix(preset_name, model_name)
+            # 第一条消息是 system 且已是特征内容 → 不重复注入（零影响）
+            first = messages[0] if messages else None
+            if (
+                isinstance(first, dict)
+                and first.get("role") == "system"
+                and prefix
+                and str(first.get("content", "")).strip().startswith(prefix.strip())
+            ):
+                return final_body
+            # 缺 system 或第一条不是特征 system → 在最前面插入特征 system
+            messages.insert(0, {"role": "system", "content": prefix})
             return json.dumps(body_obj, ensure_ascii=False).encode()
         except (json.JSONDecodeError, TypeError, ValueError):
             return final_body
