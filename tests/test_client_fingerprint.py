@@ -10,10 +10,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
-
 os.environ.setdefault("ZHONGZHUAN_DEV_NO_DPAPI", "1")
 
 import pytest
@@ -272,6 +272,60 @@ class TestApplyClientFingerprint:
         original = dict(headers)
         h._apply_client_fingerprint(headers, key)
         assert headers == original
+
+
+class TestInjectSystemMessage:
+    """_inject_system_message：require_system 预设（workbuddy）请求体补 system 消息。"""
+
+    def _make_key(self, preset: str, upstream_model: str = "gpt-5.6-sol"):
+        # 只依赖 client_preset / upstream_model 两个属性（handler 用 getattr 防御取）
+        return type("K", (), {"client_preset": preset, "upstream_model": upstream_model})()
+
+    def _body(self, messages):
+        return json.dumps({"model": "gpt-5.6-sol", "messages": messages, "stream": False}).encode()
+
+    def test_workbuddy_injects_system_when_missing(self):
+        h = _make_handler()
+        out = h._inject_system_message(
+            self._body([{"role": "user", "content": "hi"}]),
+            self._make_key("workbuddy"),
+            "gpt-5.6-sol",
+        )
+        msgs = json.loads(out)["messages"]
+        assert msgs[0]["role"] == "system"
+        assert msgs[0]["content"] == "This conversation is powered by gpt-5.6-sol"
+        assert len(msgs) == 2
+
+    def test_workbuddy_does_not_duplicate_existing_system(self):
+        h = _make_handler()
+        orig = [{"role": "system", "content": "已有"}, {"role": "user", "content": "hi"}]
+        raw = self._body(orig)
+        out = h._inject_system_message(raw, self._make_key("workbuddy"), "gpt-5.6-sol")
+        assert out is raw  # 原样返回
+
+    def test_no_preset_zero_impact(self):
+        h = _make_handler()
+        raw = self._body([{"role": "user", "content": "hi"}])
+        out = h._inject_system_message(raw, self._make_key(""), "gpt-5.6-sol")
+        assert out is raw
+
+    def test_custom_preset_zero_impact(self):
+        h = _make_handler()
+        raw = self._body([{"role": "user", "content": "hi"}])
+        out = h._inject_system_message(raw, self._make_key("custom"), "gpt-5.6-sol")
+        assert out is raw
+
+    def test_non_messages_body_zero_impact(self):
+        h = _make_handler()
+        raw = json.dumps({"model": "x", "input": "text"}).encode()
+        out = h._inject_system_message(raw, self._make_key("workbuddy"), "gpt-5.6-sol")
+        assert out is raw
+
+    def test_invalid_json_zero_impact(self):
+        h = _make_handler()
+        raw = b"{not json"
+        out = h._inject_system_message(raw, self._make_key("workbuddy"), "gpt-5.6-sol")
+        assert out is raw
 
     def test_unknown_preset_no_modification(self):
         h = _make_handler()

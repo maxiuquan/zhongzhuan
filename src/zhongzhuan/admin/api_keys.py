@@ -189,10 +189,13 @@ def register_routes(app: web.Application, ctx) -> None:
                 headers[fname] = render(fvalue)
 
         # 极简请求体（OpenAI 格式）。
-        # 注意：模型配置了客户端模拟时，携带一条 system 消息。部分上游
-        # （如 freemodel.dev）通过请求体中的 system 消息识别客户端来源
-        # （WorkBuddy 请求必带系统提示词），缺失会返回 403 unsupported_client。
-        has_fingerprint = bool(model.client_preset or "")
+        # 注意：预设标记 require_system 时（如 workbuddy），请求体需携带一条
+        # system 消息。部分上游（如 freemodel.dev）通过请求体中的 system 消息
+        # 识别客户端来源（WorkBuddy 请求必带系统提示词），缺失会返回 403
+        # unsupported_client。
+        from ..proxy.client_presets import needs_system_message
+
+        has_fingerprint = needs_system_message(model.client_preset or "")
         if protocol == "anthropic":
             payload = {
                 "model": upstream_model,

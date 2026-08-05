@@ -913,11 +913,45 @@ class ProxyHandler:
             terminal_reason=terminal_reason,
         )
 
+    @staticmethod
+    def _inject_system_message(final_body: bytes, key, upstream_model: str | None = None) -> bytes:
+        """按预设的 ``require_system`` 标记，为请求体补一条 system 消息。
+
+        部分上游（如 freemodel.dev）通过请求体中的 system 消息识别客户端来源
+        （WorkBuddy 请求必带系统提示词），缺失会返回 403 unsupported_client。
+        仅在以下条件同时满足时补：
+        * 模型配置了内置客户端预设且预设要求 system 消息（``needs_system_message``）；
+        * 出站协议为 OpenAI（``/v1/chat/completions`` 的 messages 结构）；
+        * 请求体解析成功为 dict、含 ``messages`` 列表、且其中没有任何 system 消息。
+
+        返回新 bytes；不满足条件时原样返回 ``final_body``（零影响）。
+        """
+        preset_name = getattr(key, "client_preset", "") or ""
+        if not preset_name:
+            return final_body
+        try:
+            from .client_presets import needs_system_message
+
+            if not needs_system_message(preset_name):
+                return final_body
+            body_obj = json.loads(final_body)
+            if not isinstance(body_obj, dict):
+                return final_body
+            messages = body_obj.get("messages")
+            if not isinstance(messages, list):
+                return final_body
+            if any(isinstance(m, dict) and m.get("role") == "system" for m in messages):
+                return final_body
+            model_name = upstream_model or body_obj.get("model") or ""
+            messages.insert(0, {"role": "system", "content": "This conversation is powered by " + str(model_name)})
+            return json.dumps(body_obj, ensure_ascii=False).encode()
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return final_body
+
     def _apply_client_fingerprint(self, headers: dict, key) -> dict:
         """根据 ``key.client_preset`` 注入上游客户端指纹头（v009）。
 
-        * ``client_preset == ""``   → 不模拟, 直接返回, headers 零修改（默认零影响）
-        * ``client_preset == "workbuddy"``（或其他内置预设）→ 注入 PRESETS 内置头
+        * ``client_preset == ""``   → 不模拟, 直接返回, headers 零修改（默认零影响）        * ``client_preset == "workbuddy"``（或其他内置预设）→ 注入 PRESETS 内置头
         * ``client_preset == "custom"`` → 注入 key.custom_headers（加载链已解析）
 
         在 Authorization 注入之后调用, 预设/自定义头若含 Authorization 会覆盖
@@ -1066,6 +1100,11 @@ class ProxyHandler:
 
         # 客户端指纹模拟（v009）：在 Authorization 注入后、path 处理前注入预设/自定义头
         self._apply_client_fingerprint(headers, key)
+        # require_system 预设（如 workbuddy）：请求体缺 system 消息时补一条
+        injected = self._inject_system_message(final_body, key, getattr(key, "upstream_model", None))
+        if injected is not final_body:
+            final_body = injected
+            headers["Content-Length"] = str(len(final_body))
 
         if key.upstream_path_override:
             upstream_path = key.upstream_path_override
@@ -1939,6 +1978,11 @@ class ProxyHandler:
 
                 # 客户端指纹模拟（v009）：Authorization 注入后、path 处理前注入
                 self._apply_client_fingerprint(headers, k)
+                # require_system 预设（如 workbuddy）：请求体缺 system 消息时补一条
+                _injected = self._inject_system_message(final_body, k, getattr(k, "upstream_model", None))
+                if _injected is not final_body:
+                    final_body = _injected
+                    headers["Content-Length"] = str(len(final_body))
 
                 # upstream_path_override: non-empty → use directly as path/URL
                 if k.upstream_path_override:
@@ -2300,6 +2344,11 @@ class ProxyHandler:
 
                     # 客户端指纹模拟（v009）：Authorization 注入后、path 处理前注入
                     self._apply_client_fingerprint(headers, k)
+                    # require_system 预设（如 workbuddy）：请求体缺 system 消息时补一条
+                    _injected = self._inject_system_message(final_body, k, getattr(k, "upstream_model", None))
+                    if _injected is not final_body:
+                        final_body = _injected
+                        headers["Content-Length"] = str(len(final_body))
 
                     # upstream_path_override: non-empty → use directly as path/URL
                     if k.upstream_path_override:

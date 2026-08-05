@@ -37,6 +37,9 @@ PRESETS: dict[str, dict[str, Any]] = {
         # 缺失这些指纹头时 freemodel.dev 返回 403 unsupported_client）。
         # 动态变量 {{uuid}} 每次请求生成新值；X-Conversation-* 用固定模板
         # 即可通过校验（上游校验存在性，不校验会话一致性）。
+        # require_system=True：上游（freemodel.dev）还通过请求体里的 system
+        # 消息识别 WorkBuddy 来源，转发/测试时请求体缺 system 需自动补一条。
+        "require_system": True,
         "headers": [
             ("User-Agent", "WorkBuddy/5.3.8 WorkBuddy/5.3.8 CLI/2.115.0"),
             ("X-Requested-With", "XMLHttpRequest"),
@@ -83,6 +86,20 @@ def get_headers(preset_name: str) -> list[tuple[str, str]]:
     if not preset:
         return []
     return [(name, value) for name, value in preset["headers"]]
+
+
+def needs_system_message(preset_name: str) -> bool:
+    """判断预设是否要求请求体携带 system 消息（``require_system`` 标记）。
+
+    部分上游（如 freemodel.dev）通过请求体中的 system 消息识别客户端来源
+    （WorkBuddy 请求必带系统提示词），缺失会返回 403 unsupported_client。
+    测试 Key 与正常转发在注入指纹头时，若请求体缺 system 消息且本函数
+    返回 True，则自动补一条。
+    """
+    preset = PRESETS.get(preset_name)
+    if not preset:
+        return False
+    return bool(preset.get("require_system", False))
 
 
 def list_presets() -> list[dict[str, str]]:
