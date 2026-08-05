@@ -80,6 +80,9 @@ body{
 .status-pill.stopped{background:rgba(248,81,73,0.15);color:var(--danger)}
 .status-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
 .content{padding:24px;flex:1;max-width:1400px;width:100%}
+/* Tab 默认隐藏：只有 showTab() 显式显示当前页，避免刷新后多页内容堆叠 */
+.tab{display:none}
+.tab.active{display:block}
 /* ---- 卡片 / 表格 ---- */
 .card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;margin-bottom:16px;box-shadow:var(--shadow)}
 .card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
@@ -389,7 +392,9 @@ async function checkAuth() {
   }
   document.getElementById("loginOverlay").classList.remove("show");
   document.getElementById("sideVer").textContent = s.version || "";
-  loadOverview(); loadSvcStatus();
+  // 刷新/登录后始终默认展示仪表盘，避免所有 tab 内容堆叠
+  showTab("dashboard");
+  loadSvcStatus();
 }
 
 async function doLogin() {
@@ -417,12 +422,13 @@ function doLogout() {
 // ---- Tab 切换 ----
 const titles = {dashboard:"仪表盘", models:"模型管理", keys:"Key 池", groups:"分组策略", tokens:"访问令牌", logs:"请求日志"};
 function showTab(name) {
-  document.querySelectorAll(".tab").forEach(t => t.style.display = "none");
+  document.querySelectorAll(".tab").forEach(t => { t.style.display = "none"; t.classList.remove("active"); });
   document.querySelectorAll(".nav-item").forEach(a => a.classList.remove("active"));
   const tab = document.getElementById("tab-" + name);
-  if (tab) tab.style.display = "block";
+  if (tab) { tab.style.display = "block"; tab.classList.add("active"); }
   document.querySelectorAll('.nav-item[data-tab="' + name + '"]').forEach(a => a.classList.add("active"));
   document.getElementById("pageTitle").textContent = titles[name] || name;
+  window.scrollTo(0, 0);
   if (name === "dashboard") loadOverview();
   if (name === "models") { loadModels(); loadFallbackStatus(); }
   if (name === "keys") { loadModels(); loadKeys(); }
@@ -527,16 +533,48 @@ async function loadModels() {
   await ensurePresetOptions();
   const d = await api("/api/models");
   models = d?.data || [];
-  document.getElementById("modelTable").innerHTML = models.length === 0
-    ? '<tr><td colspan="10" class="empty">还没有模型,点击右上角添加</td></tr>'
-    : models.map(m => `
+  // 自定义模型在前，兜底模型分组永远在最后，且默认折叠
+  const custom = models.filter(m => !m.is_fallback);
+  const fb = models.filter(m => m.is_fallback);
+  const fbCollapsed = localStorage.getItem("fbModelsCollapsed") !== "0";
+  const arrow = fbCollapsed ? "\u25B6" : "\u25BC";
+  let html = "";
+  if (custom.length > 0) {
+    html += custom.map(m => `
       <tr><td><strong>${esc(m.name)}</strong>${presetBadge(m)}</td><td>${esc(m.upstream_base)}</td><td>${esc(m.upstream_model)}</td>
       <td><code>${m.protocol||"openai"}</code></td>
       <td>${m.rpm_limit||"不限"}</td><td>${m.tpm_limit||"不限"}</td>
       <td>${m.aliases? '<code>'+esc(m.aliases)+'</code>' : '<span style="color:var(--text-subtle)">-</span>'}</td>
-      <td>${m.is_fallback? '<span class="tag fallback">兜底</span>' : '<span class="tag custom">自定义</span>'}</td>
+      <td><span class="tag custom">自定义</span></td>
       <td>${m.enabled? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否'}</td>
       <td><button class="btn small" onclick="editModel(${m.id})">编辑</button> <button class="btn small danger" onclick="delModel(${m.id})">删除</button></td></tr>`).join("");
+  }
+  // 兜底模型分组（永远在最后，可折叠）
+  if (fb.length > 0) {
+    html += '<tr class="group-header" onclick="toggleFbModels()">' +
+      '<td colspan="10"><span style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
+      '<span class="tag fallback">兜底</span> <strong>内置兜底模型</strong>' +
+      '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + fb.length + ' 个</span>' +
+      '<span style="float:right;color:var(--text-subtle);font-weight:400;font-size:12px">OpenCode Free 自动同步</span>' +
+      '</td></tr>';
+    if (!fbCollapsed) {
+      html += fb.map(m => `
+      <tr><td><strong>${esc(m.name)}</strong></td><td>${esc(m.upstream_base)}</td><td>${esc(m.upstream_model)}</td>
+      <td><code>${m.protocol||"openai"}</code></td>
+      <td>${m.rpm_limit||"不限"}</td><td>${m.tpm_limit||"不限"}</td>
+      <td>${m.aliases? '<code>'+esc(m.aliases)+'</code>' : '<span style="color:var(--text-subtle)">-</span>'}</td>
+      <td><span class="tag fallback">兜底</span></td>
+      <td>${m.enabled? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否'}</td>
+      <td><button class="btn small" onclick="editModel(${m.id})">编辑</button></td></tr>`).join("");
+    }
+  }
+  document.getElementById("modelTable").innerHTML = html || '<tr><td colspan="10" class="empty">还没有模型,点击右上角添加</td></tr>';
+}
+
+function toggleFbModels() {
+  const collapsed = localStorage.getItem("fbModelsCollapsed") !== "0";
+  localStorage.setItem("fbModelsCollapsed", collapsed ? "1" : "0");
+  loadModels();
 }
 
 async function refreshFallback() {
@@ -753,17 +791,21 @@ async function loadKeys() {
   const modelMap = {};
   models.forEach(m => modelMap[m.id] = m);
 
+  // 兜底模型是内置模型，Key 池不显示它们
+  const visibleModels = models.filter(m => !m.is_fallback);
   const groupsMap = new Map();
-  for (const m of models) groupsMap.set(m.id, {model: m, keys: []});
+  for (const m of visibleModels) groupsMap.set(m.id, {model: m, keys: []});
   for (const k of keys) {
+    const ownerModel = modelMap[k.model_id];
+    if (ownerModel && ownerModel.is_fallback) continue; // 兜底模型的 Key 也不显示
     const g = groupsMap.get(k.model_id) || {model: {id: k.model_id, name: "已删除模型#" + k.model_id}, keys: []};
     g.keys.push(k);
     groupsMap.set(k.model_id, g);
   }
 
   const collapsed = JSON.parse(localStorage.getItem("keyGroupCollapsed") || "{}");
-  if (keys.length === 0 && models.length === 0) {
-    document.getElementById("keyTable").innerHTML = '<tr><td colspan="7" class="empty">还没有 Key,先在「模型管理」添加模型,然后点击 + 添加 Key</td></tr>';
+  if (visibleModels.length === 0) {
+    document.getElementById("keyTable").innerHTML = '<tr><td colspan="7" class="empty">还没有模型,先在「模型管理」添加模型,然后点击 + 添加 Key</td></tr>';
     return;
   }
 
@@ -855,7 +897,8 @@ async function testAllKeys() {
 }
 
 function showKeyModal() {
-  const opts = models.map(m => '<option value="' + m.id + '">' + esc(m.name) + '</option>').join("");
+  // 兜底模型是内置模型，不给它们添加 Key
+  const opts = models.filter(m => !m.is_fallback).map(m => '<option value="' + m.id + '">' + esc(m.name) + '</option>').join("");
   document.getElementById("modalContent").innerHTML = `
     <h3>添加 Key</h3>
     <div class="form-group"><label>模型</label><select id="f_model_id">${opts}</select></div>
@@ -877,7 +920,8 @@ async function addKey() {
 }
 
 function showBatchImportModal() {
-  const opts = models.map(m => '<option value="' + m.id + '">' + esc(m.name) + '</option>').join("");
+  // 兜底模型是内置模型，批量导入同样只针对自定义模型
+  const opts = models.filter(m => !m.is_fallback).map(m => '<option value="' + m.id + '">' + esc(m.name) + '</option>').join("");
   document.getElementById("modalContent").innerHTML = `
     <h3>批量导入 Key</h3>
     <div class="form-group"><label>模型</label><select id="f_batch_model_id">${opts}</select></div>
