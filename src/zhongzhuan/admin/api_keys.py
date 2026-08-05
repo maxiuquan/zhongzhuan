@@ -52,6 +52,29 @@ def _build_upstream_url(
     return base + path
 
 
+def _build_fingerprint_headers(client_preset: str, custom_headers: str) -> list[tuple[str, str]]:
+    """构造与代理主流程一致的客户端指纹头列表。
+
+    与 ``handler._apply_client_fingerprint`` 相同的规则：
+
+    * ``client_preset == ""``    → 不模拟, 返回空列表（零影响）
+    * ``client_preset == "custom"`` → 解析 ``custom_headers`` JSON（容错为空）
+    * 其他预设 key           → 从 ``client_presets.PRESETS`` 取内置头
+
+    返回的 ``(name, value)`` 中的 value 是模板字符串（如 ``{{uuid}}``），由调用方
+    通过 :func:`zhongzhuan.proxy.header_templates.render` 渲染后再注入。
+    """
+    if not client_preset:
+        return []
+    if client_preset == "custom":
+        from ..proxy.client_presets import parse_custom_headers
+
+        return parse_custom_headers(custom_headers)
+    from ..proxy.client_presets import get_headers
+
+    return get_headers(client_preset)
+
+
 def register_routes(app: web.Application, ctx) -> None:
     async def list_(request):
         model_id = request.query.get("model_id")
@@ -151,6 +174,19 @@ def register_routes(app: web.Application, ctx) -> None:
             headers["anthropic-version"] = model.anthropic_version or "2023-06-01"
         else:
             headers["Authorization"] = "Bearer " + plain
+
+        # 客户端指纹模拟：测试请求与代理主流程（_apply_client_fingerprint）保持一致——
+        # 模型勾选了"模拟某客户端"，测试连接时也注入相同的指纹头，否则某些上游
+        # 对陌生 UA 的测试请求会拒绝/限流，导致误报失败。
+        fingerprint_headers = _build_fingerprint_headers(
+            model.client_preset or "",
+            model.custom_headers or "",
+        )
+        from ..proxy.header_templates import render
+
+        for fname, fvalue in fingerprint_headers:
+            if fname:
+                headers[fname] = render(fvalue)
 
         # 极简请求体（OpenAI 格式）
         if protocol == "anthropic":

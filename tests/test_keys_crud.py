@@ -6,7 +6,7 @@ os.environ["ZHONGZHUAN_DEV_NO_DPAPI"] = "1"
 
 import pytest
 
-from zhongzhuan.admin.api_keys import _build_upstream_url
+from zhongzhuan.admin.api_keys import _build_upstream_url, _build_fingerprint_headers
 from zhongzhuan.store.models import Model, create_model
 from zhongzhuan.store.keys import ApiKey, create_key, list_keys, get_key_cipher, delete_key
 
@@ -60,3 +60,34 @@ def test_build_upstream_url_dedups_base_path():
         _build_upstream_url("https://h.com/v1", "/v1/chat/completions", "openai")
         == "https://h.com/v1/chat/completions"
     )
+
+
+def test_build_fingerprint_headers_presets_and_custom():
+    """测试 Key 连通性请求必须与代理主流程携带相同的客户端指纹头。
+
+    模型勾选了"模拟某客户端"时（如 WorkBuddy），测试连接也要注入对应指纹头，
+    否则某些上游对陌生 UA 的测试请求会拒绝/限流，导致误报失败。
+    """
+    # 不模拟 → 空列表（零影响）
+    assert _build_fingerprint_headers("", "") == []
+    assert _build_fingerprint_headers("", "whatever") == []
+
+    # 内置预设 workbuddy → 返回预设头（模板 value 未渲染）
+    hdrs = _build_fingerprint_headers("workbuddy", "")
+    names = [n for n, _ in hdrs]
+    assert "User-Agent" in names
+    assert "X-Client-Name" in names
+    assert "X-Request-ID" in names
+    assert dict(hdrs)["User-Agent"].startswith("WorkBuddy/")
+
+    # custom → 解析 JSON 自定义头
+    raw = '[{"name":"X-Foo","value":"bar"},{"name":"X-Request-ID","value":"{{uuid}}"}]'
+    hdrs = _build_fingerprint_headers("custom", raw)
+    assert dict(hdrs)["X-Foo"] == "bar"
+    assert dict(hdrs)["X-Request-ID"] == "{{uuid}}"  # 模板原样，由调用方 render
+
+    # custom 但 JSON 损坏 → 容错为空（退化为不注入）
+    assert _build_fingerprint_headers("custom", "not json") == []
+
+    # 未知预设 → 空列表（与 get_headers 行为一致）
+    assert _build_fingerprint_headers("bogus", "") == []
