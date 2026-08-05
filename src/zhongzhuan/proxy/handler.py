@@ -213,7 +213,17 @@ class ProxyHandler:
           model belongs to that group's members (group-level load balancing
           via key health scoring; member order/strategy is best-effort).
         - requested_model matches a *model* name OR its aliases → keys bound to that model.
-        - no match (or empty) → all available keys (backwards-compatible).
+        - requested_model was specified but matches nothing (or every matched
+          key is unavailable) → **empty list**.  Never fall back to keys of a
+          different model: a client that named a specific model must not be
+          silently served by another model (previously this fell through to
+          ``all available keys``, which routed e.g. gpt-5.6-sol requests to
+          agnes/oc-* after every matching key hit 403).
+        - requested_model is empty → all available keys (no model named:
+          serve from whatever is healthy).
+        - **例外（向后兼容）**：所有可用 key 的 ``model_name`` 都为空（单 key
+          透传 / ``ProxyServer(api_key=...)`` 简写模式，未绑定任何模型）时，
+          不构成"跨模型路由"风险，仍回退到所有可用 key。
         """
         available = [k for k in self._keys if k.is_available()]
 
@@ -238,6 +248,12 @@ class ProxyHandler:
             ]
             if matched:
                 return matched
+            # 指定了模型但组/模型/别名都匹配不到（或全不可用）→ 不跨模型兜底。
+            # 唯一例外：所有可用 key 都未绑定模型名（透传模式）→ 无跨模型风险，
+            # 保持宽松行为（向后兼容 ProxyServer(api_key=...) 简写与旧测试）。
+            if all(not k.model_name for k in available):
+                return available
+            return []
 
         return available
 
@@ -1845,8 +1861,9 @@ class ProxyHandler:
         # Short circuit: no keys configured
         candidates = self._resolve_candidates(requested_model)
         if not candidates:
+            model_hint = f" for model {requested_model!r}" if requested_model else ""
             return web.json_response(
-                {"error": "no enabled keys"},
+                {"error": f"no enabled keys{model_hint}"},
                 status=503,
             )
 
