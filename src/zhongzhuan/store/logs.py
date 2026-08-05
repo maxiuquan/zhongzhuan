@@ -98,11 +98,11 @@ async def get_stats(s: Store, range_hours: int = 1) -> dict:
     """Get QPS, success rate, top errors."""
     since = Store.now() - range_hours * 3600
     total_row = await s.fetchone("SELECT COUNT(*) FROM request_logs WHERE ts>=?", (since,))
-    total = total_row[0] if total_row else 0
+    total = int(total_row[0]) if total_row and total_row[0] is not None else 0
     success_row = await s.fetchone(
         "SELECT COUNT(*) FROM request_logs WHERE ts>=? AND status>=200 AND status<300", (since,)
     )
-    success = success_row[0] if success_row else 0
+    success = int(success_row[0]) if success_row and success_row[0] is not None else 0
     errors = await s.fetchall(
         "SELECT status, COUNT(*) as cnt FROM request_logs WHERE ts>=? AND status>=400 GROUP BY status ORDER BY cnt DESC LIMIT 5",
         (since,),
@@ -112,13 +112,14 @@ async def get_stats(s: Store, range_hours: int = 1) -> dict:
         "SELECT AVG(latency_ms) FROM request_logs WHERE ts>=?",
         (since,),
     )
-    avg_latency = avg_row[0] or 0 if avg_row else 0
+    # AVG/COUNT 在 TiDB 返回 Decimal，必须显式转 float/int，否则 JSON 不可序列化
+    avg_latency = float(avg_row[0]) if avg_row and avg_row[0] is not None else 0
 
     active_row = await s.fetchone(
         "SELECT COUNT(DISTINCT key_id) FROM request_logs WHERE ts>=?",
         (since,),
     )
-    active_keys = active_row[0] if active_row else 0
+    active_keys = int(active_row[0]) if active_row and active_row[0] is not None else 0
 
     return {
         "qps": round(total / (range_hours * 3600), 2) if total else 0,
@@ -126,7 +127,7 @@ async def get_stats(s: Store, range_hours: int = 1) -> dict:
         "success_rate": round(success / total, 4) if total else 1.0,
         "avg_latency_ms": round(avg_latency, 1),
         "active_keys": active_keys,
-        "top_errors": [{"status": e[0], "count": e[1]} for e in errors],
+        "top_errors": [{"status": int(e[0]), "count": int(e[1])} for e in errors],
     }
 
 

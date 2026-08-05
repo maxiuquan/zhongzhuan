@@ -572,8 +572,9 @@ async function loadModels() {
 }
 
 function toggleFbModels() {
+  // 当前折叠则展开(0)，当前展开则折叠(1)
   const collapsed = localStorage.getItem("fbModelsCollapsed") !== "0";
-  localStorage.setItem("fbModelsCollapsed", collapsed ? "1" : "0");
+  localStorage.setItem("fbModelsCollapsed", collapsed ? "0" : "1");
   loadModels();
 }
 
