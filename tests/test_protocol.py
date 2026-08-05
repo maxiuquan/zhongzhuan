@@ -35,7 +35,12 @@ class TestDetect:
         assert detect_inbound_protocol("/v1/chat/completions", {}) == "openai"
 
     def test_x_api_key_header_triggers_anthropic(self):
-        assert detect_inbound_protocol("/v1/chat/completions", {"x-api-key": "sk-x"}) == "anthropic"
+        # 路径优先级高于 headers：/v1/chat/completions 是 OpenAI 端点，
+        # 即使带 x-api-key 头（很多 OpenAI 兼容客户端会同时携带），
+        # 也必须判定为 openai，否则 OpenAI 请求体会被误当成 Anthropic
+        # 格式转换，导致 tool 字段损坏、上游 400/422。
+        assert detect_inbound_protocol("/foo", {"x-api-key": "sk-x"}) == "anthropic"
+        assert detect_inbound_protocol("/v1/chat/completions", {"x-api-key": "sk-x"}) == "openai"
 
     def test_anthropic_version_header_triggers_anthropic(self):
         assert detect_inbound_protocol("/foo", {"anthropic-version": "2023-06-01"}) == "anthropic"

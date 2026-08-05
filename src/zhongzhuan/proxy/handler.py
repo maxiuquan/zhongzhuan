@@ -2339,7 +2339,6 @@ class ProxyHandler:
                                         status=_st,
                                         body=err_body,
                                         content_type="application/json",
-                                        headers={"Content-Type": "application/json"},
                                     )
                                 # 可重试类错误：换下一个 key 重试
                                 break
