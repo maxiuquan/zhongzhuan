@@ -41,11 +41,10 @@ def _free_port() -> int:
 
 
 def _wait_healthz(port: int, timeout: float = 60.0, proc: subprocess.Popen | None = None) -> str:
-    """轮询 ``GET /healthz`` 直到 200；超时抛 AssertionError。
+    """轮询 ``GET /healthz`` 直到 200；超时或子进程退出时抛 AssertionError。
 
-    超时时若 ``proc`` 可用，会读取其 stdout/stderr 附在错误消息里，方便
-    定位 Windows CI 上服务启动失败的根因（日志在 GitHub Actions 登录墙后
-    无法直接查看）。
+    若 ``proc`` 在轮询期间退出（启动失败），立即读取其 stdout/stderr 并
+    报错，不等超时——避免 Windows CI 上无谓的 60s 等待。
     """
     import urllib.request
 
@@ -53,6 +52,18 @@ def _wait_healthz(port: int, timeout: float = 60.0, proc: subprocess.Popen | Non
     deadline = time.monotonic() + timeout
     last_err: Exception | None = None
     while time.monotonic() < deadline:
+        # 子进程已退出 → 服务启动失败，立即收集输出并报错
+        if proc is not None and proc.poll() is not None:
+            stdout, stderr = "", ""
+            try:
+                stdout, stderr = proc.communicate(timeout=5.0)
+            except Exception:
+                pass
+            raise AssertionError(
+                f"server process exited (code={proc.returncode}) before /healthz responded\n"
+                f"--- stdout ---\n{stdout or '(empty)'}\n"
+                f"--- stderr ---\n{stderr or '(empty)'}"
+            )
         try:
             with urllib.request.urlopen(url, timeout=2.0) as resp:
                 if resp.status == 200:
@@ -62,25 +73,9 @@ def _wait_healthz(port: int, timeout: float = 60.0, proc: subprocess.Popen | Non
             last_err = exc
         time.sleep(0.5)
 
-    # 超时时收集子进程输出，帮助定位启动失败原因
-    diag = ""
-    if proc is not None:
-        try:
-            # 进程可能已退出（启动失败），communicate 会立即返回；
-            # 也可能还在运行，给 2s 让它吐完缓冲区。
-            stdout, stderr = proc.communicate(timeout=2.0)
-            diag = f"\n--- proc returncode: {proc.returncode} ---\n--- proc stdout ---\n{stdout or '(empty)'}\n--- proc stderr ---\n{stderr or '(empty)'}"
-        except subprocess.TimeoutExpired:
-            # 进程仍在运行，非阻塞读取已有输出
-            try:
-                stdout = proc.stdout.read() if proc.stdout else ""
-                stderr = proc.stderr.read() if proc.stderr else ""
-                diag = f"\n--- proc still running ---\n--- proc stdout ---\n{stdout or '(empty)'}\n--- proc stderr ---\n{stderr or '(empty)'}"
-            except Exception:
-                diag = "\n(proc output unavailable, still running)"
-        except Exception:
-            diag = "\n(proc output unavailable)"
-    raise AssertionError(f"/healthz not ready within {timeout}s (last: {last_err}){diag}")
+    # 超时：进程仍在运行，不阻塞读取（避免 hang）
+    rc = proc.poll() if proc else None
+    raise AssertionError(f"/healthz not ready within {timeout}s (last: {last_err}, proc rc={rc})")
 
 
 def _write_isolated_config(workdir: Path, port: int) -> Path:
