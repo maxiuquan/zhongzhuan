@@ -40,8 +40,13 @@ def _free_port() -> int:
     return port
 
 
-def _wait_healthz(port: int, timeout: float = 30.0) -> str:
-    """轮询 ``GET /healthz`` 直到 200；超时抛 AssertionError。"""
+def _wait_healthz(port: int, timeout: float = 60.0, proc: subprocess.Popen | None = None) -> str:
+    """轮询 ``GET /healthz`` 直到 200；超时抛 AssertionError。
+
+    超时时若 ``proc`` 可用，会读取其 stdout/stderr 附在错误消息里，方便
+    定位 Windows CI 上服务启动失败的根因（日志在 GitHub Actions 登录墙后
+    无法直接查看）。
+    """
     import urllib.request
 
     url = f"http://127.0.0.1:{port}/healthz"
@@ -56,7 +61,16 @@ def _wait_healthz(port: int, timeout: float = 30.0) -> str:
         except Exception as exc:  # 连接拒绝 / 超时等，继续轮询
             last_err = exc
         time.sleep(0.5)
-    raise AssertionError(f"/healthz not ready within {timeout}s (last: {last_err})")
+
+    # 超时时收集子进程输出，帮助定位启动失败原因
+    diag = ""
+    if proc is not None:
+        try:
+            stdout, stderr = proc.communicate(timeout=2.0)
+            diag = f"\n--- proc stdout ---\n{stdout or '(empty)'}\n--- proc stderr ---\n{stderr or '(empty)'}"
+        except Exception:
+            diag = "\n(proc output unavailable)"
+    raise AssertionError(f"/healthz not ready within {timeout}s (last: {last_err}){diag}")
 
 
 def _write_isolated_config(workdir: Path, port: int) -> Path:
@@ -99,6 +113,7 @@ def _start_server(workdir: Path, port: int) -> subprocess.Popen:
     env["ZHONGZHUAN_DATA_DIR"] = str(workdir / "data")
     # 明确开发模式 + 关闭会联网的功能（fallback 默认已关，这里再显式确认）。
     env["ZHONGZHUAN_ENV"] = "development"
+    env["ZHONGZHUAN_NO_BROWSER"] = "1"  # CI / headless：禁止 webbrowser.open() 阻塞
     env.pop("ZHONGZHUAN_TIDB_HOST", None)
 
     cmd = [sys.executable, "-m", "zhongzhuan", "--config", str(cfg), "--port", str(port)]
@@ -136,7 +151,7 @@ def test_healthz_200_on_start(tmp_path):
     port = _free_port()
     proc = _start_server(tmp_path, port)
     try:
-        body = _wait_healthz(port)
+        body = _wait_healthz(port, proc=proc)
         # liveness 载荷应含基本字段（不深断言，避免绑定实现细节）。
         assert "status" in body or "ok" in body.lower()
     finally:
@@ -171,7 +186,7 @@ def test_server_survives_two_healthz_checks(tmp_path):
     port = _free_port()
     proc = _start_server(tmp_path, port)
     try:
-        _wait_healthz(port)
+        _wait_healthz(port, proc=proc)
         _wait_healthz(port)
     finally:
         _stop_server(proc)
@@ -183,7 +198,7 @@ def test_lifecycle_isolated_data_dir(tmp_path):
     port = _free_port()
     proc = _start_server(tmp_path, port)
     try:
-        _wait_healthz(port)
+        _wait_healthz(port, proc=proc)
     finally:
         _stop_server(proc)
     # 服务在隔离目录里建出自己的 SQLite DB（而不是根目录 data.db）。
