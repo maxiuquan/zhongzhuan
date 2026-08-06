@@ -930,6 +930,43 @@ class ProxyHandler:
         )
 
     @staticmethod
+    def _sanitize_system_content_value(content) -> Any:
+        """Clean foreign client markers in a system message content.
+
+        OpenAI content has two legal shapes:
+        * plain string (simple requests / old clients);
+        * content block array (real Codex requests:
+          [{"type": "text", "text": ...}]).
+
+        Both must be cleaned: WorkBuddy-only upstreams (freemodel.dev etc.)
+        scan the whole request body for the marker and reject with 403 even
+        when the marker lives inside a content block (verified 2026-08-06
+        against a real Codex request body, item[1] is that shape).
+        """
+        from .client_presets import sanitize_system_content
+
+        if isinstance(content, str):
+            return sanitize_system_content(content)
+        if isinstance(content, list):
+            changed = False
+            out: list = []
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    cleaned = sanitize_system_content(block["text"])
+                    if cleaned != block["text"]:
+                        nb = dict(block)
+                        nb["text"] = cleaned
+                  
+                        out.append(nb)
+                        changed = True
+                    else:
+                        out.append(block)
+                else:
+                    out.append(block)
+            return out if changed else content
+        return content
+
+    @staticmethod
     def _inject_system_message(final_body: bytes, key, upstream_model: str | None = None) -> bytes:
         """按预设的 ``require_system`` 标记，确保请求体第一条 system 消息是客户端特征内容。
 
@@ -951,7 +988,6 @@ class ProxyHandler:
             from .client_presets import (
                 needs_system_message,
                 get_fingerprint_system_prefix,
-                sanitize_system_content,
             )
 
             if not needs_system_message(preset_name):
@@ -976,21 +1012,22 @@ class ProxyHandler:
                 # instructions）里可能含外来客户端标识（如 codex），上游会
                 # 据此判定为外来客户端 → 403。对第一条非特征 system 做
                 # 中性化清洗，其余消息（user/assistant/tool）不受影响。
+                # content 可能是纯字符串或内容块数组，两者都清洗。
                 for msg in messages[1:]:
-                    if (
-                        isinstance(msg, dict)
-                        and msg.get("role") == "system"
-                        and isinstance(msg.get("content"), str)
-                    ):
-                        cleaned = sanitize_system_content(msg["content"])
-                        if cleaned != msg["content"]:
+                    if isinstance(msg, dict) and msg.get("role") == "system":
+                        cleaned = ProxyHandler._sanitize_system_content_value(msg.get("content"))
+                        if cleaned != msg.get("content"):
                             msg["content"] = cleaned
                 return json.dumps(body_obj, ensure_ascii=False).encode()
             # 缺 system 或第一条不是特征 system → 在最前面插入特征 system，
-            # 同时把原来的第一条 system（外来 instructions）中性化，避免
-            # 插入后成为第二条 system 仍携带外来标识而被上游拒绝。
-            if messages and isinstance(messages[0], dict) and isinstance(messages[0].get("content"), str):
-                messages[0]["content"] = sanitize_system_content(messages[0]["content"])
+            # 同时把请求体里**所有** system（外来 instructions，可能排在 user
+            # 后面，如 Codex 把 system prompt 放在 input 数组靠后位置）中性化，
+            # 避免插入后仍有 system 携带外来标识而被上游拒绝。
+            for msg in messages:
+                if isinstance(msg, dict) and msg.get("role") == "system":
+                    cleaned = ProxyHandler._sanitize_system_content_value(msg.get("content"))
+                    if cleaned != msg.get("content"):
+                        msg["content"] = cleaned
             messages.insert(0, {"role": "system", "content": prefix})
             return json.dumps(body_obj, ensure_ascii=False).encode()
         except (json.JSONDecodeError, TypeError, ValueError):
