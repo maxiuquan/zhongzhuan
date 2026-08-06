@@ -21,6 +21,12 @@ from ..responses_v3.chain import build_upstream_input, chain_error_response
 from ..responses_v3.pipeline import PipelineConfig, ResponsePipeline
 from ..responses_v3.request_sanitizer import RequestSanitizer, capability_values
 from ..responses_v3.upstream_chunk_adapter import UpstreamSSEChunkAdapter
+
+#: 需要做外来客户端标识中性化的指令类角色。OpenAI 如今把系统提示词放在
+#: ``developer`` 角色（官方 Codex CLI 的 "You are Codex" 即在此），我们只认
+#: ``system`` 会漏掉，导致该标识原样透传上游而 403（2026-08-06 实测）。
+_INSTRUCTION_ROLES = ("system", "developer")
+
 from .context import RequestContextBuilder
 from .ratelimit import KeyHealth, STATE_HEALTHY
 from .retry import (
@@ -931,17 +937,16 @@ class ProxyHandler:
 
     @staticmethod
     def _sanitize_system_content_value(content) -> Any:
-        """Clean foreign client markers in a system message content.
+        """清洗 system/developer 消息内容中的外来客户端标识（兼容两种形态）。
 
-        OpenAI content has two legal shapes:
-        * plain string (simple requests / old clients);
-        * content block array (real Codex requests:
-          [{"type": "text", "text": ...}]).
+        OpenAI 的 ``content`` 有两种合法形态：
+        * 纯字符串（简单请求 / 老客户端）；
+        * 内容块数组（Codex 真实请求：``[{"type": "text", "text": ...}]``）。
 
-        Both must be cleaned: WorkBuddy-only upstreams (freemodel.dev etc.)
-        scan the whole request body for the marker and reject with 403 even
-        when the marker lives inside a content block (verified 2026-08-06
-        against a real Codex request body, item[1] is that shape).
+        两种都必须清洗：上游（freemodel.dev 等 WorkBuddy-only）扫描的是整个
+        请求体的 system/developer 消息，content 块数组里的 ``codex`` 同样会
+        触发 403 unsupported_client（2026-08-06 实测 Codex 真实请求体 item[1]
+        即此形态，且 role 为 developer 而非 system）。
         """
         from .client_presets import sanitize_system_content
 
@@ -956,7 +961,6 @@ class ProxyHandler:
                     if cleaned != block["text"]:
                         nb = dict(block)
                         nb["text"] = cleaned
-                  
                         out.append(nb)
                         changed = True
                     else:
@@ -1010,11 +1014,11 @@ class ProxyHandler:
             ):
                 # 特征 system 已置顶，但后续 system（通常是客户端自带的长
                 # instructions）里可能含外来客户端标识（如 codex），上游会
-                # 据此判定为外来客户端 → 403。对第一条非特征 system 做
-                # 中性化清洗，其余消息（user/assistant/tool）不受影响。
+                # 据此判定为外来客户端 → 403。对后续所有 system 做中性化
+                # 清洗，其余消息（user/assistant/tool）不受影响。
                 # content 可能是纯字符串或内容块数组，两者都清洗。
                 for msg in messages[1:]:
-                    if isinstance(msg, dict) and msg.get("role") == "system":
+                    if isinstance(msg, dict) and msg.get("role") in _INSTRUCTION_ROLES:
                         cleaned = ProxyHandler._sanitize_system_content_value(msg.get("content"))
                         if cleaned != msg.get("content"):
                             msg["content"] = cleaned
@@ -1024,7 +1028,7 @@ class ProxyHandler:
             # 后面，如 Codex 把 system prompt 放在 input 数组靠后位置）中性化，
             # 避免插入后仍有 system 携带外来标识而被上游拒绝。
             for msg in messages:
-                if isinstance(msg, dict) and msg.get("role") == "system":
+                if isinstance(msg, dict) and msg.get("role") in _INSTRUCTION_ROLES:
                     cleaned = ProxyHandler._sanitize_system_content_value(msg.get("content"))
                     if cleaned != msg.get("content"):
                         msg["content"] = cleaned
