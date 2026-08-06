@@ -41,7 +41,6 @@ from typing import Any, AsyncIterable, Awaitable, Callable
 
 from ..proxy.protocol.responses_errors import to_incomplete_details
 from ..proxy.protocol.responses_models import (
-    SSE_DONE_FRAME,
     SSE_HEARTBEAT_FRAME,
     TerminalReason,
     TIMEOUT_REASONS,
@@ -583,7 +582,7 @@ class ResponsePipeline:
         reason: TerminalReason,
         strict: bool,
     ) -> list[bytes]:
-        """Render the truncation terminal event + ``[DONE]`` (criteria ⑥⑦)."""
+        """Render the truncation terminal event (criteria ⑥⑦)."""
         frames = await self._close_open_items(incomplete=True)
         details = to_incomplete_details(
             reason,
@@ -609,14 +608,13 @@ class ResponsePipeline:
                 },
             )
         )
-        frames.append(SSE_DONE_FRAME)
         self.state = status
         self.stats.terminal_reason = reason.value
         self.stats.truncated_streams += 1
         return frames
 
     async def _completed_frames(self) -> list[bytes]:
-        """Graceful ``response.completed`` + ``[DONE]`` (T21 criterion ⑤)."""
+        """Graceful ``response.completed`` (T21 criterion ⑤)."""
         frames = await self._close_open_items(incomplete=False)
         frames.append(
             await self._emit(
@@ -627,7 +625,6 @@ class ResponsePipeline:
                 },
             )
         )
-        frames.append(SSE_DONE_FRAME)
         self.state = "completed"
         return frames
 

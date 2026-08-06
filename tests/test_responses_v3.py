@@ -158,7 +158,7 @@ async def test_input_items_pagination_three_pages(env):
 
 @pytest.mark.asyncio
 async def test_pipeline_zero_bytes_sequence(env):
-    """Criterion ⑤: a 0-byte upstream ends as created->in_progress->completed->[DONE]."""
+    """Criterion ⑤: a 0-byte upstream ends as created->in_progress->completed."""
     rs, handler = env
     _, created = await handler.dispatch("POST", "/v1/responses", workspace_id="t1", body={"model": "gpt-4o"})
     rid = created["id"]
@@ -169,8 +169,8 @@ async def test_pipeline_zero_bytes_sequence(env):
             yield None
 
     frames = [f async for f in ResponsePipeline(rid, workspace_id="t1", store=rs).run(empty_upstream())]
-    # Last frame is [DONE].
-    assert frames[-1] == b"data: [DONE]\n\n"
+    # The stream ends on the terminal response.completed event (no Chat-Completions [DONE]).
+    assert frames[-1].decode("utf-8").startswith("event: response.completed")
     event_types = []
     for fr in frames[:-1]:
         line = fr.decode("utf-8")

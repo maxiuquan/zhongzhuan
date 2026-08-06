@@ -41,7 +41,6 @@ from zhongzhuan.proxy.protocol.responses import (
 from zhongzhuan.proxy.protocol.responses_bridge import ResponsesTurnBridge
 from zhongzhuan.proxy.protocol.responses_models import (
     ReasoningEventMode,
-    SSE_DONE_FRAME,
     SSE_HEARTBEAT_FRAME,
 )
 from zhongzhuan.proxy.protocol.stream_a2o import StreamA2O
@@ -409,7 +408,7 @@ def _assert_midstream_disconnect(events):
     assert "response.completed" in names  # 兼容模式：断流以 completed 收尾
     completed = _collect(events, "response.completed")[0]
     assert completed["response"]["terminal_reason"] == "upstream_truncated"
-    assert events[-1] == ("[DONE]", {})
+    assert events[-1][0] == "response.completed"
 
 
 def _assert_client_cancel(result):

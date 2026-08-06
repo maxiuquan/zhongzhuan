@@ -4,7 +4,7 @@ Covers the acceptance criteria of T14:
 1. created/in_progress emitted on start, before any token.
 2. sequence_number strictly monotonic.
 3. Every added has exactly one done; duplicate added ignored.
-4. completed and [DONE] each emitted exactly once.
+4. completed emitted exactly once.
 5. Illegal transitions refused and recorded (INIT->COMPLETED, COMPLETED->DELTA,
    item done then append, duplicate completed).
 6. Heartbeat never transitions state.
@@ -137,17 +137,18 @@ def test_close_item_idempotent():
 
 
 # ---------------------------------------------------------------------------
-# 4. completed + [DONE] exactly once
+# 4. completed emitted exactly once
 # ---------------------------------------------------------------------------
 
 
-def test_terminate_emits_terminal_and_done():
+def test_terminate_emits_terminal_once():
     em = _make_emitter()
     em.start()
     frames = em.terminate(ResponseStatus.COMPLETED)
     text = b"".join(frames).decode()
     assert "response.completed" in text
-    assert "data: [DONE]" in text
+    # 不再追加 Chat-Completions 风格的 [DONE] 哨兵，仅以 response.completed 收尾。
+    assert "data: [DONE]" not in text
 
 
 def test_terminate_idempotent():

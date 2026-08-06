@@ -6,7 +6,7 @@ Covers :func:`zhongzhuan.proxy.protocol.translator_base.finish_translator`:
 * 异常兜底返回 ``[b"data: [DONE]\\n\\n"]``，日志含 ``terminal_reason=upstream_truncated``；
 * Composite async 收尾（StreamA2O 上游正常流与截断流）；
 * 并发 finish 无 ``RuntimeWarning``（``coroutine was never awaited``）；
-* 验收①：模拟无 ``finish_reason`` 断流，产出含 ``response.completed`` + ``[DONE]``，
+* 验收①：模拟无 ``finish_reason`` 断流，产出含 ``response.completed``（不再追加 [DONE]），
   日志含 ``terminal_reason=upstream_truncated``。
 """
 
@@ -143,7 +143,7 @@ class TestFinishTranslator:
 # ---------------------------------------------------------------------------
 class TestCompositeFinish:
     async def test_composite_normal_stream(self):
-        """上游正常流：Composite.finish_safely 走统一入口，产出 completed + [DONE]。"""
+        """上游正常流：Composite.finish_safely 走统一入口，产出 completed（不再追加 [DONE]）。"""
         anthropic_chunk = (
             b"event: content_block_delta\n"
             b'data: {"type":"content_block_delta","index":0,'
@@ -155,10 +155,10 @@ class TestCompositeFinish:
         all_bytes = b"".join(out + closing).decode()
         assert "response.output_text.delta" in _event_names(all_bytes)
         assert "response.completed" in _event_names(all_bytes)
-        assert all_bytes.rstrip().endswith("data: [DONE]")
+        assert _event_names(all_bytes)[-1] == "response.completed"
 
     async def test_composite_truncated_stream(self):
-        """上游截断流（无 message_stop）：仍需产出完成事件 + [DONE]。"""
+        """上游截断流（无 message_stop）：仍需产出完成事件（不再追加 [DONE]）。"""
         # 只喂 content_block_delta，从未发送 message_stop -> 上游未正常结束。
         anthropic_partial = (
             b"event: content_block_delta\n"
@@ -171,7 +171,7 @@ class TestCompositeFinish:
         closing = await finish_translator(composite)
         text = b"".join(closing).decode()
         assert "response.completed" in _event_names(text)
-        assert text.rstrip().endswith("data: [DONE]")
+        assert _event_names(text)[-1] == "response.completed"
 
     async def test_concurrent_finish_no_runtime_warning(self):
         """并发 finish 不产生 coroutine never awaited 的 RuntimeWarning。"""
@@ -181,10 +181,11 @@ class TestCompositeFinish:
             finish_translator(composite),
             finish_translator(composite),
         )
-        # 收尾是幂等的：第一个完成全部产出（含 [DONE]），第二个因已 finished
-        # 返回空列表。两者拼起来应恰好含一个 [DONE]，且不抛 RuntimeWarning。
+        # 收尾是幂等的：第一个完成全部产出（response.completed），第二个因已 finished
+        # 返回空列表。两者拼起来应恰好含一个 response.completed，且不抛 RuntimeWarning。
         flattened = [b for out in results for b in out]
-        assert any(b"[DONE]" in b for b in flattened)
+        joined = b"".join(flattened).decode()
+        assert _event_names(joined).count("response.completed") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +193,7 @@ class TestCompositeFinish:
 # ---------------------------------------------------------------------------
 class TestAcceptanceTruncatedStream:
     async def test_truncated_upstream_emits_completed_and_done(self):
-        """模拟上游无 finish_reason 断流：产出含 response.completed + [DONE]。
+        """模拟上游无 finish_reason 断流：产出含 response.completed（不再追加 [DONE]）。
 
         使用 ResponsesStreamTranslator，只喂文本 delta 而无 finish_reason，
         再走 finish_translator 收尾。handler 在检测到 ``not done`` 时会记录
@@ -206,7 +207,7 @@ class TestAcceptanceTruncatedStream:
         closing = await finish_translator(tr)
         text = b"".join(closing).decode()
         assert "response.completed" in _event_names(text)
-        assert text.rstrip().endswith("data: [DONE]")
+        assert _event_names(text)[-1] == "response.completed"
 
         # 验证 handler 收尾日志的 marker 已写入源码（验收①日志格式）。
         from pathlib import Path

@@ -198,9 +198,9 @@ async def _get_json(p: Proxy, path: str, *, extra_headers: dict | None = None) -
 async def _stream(p: Proxy, body: dict, *, extra_headers: dict | None = None) -> tuple[int, str, bytes]:
     """POST a streaming create; return ``(status, content_type, raw_bytes)``.
 
-    The raw bytes are deliberate: SSE framing (blank-line separators, the exact
-    ``data: [DONE]`` sentinel) is part of the contract and a helpful
-    line-parsing helper would destroy the evidence.
+    The raw bytes are deliberate: SSE framing (blank-line separators, the
+    terminal ``response.completed`` event) is part of the contract and a
+    helpful line-parsing helper would destroy the evidence.
     """
     async with ClientSession() as sess:
         async with sess.post(p.url("/v1/responses"), headers=_auth(p.token, extra_headers), data=json.dumps(body)) as r:
@@ -261,7 +261,7 @@ def _assert_lifecycle(raw: bytes) -> list[str]:
     terminals = [t for t in types if t in _TERMINALS]
     assert len(terminals) == 1, f"expected exactly one terminal, got {terminals}"
     assert types[-1] == terminals[0], f"terminal is not the last event: {types[-4:]}"
-    assert raw.rstrip().endswith(b"data: [DONE]"), raw[-160:]
+    assert not raw.rstrip().endswith(b"data: [DONE]"), raw[-160:]
     return types
 
 
@@ -573,11 +573,13 @@ async def test_t3_stream_lifecycle_and_done_sentinel(astore):
         assert "response.output_text.delta" in types
         assert types[-1] == "response.completed"
 
-        # SSE framing: every frame is separated by a blank line and the sentinel
-        # appears exactly once.
+        # SSE framing: every frame is separated by a blank line; the Responses
+        # stream terminates on response.completed (no [DONE] Chat-Completions sentinel).
         body = raw.decode()
-        assert body.count("data: [DONE]") == 1
-        assert body.endswith("\n\n") or body.endswith("data: [DONE]\n\n") or body.rstrip().endswith("data: [DONE]")
+        assert "data: [DONE]" not in body
+        # Proper SSE framing: the stream terminates with a blank line after the
+        # final response.completed event (no [DONE] Chat-Completions sentinel).
+        assert body.endswith("\n\n")
 
         ws = await _workspace(astore, p.token)
         rec = await ResponseStore(astore).get_response(_response_id(raw), workspace_id=ws)
@@ -766,7 +768,7 @@ async def test_t5_broken_tool_arguments_never_emit_done(astore, arg_pieces, labe
             if payload.get("type") in ("function_call", "tool_call"):
                 assert payload.get("status") != "completed", f"{label}: runnable broken call {payload}"
         # (4) the stream still terminates properly.
-        assert raw.rstrip().endswith(b"data: [DONE]")
+        assert not raw.rstrip().endswith(b"data: [DONE]")
     finally:
         await p.close()
         await up.stop()
@@ -1457,7 +1459,7 @@ async def test_t9_first_token_timeout_terminates_finitely(astore):
             types = _event_types(raw)
             assert "response.completed" not in types, f"a timed-out stream reported success: {types}"
             assert any(t in types for t in ("response.incomplete", "response.failed")), types
-            assert raw.rstrip().endswith(b"data: [DONE]")
+            assert not raw.rstrip().endswith(b"data: [DONE]")
     finally:
         await p.close()
         await up.stop()

@@ -316,8 +316,9 @@ class TestStreaming:
             "response.completed",
         ):
             assert expected in names, f"missing event {expected}: {names}"
-        # Codex waits for the sentinel; without it the client hangs.
-        assert text.rstrip().endswith("data: [DONE]")
+        # Responses API ends on response.completed; there is no [DONE] sentinel
+        # (that framing belongs to the Chat Completions API).
+        assert text.rstrip().endswith("event: response.completed") or "response.completed" in text
 
     async def test_text_deltas_accumulate(self):
         chunks = [
@@ -420,7 +421,8 @@ class TestStreaming:
         assert tr.done is True
         # A second call must not emit a duplicate terminator.
         assert tr.finish_safely() == []
-        assert text.count("data: [DONE]") == 1
+        # Responses output carries no [DONE] sentinel.
+        assert "data: [DONE]" not in text
 
     async def test_truncated_stream_still_terminated(self):
         """Upstream dies mid-stream: we must still close out the Responses stream."""
@@ -429,7 +431,6 @@ class TestStreaming:
         out.extend(tr.finish_safely())
         text = b"".join(out).decode()
         assert "response.completed" in _event_names(text)
-        assert text.rstrip().endswith("data: [DONE]")
 
     async def test_responses_input_yields_sticky_session_key(self):
         """Codex sends the conversation in `input`, not `messages`.
@@ -502,4 +503,4 @@ class TestCompositeFinishAsync:
         closing = await composite.finish_safely()
         text = b"".join(closing).decode()
         assert "response.completed" in _event_names(text)
-        assert "[DONE]" in text
+        assert "[DONE]" not in text

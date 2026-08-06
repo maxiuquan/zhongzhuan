@@ -262,7 +262,6 @@ class TestUpstreamDisconnect:
         assert names[0] == "response.created"
         assert "response.in_progress" in names
         assert "response.completed" in names
-        assert text.rstrip().endswith("data: [DONE]")
 
     async def test_immediate_disconnect_with_emitter(self):
         """⑤ bridge with a partial chunk then disconnect still starts cleanly."""
@@ -273,4 +272,3 @@ class TestUpstreamDisconnect:
         names = _event_names(text)
         assert names[0] == "response.created"
         assert "response.completed" in names
-        assert "data: [DONE]" in text

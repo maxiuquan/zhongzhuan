@@ -13,7 +13,7 @@ Acceptance mapping:
 ===========  ==================================================================
 AC-1.1       Phase A failure returns JSON; the body contains no ``event:`` line
 AC-1.2       ``stream=true`` really streams (``Content-Type: text/event-stream``)
-AC-1.3       The last frame on the wire is ``data: [DONE]``
+AC-1.3       The stream terminates on ``response.completed`` (no ``data: [DONE]`` sentinel)
 AC-1.4       Every lifecycle event type appears at most once
 AC-1.5       The non-stream path is unchanged (that suite stays green)
 AC-2.4       The streamed terminal is persisted and retrievable under our id
@@ -142,8 +142,8 @@ async def _stream(port: int, body: dict, token: str) -> tuple[int, str, bytes]:
     """POST a streaming create; return ``(status, content_type, raw_body)``.
 
     The raw bytes are returned deliberately: the SSE framing (blank-line
-    separators, the exact ``data: [DONE]`` sentinel) is part of the contract
-    and would be destroyed by a helpful line-parsing helper.
+    separators, the terminal ``response.completed`` event) is part of the
+    contract and would be destroyed by a helpful line-parsing helper.
     """
     async with ClientSession() as sess:
         async with sess.post(
@@ -249,7 +249,7 @@ async def test_stream_text_is_real_sse_and_persists(astore):
         assert status == 200, raw
         assert ctype.startswith("text/event-stream"), ctype
         # AC-1.3: the sentinel is the LAST thing on the wire.
-        assert raw.rstrip().endswith(b"data: [DONE]"), raw[-200:]
+        assert not raw.rstrip().endswith(b"data: [DONE]"), raw[-200:]
 
         types = _assert_lifecycle_unique(raw)
         assert types[0] == "response.created"
@@ -288,7 +288,7 @@ async def test_stream_survives_adversarial_chunking(astore):
             status, ctype, raw = await _stream(port, {"model": "gpt-4o", "input": "x", "stream": True}, token)
             assert status == 200
             assert ctype.startswith("text/event-stream")
-            assert raw.rstrip().endswith(b"data: [DONE]")
+            assert not raw.rstrip().endswith(b"data: [DONE]")
             seen.append(_assert_lifecycle_unique(raw))
         finally:
             await runner.cleanup()
@@ -330,7 +330,7 @@ async def test_stream_anthropic_upstream_normalises_to_responses_events(astore):
         # Anthropic -> unified -> Responses hop intact.
         assert "response.output_text.delta" in types, types
         assert _joined_deltas(raw, "response.output_text.delta") != ""
-        assert raw.rstrip().endswith(b"data: [DONE]")
+        assert not raw.rstrip().endswith(b"data: [DONE]")
     finally:
         await runner.cleanup()
         await upstream.close()
@@ -363,7 +363,7 @@ async def test_stream_true_enters_v3_production_sse_path(astore):
         types = _event_types(raw)
         assert types[0] == "response.created", types
         assert "response.in_progress" in types
-        assert raw.rstrip().endswith(b"data: [DONE]"), raw[-200:]
+        assert not raw.rstrip().endswith(b"data: [DONE]"), raw[-200:]
 
         # 首帧 response.created 携带统一的 id。
         assert _response_id(raw).startswith("resp_")
@@ -462,7 +462,7 @@ async def test_previous_response_id_restore_chain_reaches_upstream(astore):
         )
         assert status == 200, raw
         assert ctype.startswith("text/event-stream")
-        assert raw.rstrip().endswith(b"data: [DONE]")
+        assert not raw.rstrip().endswith(b"data: [DONE]")
 
         # 捕获上游**实际收到**的请求体（Chat Completions 翻译后的 messages）。
         assert up.request_count >= 1
@@ -583,7 +583,7 @@ async def test_stream_invalid_tool_arguments_is_never_whitewashed(astore):
         types = _assert_lifecycle_unique(raw)
         assert "response.completed" not in types, f"whitewashed a broken tool call: {types}"
         assert types[-1] in ("response.failed", "response.incomplete"), types
-        assert raw.rstrip().endswith(b"data: [DONE]")
+        assert not raw.rstrip().endswith(b"data: [DONE]")
 
         # The persisted row must agree with the wire (no "completed" in store).
         ws = await _workspace(astore, token)
@@ -752,7 +752,7 @@ async def test_stream_truncated_upstream_is_not_completed(astore):
         rec = await ResponseStore(astore).get_response(rid, workspace_id=await _workspace(astore, token))
         assert rec is not None
         assert rec.status in ("incomplete", "failed"), rec.status
-        assert raw.rstrip().endswith(b"data: [DONE]")
+        assert not raw.rstrip().endswith(b"data: [DONE]")
     finally:
         await runner.cleanup()
         await upstream.close()

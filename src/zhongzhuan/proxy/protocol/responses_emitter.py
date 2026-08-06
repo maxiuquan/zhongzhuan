@@ -34,7 +34,6 @@ from .responses_models import (
     EmitterState,
     OutputItem,
     ResponseStatus,
-    SSE_DONE_FRAME,
     SSE_HEARTBEAT_FRAME,
     TERMINAL_EMITTER_STATES,
     coerce_enum,
@@ -245,7 +244,7 @@ class ResponsesEventEmitter:
         incomplete_details: dict[str, Any] | None = None,
         error: dict[str, Any] | None = None,
     ) -> list[bytes]:
-        """Emit the terminal response event and ``[DONE]`` (exactly once).
+        """Emit the terminal response event (exactly once).
 
         ``status`` is the official ``response.status`` (``completed`` /
         ``failed`` / ``incomplete`` / ``cancelled``).  In compatibility mode a
@@ -292,10 +291,9 @@ class ResponsesEventEmitter:
         self._completed_emitted = True
         self._transition(emitter_state)
 
-        # Exactly-once [DONE].
-        if not self._done_emitted:
-            frames.append(SSE_DONE_FRAME)
-            self._done_emitted = True
+        # 流仅以 response.<status> 收尾；不再追加 Chat-Completions 风格的 [DONE] 哨兵。
+        # 仍置位 _done_emitted，使 done 属性与 terminate 幂等判断保持一致。
+        self._done_emitted = True
         return frames
 
     def _close_open_item(self, item_id: str) -> list[bytes]:

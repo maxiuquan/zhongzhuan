@@ -294,8 +294,10 @@ async def test_circuit_breaker_trip_emits_terminal_once(reason_value):
     assert event["response"]["status"] == "incomplete"
     assert event["response"]["incomplete_details"]["reason"] == reason_value
     assert event["response"]["terminal_reason"] == reason_value
-    assert frames[-1] == b"data: [DONE]\n\n"
-    assert sum(1 for f in frames if f == b"data: [DONE]\n\n") == 1
+    # Terminal frame is the response.incomplete event (Responses API has no [DONE] sentinel).
+    assert b"response.incomplete" in frames[-1]
+    assert b"data: [DONE]" not in frames[-1]
+    assert sum(1 for f in frames if f == b"data: [DONE]\n\n") == 0  # Responses API has no [DONE] sentinel
     assert any(e["event"] == "circuit_breaker.trip" for e in store.events)
 
 

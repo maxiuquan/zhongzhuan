@@ -47,7 +47,6 @@ from zhongzhuan.proxy.protocol.item_registry import (
 from zhongzhuan.proxy.protocol.responses_bridge import ResponsesTurnBridge
 from zhongzhuan.proxy.protocol.responses_models import (
     ReasoningEventMode,
-    SSE_DONE_FRAME,
 )
 from zhongzhuan.responses_v3.pipeline import ResponsePipeline
 from zhongzhuan.store.response_store import ResponseStore
@@ -609,13 +608,13 @@ async def test_s12_13_every_added_has_a_done(store):
 
 
 # ---------------------------------------------------------------------------
-# 14. completed 和 [DONE] 各一次
+# 14. completed 恰好一次且为最后一帧
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_s12_14_completed_and_done_each_once(store):
-    """正常流：response.completed 恰好一次、[DONE] 恰好一次且为最后一帧。"""
+async def test_s12_14_completed_once_terminal(store):
+    """正常流：response.completed 恰好一次且为最后一帧（不再追加 [DONE]）。"""
     frames: list[bytes] = []
     upstream = iter([_text("hi"), {"type": "finish"}])
 
@@ -627,8 +626,8 @@ async def test_s12_14_completed_and_done_each_once(store):
     frames = [f async for f in pipeline.run(source())]
     events = _parse_events(frames)
     assert _names(events).count("response.completed") == 1
-    assert events.count(("[DONE]", {})) == 1
-    assert events[-1] == ("[DONE]", {})
+    assert "[DONE]" not in _names(events)
+    assert events[-1][0] == "response.completed"
     assert pipeline.state == "completed"
 
 
@@ -654,7 +653,7 @@ async def test_s12_15_disconnect_before_first_chunk_still_created(store):
     assert "response.completed" in _names(events)
     completed = _collect(events, "response.completed")[0]
     assert completed["response"]["terminal_reason"] == "upstream_connect"
-    assert frames[-1] == SSE_DONE_FRAME
+    assert frames[-1].decode("utf-8").startswith("event: response.completed")
 
 
 # ---------------------------------------------------------------------------

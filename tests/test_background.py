@@ -272,9 +272,10 @@ async def test_catchup_matches_live_sequence_numbers(rs):
     seqs = [e["seq"] for e in replayed_events]
     assert seqs == list(range(seqs[0], seqs[0] + len(seqs)))
 
-    # Byte-identical frames ([DONE] is a sentinel, never a logged event).
-    assert live_frames[-1] == b"data: [DONE]\n\n"
-    assert replayed_frames == live_frames[:-1]
+    # Byte-identical frames: every emitted frame (including the terminal
+    # response.completed) is also a logged event, so the catch-up replay
+    # reproduces the live stream exactly.
+    assert replayed_frames == live_frames
     assert replayed_frames == [sse_frame(e["event_type"], e["data"]) for e in live_events]
 
 

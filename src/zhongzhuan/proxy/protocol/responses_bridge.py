@@ -106,7 +106,7 @@ class ResponsesTurnBridge:
         return self._finished
 
     def finish_safely(self) -> list[bytes]:
-        """Close all open items, emit the terminal event + ``[DONE]`` (once)."""
+        """Close all open items, emit the terminal event (once)."""
         if self._finished:
             return []
         return self._finish()

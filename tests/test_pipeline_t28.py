@@ -27,7 +27,6 @@ from aiohttp.test_utils import make_mocked_request
 
 from zhongzhuan.config import default_config
 from zhongzhuan.proxy.protocol.responses_models import (
-    SSE_DONE_FRAME,
     SSE_HEARTBEAT_FRAME,
     TIMEOUT_REASONS,
     Capability,
@@ -370,9 +369,9 @@ async def test_text_truncation_compat(store):
     assert all(it["item"]["status"] == "incomplete" for it in done_items)
     # 2. no partial arguments done (trivially true for a text stream)
     assert "response.function_call_arguments.done" not in types
-    # 3. completed + [DONE]
+    # 3. terminal is response.completed (no [DONE] sentinel in Responses API)
     assert "response.completed" in types
-    assert frames[-1] == SSE_DONE_FRAME
+    assert b"response.completed" in frames[-1]
     # 4. terminal_reason + incomplete_details on the terminal event
     completed = next(data for ev, data in events if ev == "response.completed")
     assert completed["response"]["terminal_reason"] == TerminalReason.UPSTREAM_TRUNCATED.value
@@ -400,9 +399,9 @@ async def test_tool_truncation_compat(store):
     assert call_done and call_done[0]["item"]["status"] == "incomplete"
     # 2. NEVER emitted arguments.done for a partial call (R-P1-22 core)
     assert "response.function_call_arguments.done" not in types
-    # 3. completed + [DONE]
+    # 3. terminal is response.completed (no [DONE] sentinel in Responses API)
     assert "response.completed" in types
-    assert frames[-1] == SSE_DONE_FRAME
+    assert b"response.completed" in frames[-1]
     # 4. terminal_reason + incomplete_details
     completed = next(data for ev, data in events if ev == "response.completed")
     assert completed["response"]["terminal_reason"] == TerminalReason.UPSTREAM_TRUNCATED.value
@@ -410,7 +409,7 @@ async def test_tool_truncation_compat(store):
 
 
 # ---------------------------------------------------------------------------
-# ⑦ R-P1-23 -- strict mode: failed/incomplete, [DONE] still last
+# ⑦ R-P1-23 -- strict mode: failed/incomplete, response.<status> is the last frame
 # ---------------------------------------------------------------------------
 
 
@@ -432,9 +431,9 @@ async def test_text_truncation_strict(store):
 
     assert "response.completed" not in types
     assert "response.failed" in types or "response.incomplete" in types
-    # [DONE] is still the very last frame (direct frame-sequence assertion).
-    assert frames[-1] == SSE_DONE_FRAME
-    terminal = events[-1] if events[-1][0] != "[DONE]" else events[-2]
+    # The terminal response.<status> event is the very last frame (no [DONE] sentinel).
+    assert b"response.failed" in frames[-1] or b"response.incomplete" in frames[-1]
+    terminal = events[-1]
     assert terminal[0] in ("response.failed", "response.incomplete")
     assert terminal[1]["response"]["terminal_reason"] == TerminalReason.UPSTREAM_TRUNCATED.value
 
@@ -458,8 +457,9 @@ async def test_tool_truncation_strict(store):
     # Partial arguments never produce arguments.done in strict mode either.
     assert "response.function_call_arguments.done" not in types
     assert "response.completed" not in types
-    assert frames[-1] == SSE_DONE_FRAME
-    terminal = events[-1] if events[-1][0] != "[DONE]" else events[-2]
+    # The terminal response.<status> event is the last frame (no [DONE] sentinel).
+    assert b"response.failed" in frames[-1] or b"response.incomplete" in frames[-1]
+    terminal = events[-1]
     assert terminal[0] in ("response.failed", "response.incomplete")
 
 
