@@ -112,10 +112,25 @@ def _web_search_spec(param_path: str = "tools[1].type") -> HostedToolSpec:
     )
 
 
+def _file_search_spec(param_path: str = "tools[1].type") -> HostedToolSpec:
+    # file_search 既不在默认 emulated 集合、也不在上游透传集合，属于「真不支持」。
+    return HostedToolSpec(
+        tool_type="file_search",
+        raw={"type": "file_search"},
+        required_capability=Capability.FILE_SEARCH,
+        param_path=param_path,
+    )
+
+
 def test_validate_returns_400_unsupported_tool_with_precise_param():
-    """判据②：能力不可服务 -> 400 ``unsupported_tool``，``param`` 指向具体位置。"""
+    """判据②：能力不可服务 -> 400 ``unsupported_tool``，``param`` 指向具体位置。
+
+    用 ``file_search`` 而不是 ``web_search``：web_search 现在属于上游透传能力
+    （``UPSTREAM_FORWARDED_CAPABILITIES``），默认即视为可服务、不会再 400。
+    file_search 既不 emulated 也不 forwarded，仍是「真不支持」的代表。
+    """
     validator = HostedToolValidator()  # 默认只模拟 stateful_responses/background
-    err = validator.validate([_web_search_spec()], available=frozenset())
+    err = validator.validate([_file_search_spec()], available=frozenset())
     assert err is not None
     assert err.error_class is ErrorClass.UNSUPPORTED_TOOL_CAPABILITY
     assert err.http_status == 400
@@ -125,7 +140,7 @@ def test_validate_returns_400_unsupported_tool_with_precise_param():
     assert status == 400
     assert body["error"]["code"] == "unsupported_tool"
     assert body["error"]["param"] == "tools[1].type"
-    assert "web_search" in body["error"]["message"]
+    assert "file_search" in body["error"]["message"]
 
 
 def test_validate_servable_capability_passes():

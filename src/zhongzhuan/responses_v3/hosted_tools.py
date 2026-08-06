@@ -76,7 +76,11 @@ from ..store.tool_executions import (
     STATUS_RECOGNIZED,
     ToolExecutionStore,
 )
-from .capability import DEFAULT_EMULATED_CAPABILITIES, CapabilityError
+from .capability import (
+    DEFAULT_EMULATED_CAPABILITIES,
+    UPSTREAM_FORWARDED_CAPABILITIES,
+    CapabilityError,
+)
 
 # ---------------------------------------------------------------------------
 # 1. 常量
@@ -252,10 +256,14 @@ class HostedToolValidator:
         self,
         *,
         emulated: frozenset[Capability] = DEFAULT_EMULATED_CAPABILITIES,
+        forwarded: frozenset[Capability] = UPSTREAM_FORWARDED_CAPABILITIES,
     ) -> None:
         #: 桥接自己能完整承载的能力。默认取 T25 的清单（只含真正实现了的两项）；
         #: 后续任务落地新执行器时从构造参数注入，不必改这里。
         self._emulated = emulated
+        #: 上游透传能力（中继不执行、原样转发的 hosted 能力）。默认仅 web_search；
+        #: 这些能力由上游承载，校验时视为可服务，不会 400。
+        self._forwarded = forwarded
 
     def validate(
         self,
@@ -269,7 +277,7 @@ class HostedToolValidator:
         的 ``param`` 是单值字段，聚合会让它退化成 ``tools``，客户端就得自己
         猜。逐个报错、客户端逐个修，是可编程处理的失败。
         """
-        servable = frozenset(available) | self._emulated
+        servable = frozenset(available) | self._emulated | self._forwarded
         for spec in specs:
             if spec.required_capability not in servable:
                 return build_unsupported_tool_error(spec)
@@ -282,7 +290,7 @@ class HostedToolValidator:
         available: frozenset[Capability],
     ) -> list[HostedToolSpec]:
         """全部不可服务的 spec（审计 / 启动期缺口清单用，不用于错误体）。"""
-        servable = frozenset(available) | self._emulated
+        servable = frozenset(available) | self._emulated | self._forwarded
         return [s for s in specs if s.required_capability not in servable]
 
 

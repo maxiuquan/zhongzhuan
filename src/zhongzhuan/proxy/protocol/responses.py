@@ -16,7 +16,7 @@ import time
 from typing import Any
 
 from .responses_bridge import ResponsesTurnBridge
-from .responses_models import ReasoningEventMode
+from .responses_models import HOSTED_TOOL_CAPABILITY, Capability, ReasoningEventMode
 from .translator_base import finish_translator
 
 # ---- OpenAI / Responses API constants (stable string values) ----
@@ -37,6 +37,13 @@ ITEM_FUNCTION_CALL = "function_call"
 ITEM_FUNCTION_CALL_OUTPUT = "function_call_output"
 ITEM_REASONING = "reasoning"
 ITEM_SUMMARY_TEXT = "summary_text"
+
+# 上游透传的 hosted 工具类型：中继不执行、原样转发给上游由上游执行。当前仅
+# web_search 系列（见 ``HOSTED_TOOL_CAPABILITY`` 里映射到 ``Capability.WEB_SEARCH``
+# 的全部别名）。翻译到 Chat Completions 时也保留这些工具，否则上游收不到搜索请求。
+WEB_SEARCH_TOOL_TYPES: frozenset[str] = frozenset(
+    t for t, cap in HOSTED_TOOL_CAPABILITY.items() if cap is Capability.WEB_SEARCH
+)
 
 
 def _normalize_tool_parameters(params: Any) -> dict:
@@ -163,9 +170,20 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
     if pending_tool_results:
         result["messages"].extend(pending_tool_results)
 
-    # Convert tools format (drop hosted tools with no name).
+    # Convert tools format.  Most hosted tools (no ``name``) cannot survive the
+    # Chat Completions shape and are dropped -- but *upstream-forwarded* hosted
+    # tools (web_search family) are kept verbatim so the upstream receives and
+    # executes them (see WEB_SEARCH_TOOL_TYPES).
     if isinstance(body.get("tools"), list):
-        result["tools"] = [t for t in (_convert_tool(t) for t in body["tools"]) if t]
+        converted_tools: list[dict] = []
+        for tool in body["tools"]:
+            if isinstance(tool, dict) and tool.get("type") in WEB_SEARCH_TOOL_TYPES:
+                converted_tools.append(tool)  # 上游透传：原样保留
+                continue
+            mapped = _convert_tool(tool)
+            if mapped:
+                converted_tools.append(mapped)
+        result["tools"] = converted_tools
 
     # Map Responses-only max_output_tokens -> Chat max_tokens.
     if "max_output_tokens" in result:

@@ -173,17 +173,22 @@ def test_route_translate_anthropic_uses_messages_path():
 
 
 def test_native_mode_never_downgrades_to_chat():
-    """upstream_mode=responses_native：即使上游没声明能力也不降级。"""
-    key = make_key(upstream_mode="native")  # 未声明 web_search
+    """upstream_mode=responses_native：即使上游没声明能力也不降级。
+
+    用 ``code_interpreter``（既不 emulated 也不 forwarded）而不是 ``web_search``：
+    web_search 现在属于上游透传能力，默认即视为可服务、不会进 gaps。
+    code_interpreter 仍是「真不支持」的代表，用来验证「未声明 -> gaps + 不降级」。
+    """
+    key = make_key(upstream_mode="native")  # 未声明 code_interpreter
     cfg = FakeCfg(upstream_mode="responses_native")
-    decision = router_for([key], cfg).route(make_req(Capability.WEB_SEARCH), [key])
+    decision = router_for([key], cfg).route(make_req(Capability.CODE_INTERPRETER), [key])
 
     assert isinstance(decision, RouteDecision)
     assert decision.mode is ExecutionMode.NATIVE
     assert decision.upstream_path == PATH_RESPONSES
     assert PATH_CHAT_COMPLETIONS not in decision.upstream_path
     # 未声明的能力如实进 gaps —— 直通但不假装成功（R-P1-45）。
-    assert [g.capability for g in decision.gaps] == [Capability.WEB_SEARCH]
+    assert [g.capability for g in decision.gaps] == [Capability.CODE_INTERPRETER]
     assert decision.gaps[0].param_path == "tools[0].type"
     assert decision.granted == frozenset()
 
@@ -215,9 +220,13 @@ def test_forced_native_without_any_available_key_returns_error():
 
 
 def test_native_key_missing_capability_does_not_win_native():
-    """未强制原生时，能力声明不全的 NATIVE key 不能冒充原生直通。"""
+    """未强制原生时，能力声明不全的 NATIVE key 不能冒充原生直通。
+
+    用 ``computer``（既不 emulated 也不 forwarded）代替旧用例里的 ``web_search``：
+    web_search 现在默认透传，无法再用来表达「能力缺失」；computer 仍是真不支持。
+    """
     key = make_key(capabilities={"file_search"}, upstream_mode="native")
-    result = router_for([key]).route(make_req(Capability.WEB_SEARCH), [key])
+    result = router_for([key]).route(make_req(Capability.COMPUTER), [key])
 
     assert isinstance(result, CapabilityError)
     assert result.error_class is ErrorClass.UNSUPPORTED_TOOL_CAPABILITY
@@ -229,9 +238,13 @@ def test_native_key_missing_capability_does_not_win_native():
 
 
 def test_route_unsupported_capability_returns_error():
-    """required capability 无人承载 -> 400 + param 指向 tools[N].type。"""
+    """required capability 无人承载 -> 400 + param 指向 tools[N].type。
+
+    ``web_search`` 现在默认上游透传，不再触发 400；用 ``computer``（真不支持）
+    来表达「无人承载」这一错误路径。
+    """
     key = make_key()
-    req = make_req(Capability.WEB_SEARCH, Capability.COMPUTER)
+    req = make_req(Capability.COMPUTER, Capability.WEB_SEARCH)
     result = router_for([key]).route(req, [key])
 
     assert isinstance(result, CapabilityError)
@@ -240,7 +253,6 @@ def test_route_unsupported_capability_returns_error():
     assert result.param.startswith("tools[")
     assert result.param.endswith("].type")
     assert {g.capability for g in result.gaps} == {
-        Capability.WEB_SEARCH,
         Capability.COMPUTER,
     }
     assert all(g.reason == REASON_NO_UPSTREAM for g in result.gaps)
@@ -279,14 +291,18 @@ def test_route_unavailable_returns_503():
 
 
 def test_unavailable_and_unsupported_are_not_conflated():
-    """同一份请求：key 可用 -> 400；key 不可用 -> 503。两者不可合并。"""
-    req = make_req(Capability.WEB_SEARCH)
-    declaring = make_key(capabilities={"web_search"}, upstream_mode="native")
+    """同一份请求：key 可用 -> 400；key 不可用 -> 503。两者不可合并。
+
+    用 ``computer``（真不支持）代替旧用例的 ``web_search``：web_search 现在默认
+    上游透传，单独用它无法表达「unsupported」；computer 仍能区分两种故障语义。
+    """
+    req = make_req(Capability.COMPUTER)
+    declaring = make_key(capabilities={"computer"}, upstream_mode="native")
     other = make_key(2, capabilities={"file_search"}, upstream_mode="native")
 
     down = make_key(
         3,
-        capabilities={"web_search"},
+        capabilities={"computer"},
         upstream_mode="native",
         available=False,
     )
@@ -364,14 +380,17 @@ def test_startup_gap_report_is_empty_when_nothing_promised():
 
 
 def test_startup_gap_report_is_deterministically_ordered():
-    """清单顺序稳定（按能力名排序），启动日志才能被 diff。"""
+    """清单顺序稳定（按能力名排序），启动日志才能被 diff。
+
+    ``web_search`` 是上游透传能力，默认不算缺口，故只列出真正缺的 computer /
+    image_generation。
+    """
     cfg = FakeCfg(required_capabilities=("web_search", "computer", "image_generation"))
     gaps = router_for([make_key()], cfg).startup_gap_report()
 
     assert [g.capability.value for g in gaps] == [
         "computer",
         "image_generation",
-        "web_search",
     ]
 
 

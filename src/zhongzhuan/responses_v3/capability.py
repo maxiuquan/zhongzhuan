@@ -89,6 +89,18 @@ DEFAULT_EMULATED_CAPABILITIES: frozenset[Capability] = frozenset(
     }
 )
 
+#: 上游透传能力：桥接自身**不执行**，但原样把工具转发给上游、由上游执行。
+#: 与 ``EMULATED`` 的区别在于没有本地执行器 —— 中继只负责「不拦截、不伪造、
+#: 带工具透传」。当前仅 ``WEB_SEARCH``：OpenAI 系 / freemodel.dev 等上游在
+#: Responses 与 Chat Completions 两条路径都原生支持 web 搜索，中继无需本地
+#: 搜索后端即可放行。若某上游确实不支持，由上游自己返回错误，中继不必假装有
+#: 能力（R-P1-45）。
+UPSTREAM_FORWARDED_CAPABILITIES: frozenset[Capability] = frozenset(
+    {
+        Capability.WEB_SEARCH,
+    }
+)
+
 #: ``KeyHealth.upstream_mode`` 的字符串取值 -> :class:`ExecutionMode`。
 #: 历史默认值 ``"bonded"`` 表示「未声明」，按最保守的 TRANSLATE 处理。
 _MODE_ALIASES: dict[str, ExecutionMode] = {
@@ -304,6 +316,7 @@ class CapabilityRouter:
         cfg: Any = None,
         *,
         emulated: Iterable[Capability] | None = None,
+        forwarded: Iterable[Capability] | None = None,
     ) -> None:
         self._registry = registry
         self._cfg = cfg
@@ -312,6 +325,10 @@ class CapabilityRouter:
         self._strict_default: bool = bool(getattr(cfg, "strict_capability_startup", False))
         self._emulated: frozenset[Capability] = (
             coerce_capabilities(emulated) if emulated is not None else DEFAULT_EMULATED_CAPABILITIES
+        )
+        #: 上游透传能力（中继不执行、原样转发的 hosted 能力，见模块常量）。
+        self._forwarded: frozenset[Capability] = (
+            coerce_capabilities(forwarded) if forwarded is not None else UPSTREAM_FORWARDED_CAPABILITIES
         )
         #: 部署声称要提供的能力；空集合表示「什么都没承诺」，于是没有缺口。
         self._required: frozenset[Capability] = coerce_capabilities(getattr(cfg, "required_capabilities", None))
@@ -322,6 +339,11 @@ class CapabilityRouter:
     def emulated_capabilities(self) -> frozenset[Capability]:
         """本地执行器能完整承载的能力集合。"""
         return self._emulated
+
+    @property
+    def forwarded_capabilities(self) -> frozenset[Capability]:
+        """上游透传能力集合（中继不执行、原样转发给上游）。"""
+        return self._forwarded
 
     @property
     def forced_mode(self) -> ExecutionMode | None:
@@ -354,14 +376,18 @@ class CapabilityRouter:
         用的），本方法只负责能力维度的判定，不重复做权重调度。
         """
         required = coerce_capabilities(req.required_capabilities)
+        # 上游透传能力由上游自己执行，中继只负责带工具转发，不承担、也不要求
+        # 本地执行器或原生声明。从「路由必须保全」的集合里剔除，避免它们被误判
+        # 为无人承载而 400。仍记在 ``granted`` 里如实反映「该能力由上游提供」。
+        required_effective = required - self._forwarded
         available = [k for k in candidates if _available(self._registry, k)]
 
         # -- 0. 配置强制原生：R-P1-44「原生模式不得先降级为 Chat Completions」--
         if self._forced_mode is ExecutionMode.NATIVE:
-            return self._forced_native(req, required, candidates, available)
+            return self._forced_native(req, required, required_effective, candidates, available)
 
         # -- 1. NATIVE：上游自己声明了全部所需能力 --
-        native = self._pick_native(required, available)
+        native = self._pick_native(required_effective, available)
         if native is not None:
             return RouteDecision(
                 mode=ExecutionMode.NATIVE,
@@ -374,23 +400,24 @@ class CapabilityRouter:
         if available:
             key = available[0]
 
-            # -- 2. TRANSLATE：没有任何 hosted 能力需要保全时的等价降级 --
-            # 先于 EMULATE 判定：``required`` 为空时不存在「被模拟的能力」，
-            # 把它算作 EMULATE 会让纯文本请求错误地宣称本地执行器参与过。
-            if not required:
+            # -- 2. TRANSLATE：没有任何「需本地保全」的 hosted 能力时的等价降级 --
+            # 先于 EMULATE 判定：``required_effective`` 为空时不存在「被模拟的
+            # 能力」（透传类能力由上游承载），把它算作 EMULATE 会让纯文本 +
+            # web_search 请求错误地宣称本地执行器参与过。
+            if not required_effective:
                 return RouteDecision(
                     mode=ExecutionMode.TRANSLATE,
                     key=key,
                     upstream_path=_translate_path(key),
-                    granted=frozenset(),
-                    reason="no hosted capability required; provably equivalent downgrade",
+                    granted=required,
+                    reason="no locally-executed capability required; upstream forwards hosted tools",
                 )
 
             # -- 3. EMULATE：缺的部分本地执行器能补齐 --
             # 取「缺得最少」的可用 key，而不是列表里的第一个：候选顺序由调度器
             # 的权重决定，与能力覆盖无关。
-            best = min(available, key=lambda k: len(self._unmet(required, k)))
-            unmet = self._unmet(required, best)
+            best = min(available, key=lambda k: len(self._unmet(required_effective, k)))
+            unmet = self._unmet(required_effective, best)
             if unmet <= self._emulated:
                 return RouteDecision(
                     mode=ExecutionMode.EMULATE,
@@ -401,6 +428,7 @@ class CapabilityRouter:
                 )
 
         # -- 4. 失败：区分「没人声明」与「声明了但不可用」--
+        # 透传能力已在上游侧满足，不再计入缺口。
         return self._failure(req, required, candidates)
 
     # -- 路由内部实现 ----------------------------------------------------
@@ -409,6 +437,7 @@ class CapabilityRouter:
         self,
         req: SanitizedRequest,
         required: frozenset[Capability],
+        required_effective: frozenset[Capability],
         candidates: Sequence[KeyHealth],
         available: Sequence[KeyHealth],
     ) -> RouteDecision | CapabilityError:
@@ -416,19 +445,20 @@ class CapabilityRouter:
 
         即便上游的能力声明不完整也**不降级**（否则就违反 R-P1-44 / 判据③）；
         未声明的部分如实进 ``gaps``，由调用方决定是审计还是告警 —— 唯独不会
-        变成一次伪装成功的 Chat Completions 请求。
+        变成一次伪装成功的 Chat Completions 请求。透传能力由上游承载，不计入
+        缺失。
         """
-        preferred = self._pick_native(required, available)
+        preferred = self._pick_native(required_effective, available)
         key = preferred or (available[0] if available else None)
         if key is None:
             return self._failure(req, required, candidates)
         declared = _declared_of(self._registry, key)
-        missing = required - declared - self._emulated
+        missing = required_effective - declared - self._emulated
         return RouteDecision(
             mode=ExecutionMode.NATIVE,
             key=key,
             upstream_path=PATH_RESPONSES,
-            granted=required & (declared | self._emulated),
+            granted=required & (declared | self._emulated | self._forwarded),
             gaps=self._gaps_for(req, missing, REASON_NO_UPSTREAM),
             reason="upstream_mode=responses_native (passthrough forced)",
         )
@@ -462,7 +492,9 @@ class CapabilityRouter:
             (
                 cap
                 for cap in required
-                if cap not in self._emulated and not any(cap in _declared_of(self._registry, k) for k in pool)
+                if cap not in self._emulated
+                and cap not in self._forwarded
+                and not any(cap in _declared_of(self._registry, k) for k in pool)
             ),
             key=lambda c: c.value,
         )
@@ -514,7 +546,8 @@ class CapabilityRouter:
         keys = _all_keys(self._registry)
         report: list[CapabilityGap] = []
         for cap in sorted(self._required, key=lambda c: c.value):
-            if cap in self._emulated:
+            if cap in self._emulated or cap in self._forwarded:
+                # 本地模拟或上游透传都算「已满足」，不算缺口。
                 continue
             declaring = [k for k in keys if cap in _declared_of(self._registry, k)]
             if not declaring:
@@ -572,6 +605,7 @@ __all__ = [
     "PATH_CHAT_COMPLETIONS",
     "PATH_MESSAGES",
     "DEFAULT_EMULATED_CAPABILITIES",
+    "UPSTREAM_FORWARDED_CAPABILITIES",
     "REASON_NO_UPSTREAM",
     "REASON_ROUTE_UNAVAILABLE",
     "coerce_execution_mode",
