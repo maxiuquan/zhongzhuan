@@ -70,6 +70,20 @@ def mark_failure(k: KeyHealth) -> None:
     mark_server_error(k)
 
 
+def mark_empty_response(k: KeyHealth) -> None:
+    """Upstream returned HTTP 200 but with *no content* (empty completion).
+
+    Treated as a soft failure (short exponential backoff, like a 5xx) so the
+    scheduler deprioritises the key and routes the *next* request elsewhere.
+    Crucially, because the in-flight request has not committed a byte to the
+    client yet (pre-first-byte), it can transparently retry with another
+    candidate key — this is the "auto switch-key on empty" behaviour.
+    """
+    _bump_failure(k)
+    k.status = STATE_ERROR
+    k.cooldown_until = time.time() + cooldown_for(k.consecutive_failures)
+
+
 def mark_success(k: KeyHealth) -> None:
     k.success_count += 1
     k.recent_429_count = 0

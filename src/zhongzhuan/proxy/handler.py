@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 from typing import Any
 
 from aiohttp import web
@@ -27,11 +28,176 @@ from ..responses_v3.upstream_chunk_adapter import UpstreamSSEChunkAdapter
 #: ``system`` 会漏掉，导致该标识原样透传上游而 403（2026-08-06 实测）。
 _INSTRUCTION_ROLES = ("system", "developer")
 
+#: V3 流式路径在把首个字节发给客户端之前，最多可切换的上游 key 次数
+#: （即最多尝试 ``_V3_STREAM_MAX_SWITCHES + 1`` 个 key）。用于「空响应自动换 key」。
+_V3_STREAM_MAX_SWITCHES = 2
+
+
+def _response_is_empty(inbound_protocol: str, parsed: Any) -> bool:
+    """判断一个已解析的 200 响应是否为「空响应」（无任何内容）。
+
+    空响应指上游返回 200 但既没有文本/推理内容，也没有工具调用产物。
+    用于触发「自动换 key 重试」：这类 200 对客户端毫无用处。
+    """
+    if not isinstance(parsed, dict):
+        return False
+    if inbound_protocol == "responses":
+        # 必须是 responses 形态才判定为空：否则（非本 schema 的透传体）直接
+        # 透传，绝不当成空响应去换 key（换到底会耗尽成 429）。
+        if "output" not in parsed:
+            return False
+        output = parsed.get("output")
+        if not output:
+            return True
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type")
+            if itype == "message":
+                content = item.get("content")
+                if isinstance(content, str):
+                    if content:
+                        return False
+                    continue
+                if isinstance(content, list) and any(
+                    isinstance(c, dict) and (c.get("text") not in (None, "")) for c in content
+                ):
+                    return False
+            elif itype in (
+                "function_call",
+                "file_search_call",
+                "web_search_call",
+                "code_interpreter_call",
+                "image_generation_call",
+                "mcp_call",
+            ):
+                # 有工具调用产物 = 有内容，不算空
+                return False
+            elif itype == "reasoning":
+                summary = item.get("summary")
+                if isinstance(summary, list) and any(
+                    isinstance(s, dict) and s.get("text") for s in summary
+                ):
+                    return False
+        return True
+    # chat completions / anthropic 归一化后的结构
+    # 同样要求出现 ``choices`` 键才判定：像 ``{"ok": true}`` 这类非 chat
+    # 形态（health/透传体）不能算空响应，否则会无限换 key 直到 429。
+    if "choices" not in parsed:
+        return False
+    choices = parsed.get("choices")
+    if not choices:
+        return True
+    for ch in choices:
+        msg = ch.get("message") or ch.get("delta") or {}
+        if msg.get("content") not in (None, ""):
+            return False
+        if msg.get("tool_calls") or msg.get("function_call"):
+            return False
+    return True
+
+
+def _v3_frame_has_content(frame: bytes) -> bool:
+    """判断一条 SSE 帧是否携带「真实内容」。
+
+    仅 ``response.output_text.delta``（非空文本）、``response.reasoning*``
+    （非空）、``response.output_audio.delta``、工具调用 ``output_item.added``
+    / ``function_call_arguments.delta`` 才算内容。结构性事件
+    （``response.created`` / ``in_progress`` / 空 ``output_text.delta``）不算，
+    否则空响应会被误判为有内容而失去重试机会。
+    """
+    text = frame.decode("utf-8", "replace")
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if not payload:
+            continue
+        try:
+            obj = json.loads(payload)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        etype = obj.get("type")
+        if etype == "response.output_text.delta":
+            delta = obj.get("delta")
+            if isinstance(delta, dict):
+                if delta.get("text"):
+                    return True
+            elif isinstance(delta, str) and delta:
+                return True
+        elif etype in ("response.reasoning.delta", "response.reasoning_summary.delta"):
+            delta = obj.get("delta")
+            if isinstance(delta, dict):
+                if delta.get("text") or delta.get("summary"):
+                    return True
+            elif isinstance(delta, str) and delta:
+                return True
+        elif etype == "response.output_audio.delta":
+            return True
+        elif etype == "response.output_item.added":
+            item = obj.get("item") or {}
+            if isinstance(item, dict) and item.get("type") not in (None, "message"):
+                return True
+        elif etype == "response.function_call_arguments.delta":
+            if obj.get("delta"):
+                return True
+    return False
+
+
+class _DeferredEventLog:
+    """把 ``append_event`` 攒在内存里，直到调用方决定 commit 还是 discard。
+
+    换 key 重试要求「被放弃的那次尝试从未存在过」。但 ``ResponsePipeline._emit``
+    是边发帧边写 ``response_events``，而该表 append-only、``(response_id, seq)``
+    唯一：第二次尝试的新 pipeline 又从 ``seq=0`` 开始写同一个 response_id，
+    直接撞 UNIQUE 约束、整条请求 500。
+
+    删掉上一次的事件不是选项（``EventLog`` 明确禁止 DELETE/UPDATE，回放语义
+    也依赖 append-only）。所以反过来做：**尝试期间根本不写库**，等到确认这一次
+    要提交给客户端时再一次性 flush。被放弃的尝试直接 ``discard``，库里干净得
+    像它没发生过——这也正好符合事实，客户端确实一个字节都没收到。
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self._pending: list[dict] = []
+        self._live = False
+
+    async def append_event(self, **kwargs):
+        if self._live:
+            return await self._inner.append_event(**kwargs)
+        self._pending.append(kwargs)
+        return kwargs.get("seq", 0)
+
+    async def commit(self) -> None:
+        """认领这次尝试：补写缓冲的事件，之后转为直写。"""
+        if self._live:
+            return
+        pending, self._pending = self._pending, []
+        self._live = True
+        for kwargs in pending:
+            await self._inner.append_event(**kwargs)
+
+    def discard(self) -> None:
+        """放弃这次尝试：缓冲的事件全部丢弃，绝不落库。"""
+        self._pending.clear()
+
+
+class _DeferredEventStore:
+    """只暴露 ``ResponsePipeline`` 真正用到的 ``event_log``（见其 ``_emit``）。"""
+
+    def __init__(self, inner) -> None:
+        self.event_log = _DeferredEventLog(inner.event_log)
+
+
 from .context import RequestContextBuilder
 from .ratelimit import KeyHealth, STATE_HEALTHY
 from .retry import (
     mark_network_failure,
     mark_success,
+    mark_empty_response,
     learn_rate_limits,
     classify_failure,
     reason_for_exhaustion,
@@ -545,22 +711,67 @@ class ProxyHandler:
         ctx,
         candidates: list[KeyHealth],
     ) -> web.Response:
-        """Execute one real non-stream v3 create against an upstream (T26)."""
+        """Execute one real non-stream v3 create against an upstream (T26).
+
+        自动换 key 重试（用户要求）：``_run_v3_nonstream`` 本身是 single-shot，
+        重试循环放在这一层。触发换 key 的有两类：可重试的上游错误（429/5xx/
+        连接失败），以及 **HTTP 200 但内容为空** —— 后者原先被当作成功原样透传，
+        正是「发了消息却没有任何回复」的来源。
+        """
         prep, error = await self._prepare_v3_create(request, ctx, candidates)
         if error is not None:
             return error
         assert prep is not None  # narrow for type checkers: error is None
 
-        resp, payload_bytes = await self._run_v3_nonstream(
-            request=request,
-            body_obj=prep.upstream_body,
-            final_body=prep.final_body,
-            decision=prep.decision,
-            requested_model=ctx.requested_model or "",
-            inbound_protocol="responses",
-            session_key=self._session_key(request, prep.body_obj),
-            required_caps=capability_values(prep.sanitized),
-        )
+        max_switches = min(len(candidates), _V3_STREAM_MAX_SWITCHES + 1)
+        tried: set[int] = set()
+        resp = None
+        payload_bytes = b""
+        for _attempt in range(max_switches):
+            decision = self._v3_select_retry_key(prep, candidates, tried)
+            if decision is None:
+                break
+            attempt_key = decision.key
+            tried.add(attempt_key.key_id)
+            resp, payload_bytes = await self._run_v3_nonstream(
+                request=request,
+                body_obj=prep.upstream_body,
+                final_body=prep.final_body,
+                decision=decision,
+                requested_model=ctx.requested_model or "",
+                inbound_protocol="responses",
+                session_key=self._session_key(request, prep.body_obj),
+                required_caps=capability_values(prep.sanitized),
+            )
+            if resp.status_code >= 400:
+                # 499 是客户端自己走了，重试毫无意义；4xx（除 429）是请求本身
+                # 的问题，换 key 也还是同样的错。只有 429 / 5xx 值得换。
+                if resp.status_code == 499 or (400 <= resp.status_code < 500 and resp.status_code != 429):
+                    break
+                _lg.info(
+                    f"[v3] key_id={attempt_key.key_id} status={resp.status_code}; "
+                    f"switching key ({len(tried)}/{max_switches} tried)"
+                )
+                continue
+            try:
+                _parsed = json.loads(payload_bytes.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                _parsed = None
+            # 上游可能已被翻译成 responses 形状，也可能仍是 chat 形状（原生
+            # responses 上游 / 翻译失败回退）。按 body 的实际形状选判定分支，
+            # 否则「没有 output 键」会被 responses 分支一律当成空。
+            _proto = "responses" if isinstance(_parsed, dict) and "output" in _parsed else "openai"
+            if _parsed is not None and _response_is_empty(_proto, _parsed):
+                _lg.warning(
+                    f"[v3] key_id={attempt_key.key_id} upstream returned EMPTY 200 "
+                    f"(no output/content); switching key ({len(tried)}/{max_switches} tried)"
+                )
+                mark_empty_response(attempt_key)
+                continue
+            break
+
+        if resp is None:
+            return web.json_response({"error": "no enabled keys"}, status=503)
         if resp.status_code >= 400:
             return web.Response(
                 status=resp.status_code,
@@ -624,166 +835,314 @@ class ProxyHandler:
         ctx,
         candidates: list[KeyHealth],
     ) -> web.StreamResponse:
-        """Serve ``POST /v1/responses`` with ``stream=true`` as a real SSE stream."""
+        """Serve ``POST /v1/responses`` with ``stream=true`` as a real SSE stream.
+
+        自动换 key 重试（用户要求）：上游返回 HTTP 200 但**空流**（没有任何内容
+        帧）时，把该 key 标记为软失败，并在「尚未向客户端发出任何字节」之前透明
+        地换下一个候选 key 重试。由于 200 只在收到首个内容帧、缓冲后才会提交
+        （``resp.prepare``），整个换 key 过程对客户端完全不可见。
+        """
         prep, error = await self._prepare_v3_create(request, ctx, candidates)
         if error is not None:
             return error
         assert prep is not None
 
-        # A6. Key / translation / headers / body -- still no network I/O.
-        call, call_error = await self._prepare_v3_upstream_call(
-            request=request,
-            body_obj=prep.upstream_body,
-            final_body=prep.final_body,
-            decision=prep.decision,
-            requested_model=ctx.requested_model or "",
-            inbound_protocol="responses",
-            stream=True,
-        )
-        if call_error is not None:
-            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
-            return web.Response(
-                status=call_error.status_code,
-                body=call_error.body,
-                content_type="application/json",
-            )
-        assert call is not None
-        key = call.key
+        max_switches = min(len(candidates), _V3_STREAM_MAX_SWITCHES + 1)
+        tried: set[int] = set()
+        committed = False
+        client_gone = False
+        # 最近一次「首字节前就被上游截断」的尝试（帧缓冲 + pipeline + 延迟事件
+        # 日志）。所有候选 key 都用完时用它兜底回放，保证截断语义不被换 key
+        # 逻辑吞掉（AC-2.4）。
+        last_truncated: tuple[list[bytes], ResponsePipeline, Any] | None = None
 
-        # A7. Open the upstream and read its response header.  ``UpstreamClient
-        # .stream`` is an async generator that yields exactly one response
-        # inside ``async with client.stream(...)``, so pulling the first item
-        # by hand is what lets us inspect the status *before* committing to a
-        # 200 -- and ``aclose()`` is what later exits that context manager.
-        upstream_gen = call.client.stream(
-            call.method,
-            call.path,
-            headers=call.headers,
-            content=call.body,
-        )
-        try:
-            upstream_resp = await upstream_gen.__anext__()
-        except StopAsyncIteration:
-            await self._aclose_quietly(upstream_gen)
-            mark_network_failure(key)
-            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_CONNECT.value)
-            return web.json_response({"error": "upstream connection failed"}, status=502)
-        except (ConnectionResetError, ConnectionError, OSError) as exc:
-            await self._aclose_quietly(upstream_gen)
-            transport = request.transport
-            if transport is not None and transport.is_closing():
-                # The client hung up while we were connecting: not the key's
-                # fault, so its health is left untouched (R-P1-25).
-                return web.Response(status=499, text="Client Closed Request")
-            _lg.error(f"[v3-stream] key_id={key.key_id} connection error: {type(exc).__name__}: {exc}")
-            mark_network_failure(key)
-            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_CONNECT.value)
-            return web.json_response({"error": "upstream connection failed"}, status=502)
-        except Exception as exc:  # noqa: BLE001 - attribute, never leak a traceback
-            await self._aclose_quietly(upstream_gen)
-            _lg.error(f"[v3-stream] key_id={key.key_id} exception: {type(exc).__name__}: {exc}")
-            mark_network_failure(key)
-            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
-            return web.json_response({"error": "upstream request failed"}, status=502)
-
-        upstream_headers = dict(upstream_resp.headers)
-        if upstream_resp.status_code >= 400:
-            # An upstream error before the first byte is a normal HTTP error --
-            # turning it into "200 + response.failed" would blind every SDK's
-            # error path (the rejected alternative in §1.4).
-            try:
-                error_body = await upstream_resp.aread()
-            except Exception:  # noqa: BLE001 - the status is the useful part
-                error_body = b""
-            await self._aclose_quietly(upstream_gen)
-            if classify_failure(key, upstream_resp.status_code, upstream_headers):
-                # Retryable upstream states must not park the key: the next
-                # request gets to try it again (same rule as the non-stream path).
-                mark_success(key)
-            _lg.info(
-                f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} body={error_body[:300]!r}"
-            )
-            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
-            return web.Response(
-                status=upstream_resp.status_code,
-                body=error_body,
-                content_type="application/json",
-            )
-
-        mark_success(key)
-        learn_rate_limits(key, upstream_headers, upstream_resp.status_code)
-        session_key = self._session_key(request, prep.body_obj)
-        if session_key:
-            required_caps = capability_values(prep.sanitized)
-            self._set_sticky(session_key, key.key_id, required_caps)
-            asyncio.create_task(self._persist_sticky_binding(session_key, key.key_id, required_caps))
-
-        # A8. ---- Phase A is over: from here the status code is 200. ----
+        # 整个重试过程共享同一个 200 响应对象；只有在确认首个内容帧后才会
+        # ``prepare`` 并提交给客户端（在此之前换 key 对客户端透明）。
         resp = web.StreamResponse(status=200)
         resp.headers["Content-Type"] = "text/event-stream; charset=utf-8"
         resp.headers["Cache-Control"] = "no-cache"
         resp.headers["X-Accel-Buffering"] = "no"
         resp.headers["Connection"] = "keep-alive"
-        await resp.prepare(request)
 
-        adapter = UpstreamSSEChunkAdapter.for_protocol(
-            call.outbound_protocol,
-            native=not call.need_translation,
-        )
-        pipeline = ResponsePipeline(
-            prep.response_id,
-            workspace_id=prep.workspace_id,
-            store=prep.rs if prep.store_enabled else None,
-        )
-        cancelled = asyncio.Event()
-        client_gone = False
-
-        # §9.6: hold the generator so ``aclose()`` can be awaited.  Iterating
-        # ``pipeline.run(...)`` anonymously leaves the cleanup to the garbage
-        # collector, which means the producer tasks and the httpx connection
-        # are released at an unpredictable time -- i.e. leaked under load.
-        frames = pipeline.run(
-            adapter.iter_chunks(upstream_resp.aiter_bytes()),
-            client_cancelled=cancelled,
-            key_health=key,  # read-only: a disconnect is not a key failure
-            config=self._v3_pipeline_config(),  # AC-7.4
-        )
-        try:
-            async for frame in frames:
-                try:
-                    await resp.write(frame)
-                except (ConnectionResetError, ConnectionError, OSError):
-                    # The client left.  That is not an error and above all not
-                    # the key's fault -- no ``mark_network_failure`` (R-P1-25).
-                    client_gone = True
-                    cancelled.set()
-                    break
-        finally:
-            await self._aclose_quietly(frames)
-            await self._aclose_quietly(upstream_gen)
-
-        if client_gone:
-            pipeline.stats.client_disconnects += 1
-            await self._persist_v3_stream_terminal(
-                prep,
-                "incomplete",
-                TerminalReason.CANCELLED_BY_CLIENT.value,
-                output=pipeline.output_items(),
+        for _attempt in range(max_switches):
+            # A6. Key / translation / headers / body -- still no network I/O.
+            decision = self._v3_select_retry_key(prep, candidates, tried)
+            if decision is None:
+                break
+            call, call_error = await self._prepare_v3_upstream_call(
+                request=request,
+                body_obj=prep.upstream_body,
+                final_body=prep.final_body,
+                decision=decision,
+                requested_model=ctx.requested_model or "",
+                inbound_protocol="responses",
+                stream=True,
             )
+            if call_error is not None:
+                if call_error.status_code == 429:
+                    await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+                    return web.Response(
+                        status=call_error.status_code,
+                        body=call_error.body,
+                        content_type="application/json",
+                    )
+                # 其它「网络前」错误（如该 key 无可用上游）：换下一个 key。
+                continue
+            assert call is not None
+            key = call.key
+            tried.add(key.key_id)
+
+            # A7. Open the upstream and read its response header.  ``UpstreamClient
+            # .stream`` is an async generator that yields exactly one response
+            # inside ``async with client.stream(...)``, so pulling the first item
+            # by hand is what lets us inspect the status *before* committing to a
+            # 200 -- and ``aclose()`` is what later exits that context manager.
+            upstream_gen = call.client.stream(
+                call.method,
+                call.path,
+                headers=call.headers,
+                content=call.body,
+            )
+            try:
+                upstream_resp = await upstream_gen.__anext__()
+            except StopAsyncIteration:
+                await self._aclose_quietly(upstream_gen)
+                mark_network_failure(key)
+                continue
+            except (ConnectionResetError, ConnectionError, OSError) as exc:
+                await self._aclose_quietly(upstream_gen)
+                transport = request.transport
+                if transport is not None and transport.is_closing():
+                    # The client hung up while we were connecting: not the key's
+                    # fault, so its health is left untouched (R-P1-25).
+                    return web.Response(status=499, text="Client Closed Request")
+                _lg.error(f"[v3-stream] key_id={key.key_id} connection error: {type(exc).__name__}: {exc}")
+                mark_network_failure(key)
+                continue
+            except Exception as exc:  # noqa: BLE001 - attribute, never leak a traceback
+                await self._aclose_quietly(upstream_gen)
+                _lg.error(f"[v3-stream] key_id={key.key_id} exception: {type(exc).__name__}: {exc}")
+                mark_network_failure(key)
+                continue
+
+            upstream_headers = dict(upstream_resp.headers)
+            if upstream_resp.status_code >= 400:
+                # An upstream error before the first byte is a normal HTTP error --
+                # turning it into "200 + response.failed" would blind every SDK's
+                # error path (the rejected alternative in §1.4).
+                try:
+                    error_body = await upstream_resp.aread()
+                except Exception:  # noqa: BLE001 - the status is the useful part
+                    error_body = b""
+                await self._aclose_quietly(upstream_gen)
+                _retryable = classify_failure(key, upstream_resp.status_code, upstream_headers)
+                if _retryable:
+                    # Retryable upstream states must not park the key: the next
+                    # request gets to try it again (same rule as the non-stream path).
+                    mark_success(key)
+                _lg.info(
+                    f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} body={error_body[:300]!r}"
+                )
+                if not _retryable:
+                    await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+                    return web.Response(
+                        status=upstream_resp.status_code,
+                        body=error_body,
+                        content_type="application/json",
+                    )
+                # 可重试（429/5xx）→ 换下一个 key（尚未提交任何字节给客户端）。
+                continue
+
+            mark_success(key)
+            learn_rate_limits(key, upstream_headers, upstream_resp.status_code)
+
+            # A8. ---- Phase A 结束：从这里开始状态码是 200。 ----
+            adapter = UpstreamSSEChunkAdapter.for_protocol(
+                call.outbound_protocol,
+                native=not call.need_translation,
+            )
+            # 事件日志同样要等到「这次尝试被认领」才落库，否则被放弃的尝试会
+            # 占掉 (response_id, seq) 唯一键，让重试的新 pipeline 撞约束。
+            deferred = (
+                _DeferredEventStore(prep.rs)
+                if prep.store_enabled and prep.rs is not None
+                else None
+            )
+            pipeline = ResponsePipeline(
+                prep.response_id,
+                workspace_id=prep.workspace_id,
+                store=deferred,
+            )
+            cancelled = asyncio.Event()
+            frames = pipeline.run(
+                adapter.iter_chunks(upstream_resp.aiter_bytes()),
+                client_cancelled=cancelled,
+                key_health=key,  # read-only: a disconnect is not a key failure
+                config=self._v3_pipeline_config(),  # AC-7.4
+            )
+
+            # 缓冲上游帧，直到出现「首个内容帧」才提交 200 给客户端。
+            # 若流在没有内容的情况下结束 → 视为空响应 → 换 key 重试（透明）。
+            buf: list[bytes] = []
+            has_content = False
+            try:
+                async for frame in frames:
+                    if committed:
+                        await resp.write(frame)
+                        continue
+                    buf.append(frame)
+                    if _v3_frame_has_content(frame):
+                        has_content = True
+                        if deferred is not None:
+                            await deferred.event_log.commit()
+                        await resp.prepare(request)
+                        committed = True
+                        for f in buf:
+                            await resp.write(f)
+                        buf.clear()
+            except (ConnectionResetError, ConnectionError, OSError):
+                client_gone = True
+                cancelled.set()
+            finally:
+                await self._aclose_quietly(frames)
+                await self._aclose_quietly(upstream_gen)
+
+            if client_gone:
+                if deferred is not None and not committed:
+                    # 首字节都没发出去客户端就走了：这次尝试不留痕迹。
+                    deferred.event_log.discard()
+                pipeline.stats.client_disconnects += 1
+                await self._persist_v3_stream_terminal(
+                    prep,
+                    "incomplete",
+                    TerminalReason.CANCELLED_BY_CLIENT.value,
+                    output=pipeline.output_items(),
+                )
+                return resp
+
+            if committed:
+                # 内容已提交给客户端：后续不再换 key，正常收尾。
+                session_key = self._session_key(request, prep.body_obj)
+                if session_key:
+                    required_caps = capability_values(prep.sanitized)
+                    self._set_sticky(session_key, key.key_id, required_caps)
+                    asyncio.create_task(self._persist_sticky_binding(session_key, key.key_id, required_caps))
+                status = pipeline.state if pipeline.state in ("completed", "failed", "incomplete") else "incomplete"
+                await self._persist_v3_stream_terminal(
+                    prep,
+                    status,
+                    pipeline.stats.terminal_reason or TerminalReason.NORMAL_FINISH.value,
+                    output=pipeline.output_items(),
+                )
+                try:
+                    await resp.write_eof()
+                except (ConnectionResetError, ConnectionError, OSError):
+                    pass
+                return resp
+
+            # --- 首字节前流就结束了，且一个内容帧都没有 ---
+            #
+            # 这里必须区分两种完全不同的故事，混为一谈就会把「上游断流」洗成
+            # 「空响应」（或反过来）：
+            #
+            #   1) terminal_reason 为空 → pipeline 走的是 ``response.completed``
+            #      分支，即上游给了正常的结束信号，只是**一个 token 都没吐**。
+            #      这就是本次要修的「空回复」，换 key 重试。
+            #   2) terminal_reason 非空 → 截断 / 超时 / 上游错误。字节还没出门，
+            #      所以同样可以透明换 key；但如果候选都用完了，兜底必须如实回放
+            #      成 200 + response.incomplete，而不是变成 502——AC-2.4 要求
+            #      客户端事后 GET 这个 id 看到的状态和线上流讲同一个故事。
+            reason = pipeline.stats.terminal_reason or ""
+            if reason:
+                # 兜底候选：连同它的延迟事件日志一起留着，真要回放时才 commit。
+                if last_truncated is not None and last_truncated[2] is not None:
+                    last_truncated[2].event_log.discard()  # 更早的那个不要了
+                last_truncated = (list(buf), pipeline, deferred)
+                _lg.warning(
+                    f"[v3-stream] key_id={key.key_id} stream ended before first content "
+                    f"(terminal_reason={reason}); switching key ({len(tried)}/{max_switches} tried)"
+                )
+            else:
+                if deferred is not None:
+                    deferred.event_log.discard()
+                _lg.warning(
+                    f"[v3-stream] key_id={key.key_id} upstream returned EMPTY 200 "
+                    f"(clean finish, zero content frames); switching key "
+                    f"({len(tried)}/{max_switches} tried)"
+                )
+            mark_empty_response(key)
+            continue
+
+        # ---- 所有候选 key 都在首字节前失败 ----
+        if committed:
+            try:
+                await resp.write_eof()
+            except (ConnectionResetError, ConnectionError, OSError):
+                pass
             return resp
 
-        status = pipeline.state if pipeline.state in ("completed", "failed", "incomplete") else "incomplete"
-        await self._persist_v3_stream_terminal(
-            prep,
-            status,
-            pipeline.stats.terminal_reason or TerminalReason.NORMAL_FINISH.value,
-            output=pipeline.output_items(),
+        if last_truncated is not None:
+            # 至少有一次是「真的开始说话但被切断」：把最后一次尝试如实回放，
+            # 客户端拿到 200 + response.incomplete/failed（原有语义不变）。
+            pending, pl, pl_deferred = last_truncated
+            if pl_deferred is not None:
+                await pl_deferred.event_log.commit()
+            try:
+                await resp.prepare(request)
+                for f in pending:
+                    await resp.write(f)
+            except (ConnectionResetError, ConnectionError, OSError):
+                pass
+            status = pl.state if pl.state in ("completed", "failed", "incomplete") else "incomplete"
+            await self._persist_v3_stream_terminal(
+                prep,
+                status,
+                pl.stats.terminal_reason or TerminalReason.UPSTREAM_TRUNCATED.value,
+                output=pl.output_items(),
+            )
+            try:
+                await resp.write_eof()
+            except (ConnectionResetError, ConnectionError, OSError):
+                pass
+            return resp
+
+        # 全部都是「干净地返回空内容」：与其把一个空的 completed 塞给客户端
+        # （Codex 会静默卡住），不如显式报错让它自己重试。
+        _lg.warning(
+            f"[v3-stream] all {len(tried)} candidate key(s) returned empty streams "
+            f"for response {prep.response_id}"
         )
-        try:
-            await resp.write_eof()
-        except (ConnectionResetError, ConnectionError, OSError):
-            pass
-        return resp
+        await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+        return web.json_response(
+            {
+                "error": {
+                    "message": (
+                        f"upstream returned an empty response on all {len(tried)} candidate key(s)"
+                    ),
+                    "type": "upstream_error",
+                    "code": "empty_upstream_response",
+                }
+            },
+            status=502,
+        )
+
+    def _v3_select_retry_key(self, prep, candidates: list[KeyHealth], tried: set[int]):
+        """为本轮重试挑选一个尚未尝试过的候选 key。
+
+        首轮优先使用 capability 路由已经选定的 key（``prep.decision.key``）；
+        后续轮次在被 ``tried`` 排除的候选里用调度器挑一个，并复用上一轮的原生/
+        翻译路径决策（模型不变，只是换 key）。
+        """
+        if prep.decision is not None and prep.decision.key.key_id not in tried:
+            return prep.decision
+        nk = pick_key([c for c in candidates if c.key_id not in tried])
+        if nk is None:
+            return None
+        return SimpleNamespace(
+            key=nk,
+            upstream_path=getattr(prep.decision, "upstream_path", "") or "",
+            is_native=getattr(prep.decision, "is_native", False),
+        )
 
     async def _dispatch_v3_create_background(
         self,
@@ -2213,6 +2572,21 @@ class ProxyHandler:
                     f"[{id(request):x}] key_id={k.key_id} upstream={_upstream_elapsed * 1000:.0f}ms "
                     f"proc={_process_elapsed * 1000:.0f}ms total={total_elapsed * 1000:.0f}ms body={len(data)}b"
                 )
+
+                # --- 空响应重试（自动换 key）：上游返回 200 但无任何内容 ---
+                # 这种 200 对客户端毫无用处，按软失败处理并换下一个 key 重试。
+                try:
+                    _parsed = json.loads(data)
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    _parsed = None
+                if _parsed is not None and _response_is_empty(inbound_protocol, _parsed):
+                    _lg.warning(
+                        f"[{id(request):x}] key_id={k.key_id} upstream returned empty 200 "
+                        f"(no content); switching to another key"
+                    )
+                    mark_empty_response(k)
+                    continue
+
                 mark_success(k)
 
                 # Learn rate limits from success responses too (OpenAI sends

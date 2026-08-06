@@ -132,3 +132,15 @@ async def store(tmp_path, monkeypatch):
         yield s
     finally:
         await s.close()
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _crypto_init_for_tests(tmp_path_factory):
+    """本地运行需要初始化 crypto（AES key），否则 create_token 会崩。
+
+    VPS 上由服务进程/全局初始化保证；本地 pytest 需在此补齐。
+    """
+    from zhongzhuan.crypto import init as crypto_init
+
+    await crypto_init(tmp_path_factory.mktemp("crypto"))
+
