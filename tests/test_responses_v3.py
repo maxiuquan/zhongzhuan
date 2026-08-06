@@ -172,7 +172,7 @@ async def test_pipeline_zero_bytes_sequence(env):
     # The stream ends on the terminal response.completed event (no Chat-Completions [DONE]).
     assert frames[-1].decode("utf-8").startswith("event: response.completed")
     event_types = []
-    for fr in frames[:-1]:
+    for fr in frames:
         line = fr.decode("utf-8")
         for ln in line.splitlines():
             if ln.startswith("event: "):
