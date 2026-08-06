@@ -862,6 +862,12 @@ class ProxyHandler:
         #: 最后一次尝试观察到的 terminal_reason，仅用于把失败原因如实写进兜底
         #: 错误体（空字符串表示「干净地返回了空内容」）。
         last_reason = ""
+        #: 最后一次「可重试但真实存在」的上游 HTTP 错误（状态码 + 响应体）。
+        #: 401/403 被分类为可重试（换 key 有道理：可能是单 key 密钥失效），但若
+        #: 全部 key 都被上游以同一理由拒绝（如 ``unsupported_client``），兜底
+        #: 错误体必须透传上游的真实原因，而不是笼统的「空响应」。
+        last_upstream_status = 0
+        last_upstream_body = b""
 
         # 整个重试过程共享同一个 200 响应对象；只有在确认首个内容帧后才会
         # ``prepare`` 并提交给客户端（在此之前换 key 对客户端透明）。
@@ -957,7 +963,10 @@ class ProxyHandler:
                         body=error_body,
                         content_type="application/json",
                     )
-                # 可重试（429/5xx）→ 换下一个 key（尚未提交任何字节给客户端）。
+                # 可重试（429/5xx/401/403）→ 换下一个 key（尚未提交任何字节给客户端）。
+                # 记下最后一次错误：若所有 key 都以同一理由失败，兜底要透传它。
+                last_upstream_status = upstream_resp.status_code
+                last_upstream_body = error_body
                 continue
 
             mark_success(key)
@@ -1124,6 +1133,21 @@ class ProxyHandler:
         # 故障的表象），不如显式报错，让 SDK 的错误路径接管。
         if last_truncated is not None and last_truncated[2] is not None:
             last_truncated[2].event_log.discard()
+        # 401/403：全部 key 都被上游以「客户端 / 密钥级」理由拒绝（典型：
+        # ``unsupported_client``——上游只允许特定客户端）。这类拒绝是永久性的、
+        # 与具体 key 无关（重试只是浪费），把上游的真实错误体透传给客户端，
+        # Codex 才能看到确切原因，而不是被笼统的 502「空响应」误导。
+        if last_upstream_status in (401, 403) and last_upstream_body:
+            _lg.warning(
+                f"[v3-stream] all {len(tried)} candidate key(s) rejected with "
+                f"status={last_upstream_status} body={last_upstream_body[:300]!r}"
+            )
+            await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+            return web.Response(
+                status=last_upstream_status,
+                body=last_upstream_body,
+                content_type="application/json",
+            )
         if last_reason:
             code, detail = "upstream_unavailable", f" (last terminal_reason={last_reason})"
         else:
