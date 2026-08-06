@@ -180,8 +180,16 @@ async def test_v3_create_store_false_does_not_persist(astore):
 
 
 @pytest.mark.asyncio
-async def test_v3_create_hosted_tool_no_executor_is_standard_400(astore):
-    """A hosted tool with no executor must NEVER become a fake 200."""
+async def test_v3_create_hosted_tool_dropped_in_translate(astore):
+    """A hosted tool that cannot be expressed in Chat Completions (web_search)
+    is dropped at translation, not forwarded verbatim and not a fake 400.
+
+    web_search is a *forwarded* capability: the proxy never 400s it (no executor
+    required). In TRANSLATE mode it has no legal chat/completions representation,
+    so it must be silently dropped and the request still reaches the upstream and
+    returns a real 200 (2026-08-06 修复：此前原样转发 ``{"type": "web_search"}``
+    被严格上游以 HTTP 400 拒绝，客户端拿到空消息 / 报错)。
+    """
     up = MockUpstream()
     up.set_behavior(UpstreamBehavior(json_payload=openai_text_json()))
     await up.start()
@@ -196,12 +204,14 @@ async def test_v3_create_hosted_tool_no_executor_is_standard_400(astore):
             },
             token,
         )
-        assert status == 400, obj
-        # Wire code from responses_errors mapping (ErrorClass -> spec).
-        assert obj["error"]["code"] == "unsupported_tool"
-        assert obj["error"]["param"] == "tools[0].type"
-        # The upstream must NOT have been called.
-        assert up.request_count == 0
+        assert status == 200, obj
+        # The upstream was actually called (no fake 400).
+        assert up.request_count == 1
+        sent = up.requests[0].json()
+        # web_search must NOT appear in the forwarded chat-completions tools.
+        assert all(t.get("type") != "web_search" for t in sent.get("tools", []))
+        # The model's real text still comes back.
+        assert "output" in obj or "choices" in obj
     finally:
         await runner.cleanup()
         await upstream.close()

@@ -150,6 +150,53 @@ class TestRequestConversion:
         # Missing "properties" must be filled in, otherwise strict upstreams 400.
         assert fn["parameters"] == {"type": "object", "properties": {}}
 
+    def test_web_search_hosted_tool_is_dropped_in_translate(self):
+        """web_search (and any hosted tool) has no Chat Completions representation
+        and must be dropped at translation, never forwarded verbatim -- a strict
+        upstream rejects ``{"type": "web_search"}`` in ``tools`` with HTTP 400
+        (2026-08-06 实测).  Function tools are kept."""
+        body = {
+            "model": "gpt-4o",
+            "input": "search",
+            "tools": [
+                {"type": "function", "name": "shell", "description": "run", "parameters": {"type": "object"}},
+                {"type": "web_search"},
+                {"type": "file_search"},
+                {"type": "code_interpreter", "container": {"type": "auto"}},
+            ],
+        }
+        cc = convert_responses_request_to_chatcompletions(body)
+        types = [t.get("type") for t in cc["tools"]]
+        assert "web_search" not in types
+        assert "file_search" not in types
+        assert "code_interpreter" not in types
+        assert types == ["function"]
+
+    def test_responses_only_fields_are_stripped_exhaustively(self):
+        """Every Responses-only field that has no Chat Completions equivalent is
+        stripped; the portable ones are mapped (reasoning.effort ->
+        reasoning_effort, structured text.format -> response_format)."""
+        body = {
+            "model": "gpt-4o",
+            "input": "hi",
+            "truncation": "auto",
+            "background": True,
+            "previous_response_id": "resp_123",
+            "text": {"format": {"type": "json_schema", "name": "x", "schema": {}}},
+            "reasoning": {"effort": "medium", "summary": "auto"},
+        }
+        cc = convert_responses_request_to_chatcompletions(body)
+        for f in ("truncation", "background", "previous_response_id", "text", "reasoning"):
+            assert f not in cc
+        assert cc["reasoning_effort"] == "medium"
+        assert cc["response_format"] == {"type": "json_schema", "name": "x", "schema": {}}
+
+    def test_plain_text_format_does_not_become_response_format(self):
+        body = {"model": "gpt-4o", "input": "hi", "text": {"format": {"type": "text"}}}
+        cc = convert_responses_request_to_chatcompletions(body)
+        assert "response_format" not in cc
+        assert "text" not in cc
+
     def test_nameless_function_call_skipped(self):
         body = {
             "model": "m",

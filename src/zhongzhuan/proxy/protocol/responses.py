@@ -170,16 +170,25 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
     if pending_tool_results:
         result["messages"].extend(pending_tool_results)
 
-    # Convert tools format.  Most hosted tools (no ``name``) cannot survive the
-    # Chat Completions shape and are dropped -- but *upstream-forwarded* hosted
-    # tools (web_search family) are kept verbatim so the upstream receives and
-    # executes them (see WEB_SEARCH_TOOL_TYPES).
+    # Convert tools format.  Hosted tools (web_search / file_search / computer /
+    # code_interpreter / mcp / image_generation / ...) are declared by the
+    # Responses API but have **no legal representation** in Chat Completions or
+    # Messages -- they cannot be forwarded verbatim.  A strict upstream rejects
+    # ``{"type": "web_search"}`` inside ``tools`` with HTTP 400 (2026-08-06 实测
+    # 第三方 relay macc.eu.cc)，which then surfaces to Codex as a hard error /
+    # empty reply.  The ONLY correct translation is to **drop** them here.
+    #
+    # 注意 R-P1-45 的边界：这里 drop 之后上游返回的仍是模型**真实**文本（只是
+    # 没有被 web_search 增强），并非「空洞文本假装成功」。真正需要 hosted tool
+    # 的请求会被能力路由器送到 NATIVE 模式的 key（走 /v1/responses、原样保留
+    # 工具），根本不会进入这条 translate 路径；能进来的 translate 请求说明当前
+    # 没有任何原生 route 能承载该能力，此时降级掉 hosted 工具、让主对话照常进行
+    # 是比硬 400 更优的失败语义（用户侧不再看到空消息 / 400）。
     if isinstance(body.get("tools"), list):
         converted_tools: list[dict] = []
         for tool in body["tools"]:
-            if isinstance(tool, dict) and tool.get("type") in WEB_SEARCH_TOOL_TYPES:
-                converted_tools.append(tool)  # 上游透传：原样保留
-                continue
+            if isinstance(tool, dict) and tool.get("type") in HOSTED_TOOL_CAPABILITY:
+                continue  # hosted tool: illegal in Chat Completions, drop
             mapped = _convert_tool(tool)
             if mapped:
                 converted_tools.append(mapped)
@@ -191,11 +200,37 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
             result["max_tokens"] = result["max_output_tokens"]
         del result["max_output_tokens"]
 
-    for f in ("input", "instructions", "include", "prompt_cache_key", "store", "client_metadata"):
+    # Responses ``reasoning`` (effort) -> Chat Completions ``reasoning_effort``
+    # (a portable param); the remaining Responses-only ``reasoning`` object is
+    # then dropped below.
+    reasoning_cfg = result.get("reasoning")
+    if isinstance(reasoning_cfg, dict) and isinstance(reasoning_cfg.get("effort"), str):
+        result["reasoning_effort"] = reasoning_cfg["effort"]
+
+    # Responses ``text`` (output text config) -> Chat Completions
+    # ``response_format``.  Only the structured-output ``format`` is portable;
+    # the plain ``{"type": "text"}`` default maps to nothing.
+    text_cfg = result.pop("text", None)
+    if isinstance(text_cfg, dict):
+        fmt = text_cfg.get("format")
+        if isinstance(fmt, dict) and fmt.get("type") not in (None, "text"):
+            result["response_format"] = fmt
+
+    # Drop every remaining Responses-only field that has no Chat Completions /
+    # Messages equivalent.  Forwarding them verbatim 400s on strict upstreams.
+    for f in (
+        "input",
+        "instructions",
+        "include",
+        "prompt_cache_key",
+        "store",
+        "client_metadata",
+        "reasoning",
+        "truncation",
+        "background",
+        "previous_response_id",
+    ):
         result.pop(f, None)
-    if isinstance(result.get("reasoning"), dict) and isinstance(result["reasoning"].get("effort"), str):
-        result["reasoning_effort"] = result["reasoning"]["effort"]
-    result.pop("reasoning", None)
 
     return result
 

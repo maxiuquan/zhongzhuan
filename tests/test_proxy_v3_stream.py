@@ -603,8 +603,16 @@ async def test_stream_invalid_tool_arguments_is_never_whitewashed(astore):
 
 
 @pytest.mark.asyncio
-async def test_stream_capability_error_is_json_not_sse(astore):
-    """A hosted tool with no executor fails in Phase A: JSON 400, no SSE."""
+async def test_stream_hosted_tool_dropped_in_translate(astore):
+    """A hosted tool that cannot be expressed in Chat Completions (web_search)
+    is dropped at translation, not forwarded verbatim and not a fake 400.
+
+    web_search is a *forwarded* capability, so the proxy never 400s it. In
+    TRANSLATE mode it has no legal chat/completions representation, so it is
+    silently dropped and the streaming request still reaches the upstream and
+    returns a real SSE stream (2026-08-06 修复：此前原样转发 ``{"type":
+    "web_search"}`` 被严格上游以 HTTP 400 拒绝，客户端拿到空消息 / 报错)。
+    """
     up = MockUpstream()
     up.set_behavior(UpstreamBehavior(stream_payload=openai_text_stream()))
     await up.start()
@@ -620,11 +628,14 @@ async def test_stream_capability_error_is_json_not_sse(astore):
             },
             token,
         )
-        assert status == 400, raw
-        assert "text/event-stream" not in ctype
-        assert b"event:" not in raw and b"data:" not in raw
-        assert json.loads(raw)["error"]["code"] == "unsupported_tool"
-        assert up.request_count == 0
+        assert status == 200, raw
+        assert "text/event-stream" in ctype
+        assert b"data:" in raw
+        # The upstream was actually called (no fake 400).
+        assert up.request_count == 1
+        sent = up.requests[0].json()
+        # web_search must NOT appear in the forwarded chat-completions tools.
+        assert all(t.get("type") != "web_search" for t in sent.get("tools", []))
     finally:
         await runner.cleanup()
         await upstream.close()
@@ -717,42 +728,39 @@ async def test_stream_normal_finish_without_done_sentinel_is_completed(astore):
 
 
 @pytest.mark.asyncio
-async def test_stream_truncated_upstream_is_not_completed(astore):
-    """A stream cut mid-flight (no finish signal) must not report success.
+async def test_stream_cut_before_any_content_is_a_hard_error(astore):
+    """上游在第一个内容帧之前就断流，且候选 key 用尽 → 显式 502，绝不是空 200。
 
-    P0-2 / 铁律 2. Counting terminals alone is not enough — a whitewashed
-    ``response.completed`` is also exactly one terminal, so the old assertion
-    would have happily passed on the very bug it was written to catch. The
-    terminal *type* is the contract: a cut stream is ``incomplete`` (or
-    ``failed``), never ``completed``.
+    P0-2 / 铁律 2 的延伸。旧实现会把这次尝试的帧缓冲「如实回放」成
+    ``200 + response.incomplete``；但按构造，这个缓冲区里一个内容帧都没有，
+    回放出去就是一条没有任何 delta 的空壳流。Codex 收到它只会渲染出一个空气
+    泡——既不报错也不重试，用户看到的就是「发了消息没有任何回复」
+    （2026-08-06 线上故障）。
+
+    正确契约：产出为零时必须让 HTTP 层失败，SDK 的错误路径才能接管。仍然满足
+    「绝不粉饰成 completed」这条底线，而且更强。真正「说到一半被切断」（已经
+    产出过内容）的场景仍是 200 + incomplete，见
+    ``test_t6_mid_stream_abort_is_upstream_truncated``。
     """
     up = MockUpstream()
     up.set_behavior(
         UpstreamBehavior(
             stream_payload=openai_text_stream(pieces=("a", "b", "c", "d")),
             chunk_strategy=by_n_bytes(64),
-            truncate_after_chunks=2,  # abort before finish_reason arrives
+            truncate_after_chunks=2,  # abort before the first delta is even complete
         )
     )
     await up.start()
     port, runner, upstream, token = await _start_proxy(up.url, astore)
     try:
-        status, _ctype, raw = await _stream(port, {"model": "gpt-4o", "input": "x", "stream": True}, token)
-        assert status == 200, raw  # Phase B: HTTP status is already committed
-        types = _event_types(raw)
-        terminals = [t for t in types if t in _LIFECYCLE_ONCE[2:]]
-        assert len(terminals) == 1, terminals
-        assert terminals[0] in ("response.incomplete", "response.failed"), (
-            f"truncated stream whitewashed to {terminals[0]}:\n{raw.decode(errors='replace')}"
-        )
-        # The persisted record must tell the same story as the wire (AC-2.4):
-        # a client that reconnects and GETs the id may not see "completed".
-        rid = _response_id(raw)
-        assert rid
-        rec = await ResponseStore(astore).get_response(rid, workspace_id=await _workspace(astore, token))
-        assert rec is not None
-        assert rec.status in ("incomplete", "failed"), rec.status
-        assert not raw.rstrip().endswith(b"data: [DONE]")
+        status, ctype, raw = await _stream(port, {"model": "gpt-4o", "input": "x", "stream": True}, token)
+        assert status == 502, raw
+        assert "text/event-stream" not in ctype
+        assert b"data:" not in raw, f"an empty SSE shell leaked to the client:\n{raw!r}"
+        err = json.loads(raw)["error"]
+        assert err["code"] == "upstream_unavailable", err
+        # 失败原因要如实带出来，否则线上只能靠猜。
+        assert "upstream_connect" in err["message"] or "truncat" in err["message"], err
     finally:
         await runner.cleanup()
         await upstream.close()

@@ -30,7 +30,11 @@ _INSTRUCTION_ROLES = ("system", "developer")
 
 #: V3 流式路径在把首个字节发给客户端之前，最多可切换的上游 key 次数
 #: （即最多尝试 ``_V3_STREAM_MAX_SWITCHES + 1`` 个 key）。用于「空响应自动换 key」。
-_V3_STREAM_MAX_SWITCHES = 2
+#:
+#: 取 5（共 6 次尝试）：线上一个模型常配 6 个 key，旧值 2（只试 3 个）会在上游
+#: 整片抽风时提前放弃——2026-08-06 实测某上游 ALB 连续返回 502 / 首字节前断流，
+#: 三次尝试全部落空，剩下一半 key 根本没被碰过，客户端却已经拿到空回复。
+_V3_STREAM_MAX_SWITCHES = 5
 
 
 def _response_is_empty(inbound_protocol: str, parsed: Any) -> bool:
@@ -855,6 +859,9 @@ class ProxyHandler:
         # 日志）。所有候选 key 都用完时用它兜底回放，保证截断语义不被换 key
         # 逻辑吞掉（AC-2.4）。
         last_truncated: tuple[list[bytes], ResponsePipeline, Any] | None = None
+        #: 最后一次尝试观察到的 terminal_reason，仅用于把失败原因如实写进兜底
+        #: 错误体（空字符串表示「干净地返回了空内容」）。
+        last_reason = ""
 
         # 整个重试过程共享同一个 200 响应对象；只有在确认首个内容帧后才会
         # ``prepare`` 并提交给客户端（在此之前换 key 对客户端透明）。
@@ -1049,10 +1056,13 @@ class ProxyHandler:
             #      分支，即上游给了正常的结束信号，只是**一个 token 都没吐**。
             #      这就是本次要修的「空回复」，换 key 重试。
             #   2) terminal_reason 非空 → 截断 / 超时 / 上游错误。字节还没出门，
-            #      所以同样可以透明换 key；但如果候选都用完了，兜底必须如实回放
-            #      成 200 + response.incomplete，而不是变成 502——AC-2.4 要求
-            #      客户端事后 GET 这个 id 看到的状态和线上流讲同一个故事。
+            #      所以同样可以透明换 key；如果候选都用完了，**且这次尝试真的产出
+            #      过内容**，兜底才如实回放成 200 + response.incomplete（AC-2.4：
+            #      客户端事后 GET 这个 id 看到的状态要和线上流讲同一个故事）。
+            #      产出为零时不能回放：那是一个没有任何 delta 的 200 空壳流，
+            #      Codex 只会渲染出一个空气泡、既不报错也不重试（本次线上故障）。
             reason = pipeline.stats.terminal_reason or ""
+            last_reason = reason or last_reason
             if reason:
                 # 兜底候选：连同它的延迟事件日志一起留着，真要回放时才 commit。
                 if last_truncated is not None and last_truncated[2] is not None:
@@ -1081,7 +1091,9 @@ class ProxyHandler:
                 pass
             return resp
 
-        if last_truncated is not None:
+        if last_truncated is not None and any(
+            _v3_frame_has_content(f) for f in last_truncated[0]
+        ):
             # 至少有一次是「真的开始说话但被切断」：把最后一次尝试如实回放，
             # 客户端拿到 200 + response.incomplete/failed（原有语义不变）。
             pending, pl, pl_deferred = last_truncated
@@ -1106,21 +1118,30 @@ class ProxyHandler:
                 pass
             return resp
 
-        # 全部都是「干净地返回空内容」：与其把一个空的 completed 塞给客户端
-        # （Codex 会静默卡住），不如显式报错让它自己重试。
+        # 走到这里：每一次尝试都没能产出**任何**内容帧（干净的空 200，或者首字节
+        # 前就被上游掐断）。两种情况对客户端是同一件事——一个没有 delta 的空壳。
+        # 与其回放这个空壳（Codex 会渲染成空气泡、既不报错也不重试，正是本次线上
+        # 故障的表象），不如显式报错，让 SDK 的错误路径接管。
+        if last_truncated is not None and last_truncated[2] is not None:
+            last_truncated[2].event_log.discard()
+        if last_reason:
+            code, detail = "upstream_unavailable", f" (last terminal_reason={last_reason})"
+        else:
+            code, detail = "empty_upstream_response", ""
         _lg.warning(
-            f"[v3-stream] all {len(tried)} candidate key(s) returned empty streams "
-            f"for response {prep.response_id}"
+            f"[v3-stream] all {len(tried)} candidate key(s) produced no content "
+            f"for response {prep.response_id}{detail}"
         )
-        await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+        await self._persist_v3_stream_terminal(prep, "failed", last_reason or TerminalReason.UPSTREAM_ERROR.value)
         return web.json_response(
             {
                 "error": {
                     "message": (
                         f"upstream returned an empty response on all {len(tried)} candidate key(s)"
+                        f"{detail}"
                     ),
                     "type": "upstream_error",
-                    "code": "empty_upstream_response",
+                    "code": code,
                 }
             },
             status=502,
