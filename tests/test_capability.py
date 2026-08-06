@@ -366,9 +366,14 @@ def test_startup_gap_report_ignores_locally_emulated_capabilities():
 
 
 def test_startup_gap_report_flags_declared_but_unavailable_route():
-    """声明了但 route 全部宕机 -> route unavailable 缺口。"""
-    keys = [make_key(capabilities={"web_search"}, upstream_mode="native", available=False)]
-    cfg = FakeCfg(required_capabilities=("web_search",))
+    """声明了但 route 全部宕机 -> route unavailable 缺口。
+
+    用 ``code_interpreter``（既不 emulated 也不 forwarded）代替旧用例的
+    ``web_search``：web_search 现在属于上游透传能力，中继转发它不依赖任何特定
+    声明 key，永远不构成启动缺口；code_interpreter 仍是「声明了但全宕机」的代表。
+    """
+    keys = [make_key(capabilities={"code_interpreter"}, upstream_mode="native", available=False)]
+    cfg = FakeCfg(required_capabilities=("code_interpreter",))
     gaps = router_for(keys, cfg).startup_gap_report()
 
     assert [g.reason for g in gaps] == [REASON_ROUTE_UNAVAILABLE]
