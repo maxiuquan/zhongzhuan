@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 _log = logging.getLogger(__name__)
@@ -104,6 +105,40 @@ def needs_system_message(preset_name: str) -> bool:
     if not preset:
         return False
     return bool(preset.get("require_system", False))
+
+
+# Foreign client markers in system messages that must be neutralized
+# (regex, case-insensitive). freemodel.dev and similar WorkBuddy-only
+# upstreams do not only check that the FIRST system message carries the
+# WorkBuddy fingerprint; they scan the whole request body and reject with
+# 403 unsupported_client when any system message contains a foreign
+# marker such as "codex" (e.g. the long instructions prompt Codex CLI
+# sends). Neutralization touches system messages only, never user / 
+# assistant / tool content.
+_FOREIGN_CLIENT_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"(?i)codex", "assistant"),
+)
+
+
+def sanitize_system_content(content: str) -> str:
+    """Neutralize foreign client markers inside a system message.
+
+    Used by require_system presets (e.g. workbuddy): the upstream
+    identifies the client from system messages, and a non-fingerprint
+    system (typically the long instructions prompt from Codex CLI)
+    containing "codex" is rejected with 403 even when the fingerprint
+    system is already first. Replace the marker with a neutral word
+    while keeping the rest of the instruction content intact.
+
+    Returns the new string; returns the input unchanged when there is
+    no match (zero impact).
+    """
+    if not content:
+        return content
+    result = content
+    for pattern, replacement in _FOREIGN_CLIENT_PATTERNS:
+        result = re.sub(pattern, replacement, result)
+    return result
 
 
 def get_fingerprint_system_prefix(preset_name: str, model_name: str = "") -> str:

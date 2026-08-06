@@ -948,7 +948,11 @@ class ProxyHandler:
         if not preset_name:
             return final_body
         try:
-            from .client_presets import needs_system_message, get_fingerprint_system_prefix
+            from .client_presets import (
+                needs_system_message,
+                get_fingerprint_system_prefix,
+                sanitize_system_content,
+            )
 
             if not needs_system_message(preset_name):
                 return final_body
@@ -968,8 +972,25 @@ class ProxyHandler:
                 and prefix
                 and str(first.get("content", "")).strip().startswith(prefix.strip())
             ):
-                return final_body
-            # 缺 system 或第一条不是特征 system → 在最前面插入特征 system
+                # 特征 system 已置顶，但后续 system（通常是客户端自带的长
+                # instructions）里可能含外来客户端标识（如 codex），上游会
+                # 据此判定为外来客户端 → 403。对第一条非特征 system 做
+                # 中性化清洗，其余消息（user/assistant/tool）不受影响。
+                for msg in messages[1:]:
+                    if (
+                        isinstance(msg, dict)
+                        and msg.get("role") == "system"
+                        and isinstance(msg.get("content"), str)
+                    ):
+                        cleaned = sanitize_system_content(msg["content"])
+                        if cleaned != msg["content"]:
+                            msg["content"] = cleaned
+                return json.dumps(body_obj, ensure_ascii=False).encode()
+            # 缺 system 或第一条不是特征 system → 在最前面插入特征 system，
+            # 同时把原来的第一条 system（外来 instructions）中性化，避免
+            # 插入后成为第二条 system 仍携带外来标识而被上游拒绝。
+            if messages and isinstance(messages[0], dict) and isinstance(messages[0].get("content"), str):
+                messages[0]["content"] = sanitize_system_content(messages[0]["content"])
             messages.insert(0, {"role": "system", "content": prefix})
             return json.dumps(body_obj, ensure_ascii=False).encode()
         except (json.JSONDecodeError, TypeError, ValueError):
