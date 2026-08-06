@@ -271,9 +271,31 @@ class ProxyServer:
         return resp
 
     async def _reload(self, _request: web.Request, handler) -> web.Response:
-        n = await handler.reload_keys()
         from loguru import logger
 
+        n = await handler.reload_keys()
+        # 刷新 /v1/models 快照（models + groups）：此前 reload 只更新 handler
+        # 内部的 keys/groups，server 的 self.models/self.groups 仍是启动快照，
+        # 导致管理端新建/修改模型后 /v1/models 不更新，必须重启服务才生效。
+        if self.store is not None:
+            try:
+                from ..store.models import list_models as _list_models_db
+                from ..store.groups import list_groups as _list_groups_db
+
+                ms = await _list_models_db(self.store)
+                self.models = [{"name": m.name} for m in ms]
+                rows = await _list_groups_db(self.store)
+                self.groups = [
+                    {
+                        "id": r.get("id"),
+                        "name": r.get("name"),
+                        "strategy": r.get("strategy"),
+                        "members": [m["model_id"] for m in (r.get("members") or [])],
+                    }
+                    for r in rows
+                ]
+            except Exception:
+                logger.exception("reload models/groups snapshot failed")
         logger.info(f"reloaded {n} keys from store")
         return web.json_response({"ok": True, "keys": n})
 
