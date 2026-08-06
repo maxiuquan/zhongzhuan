@@ -447,7 +447,6 @@ class ProxyHandler:
         upstream_body = dict(body_obj)
         if resolution is not None:
             upstream_body["input"] = build_upstream_input(resolution, body_obj.get("input"))
-        _lg.debug("[v3-debug] model=%s prev=%r input_len=%d tools=%s", body_obj.get("model"), previous_response_id, len(upstream_body.get("input") or []), upstream_body.get("tools"))
 
         # A4. Capability route over the *filtered* candidate pool.  A hosted
         # tool with no executor is a standard 400; a declared-but-down route is
