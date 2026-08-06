@@ -227,6 +227,11 @@ class ResponsePipeline:
         #: text is retained -- deltas already went out and live in the event log.
         self._message_item: dict[str, Any] | None = None
         self._message_text: list[str] = []
+        #: 当前 message item 的 content part id（OpenAI 用 ``pt_*``）。首个文本
+        #: delta 前发 ``content_part.added``，关闭 item 前发 ``content_part.done``，
+        #: 否则严格客户端（Codex / OpenAI SDK）会因「delta without active item」
+        #: 丢弃整个响应（issue ③）。
+        self._message_part_id: str | None = None
         self._output_index = 0
         self._done = False
         #: P0-2: set when the upstream sent an *explicit* completion signal.
@@ -286,6 +291,21 @@ class ResponsePipeline:
                             "type": "response.output_item.added",
                             "output_index": idx,
                             "item": {"id": item_id, "type": "message", "status": "in_progress", "role": "assistant"},
+                        },
+                    )
+                )
+                # issue ③: 每个文本输出项必须先发 content_part.added（带 part id），
+                # 严格客户端才能把后续的 output_text.delta 挂到正确的 part 上。
+                self._message_part_id = "pt_{0}".format(item_id)
+                frames.append(
+                    await self._emit(
+                        "response.content_part.added",
+                        {
+                            "type": "response.content_part.added",
+                            "output_index": idx,
+                            "item_id": item_id,
+                            "content_index": 0,
+                            "part": {"type": "output_text", "text": "", "annotations": []},
                         },
                     )
                 )
@@ -427,15 +447,39 @@ class ResponsePipeline:
         if self._open_message is not None:
             idx = self._open_message["output_index"]
             item_id = self._open_message["id"]
+            full_text = "".join(self._message_text)
             frames.append(
                 await self._emit(
                     "response.output_text.done",
                     {
                         "type": "response.output_text.done",
                         "output_index": idx,
+                        "item_id": item_id,
+                        "content_index": 0,
+                        "text": full_text,
                     },
                 )
             )
+            # issue ③: 关闭文本 part 前发 content_part.done（与 added 同一 part id），
+            # 否则严格客户端报 "delta without active item" 并丢弃响应。
+            if self._message_part_id is not None:
+                frames.append(
+                    await self._emit(
+                        "response.content_part.done",
+                        {
+                            "type": "response.content_part.done",
+                            "output_index": idx,
+                            "item_id": item_id,
+                            "content_index": 0,
+                            "part": {
+                                "type": "output_text",
+                                "text": full_text,
+                                "annotations": [],
+                            },
+                        },
+                    )
+                )
+                self._message_part_id = None
             frames.append(
                 await self._emit(
                     "response.output_item.done",
