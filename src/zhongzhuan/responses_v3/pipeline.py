@@ -307,7 +307,12 @@ class ResponsePipeline:
                         {
                             "type": "response.output_item.added",
                             "output_index": idx,
-                            "item": {"id": item_id, "type": "reasoning", "status": "in_progress"},
+                            "item": {
+                                "id": item_id,
+                                "type": "reasoning",
+                                "status": "in_progress",
+                                "summary": [],
+                            },
                         },
                     )
                 )
@@ -359,7 +364,13 @@ class ResponsePipeline:
                         {
                             "type": "response.output_item.added",
                             "output_index": idx,
-                            "item": {"id": item_id, "type": "message", "status": "in_progress", "role": "assistant"},
+                            "item": {
+                                "id": item_id,
+                                "type": "message",
+                                "status": "in_progress",
+                                "role": "assistant",
+                                "content": [],
+                            },
                         },
                     )
                 )
@@ -554,6 +565,12 @@ class ResponsePipeline:
                         "id": item_id,
                         "type": "reasoning",
                         "status": "incomplete" if incomplete else "completed",
+                        "summary": [
+                            {
+                                "type": "summary_text",
+                                "text": full_text,
+                            }
+                        ],
                     },
                 },
             )
@@ -600,7 +617,12 @@ class ResponsePipeline:
                 {
                     "type": "response.output_item.added",
                     "output_index": idx,
-                    "item": {"id": item_id, "type": "reasoning", "status": "in_progress"},
+                    "item": {
+                                "id": item_id,
+                                "type": "reasoning",
+                                "status": "in_progress",
+                                "summary": [],
+                            },
                 },
             )
         )
@@ -682,6 +704,13 @@ class ResponsePipeline:
                             "type": "message",
                             "status": "incomplete" if incomplete else "completed",
                             "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": full_text,
+                                    "annotations": [],
+                                }
+                            ],
                         },
                     },
                 )
@@ -841,6 +870,13 @@ class ResponsePipeline:
         an upstream failure (criterion ③).
         """
         cfg = config or self._config
+        #: run() 的 config 形参必须同步回 ``self._config``：内部辅助方法
+        #: （``_ensure_reasoning_lifecycle`` 等）读 ``self._config``，若不写回，
+        #: 调用方通过 ``run(config=...)`` 传入的覆盖（如 emit_empty_reasoning）
+        #: 会静默失效（2026-08-07 实测：handler 传了 emit_empty_reasoning=True
+        #: 但流里没有任何 reasoning 事件，根因在此）。
+        if config is not None:
+            self._config = config
         clock = clock or time.monotonic
         sleep = sleep or asyncio.sleep
 
