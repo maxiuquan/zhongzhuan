@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -45,6 +46,13 @@ PRESETS: dict[str, dict[str, Any]] = {
         # 上游识别为异类而 403，因此注入逻辑会把该内容强制放在 messages 最前面。
         "require_system": True,
         "fingerprint_system": "This conversation is powered by {model}",
+        #: 2026-08-07 起 freemodel.dev 不再接受短前缀 system（8-05 的
+        #: "This conversation is powered by {model}" 全 key 403）。实测抓包：
+        #: 上游扫描请求体，要求 system 消息包含完整 WorkBuddy 系统提示特征
+        #: （3500~4000 字符处的固定模板段；路径可泛化、model 名可替换）。
+        #: data/workbuddy_system_template.txt = 真实 WorkBuddy 5.3.8 system
+        #: 前 6000 字符（用户路径泛化、{model} 占位），实测 relay key 直连 200。
+        "fingerprint_system_file": "workbuddy_system_template.txt",
         "headers": [
             ("User-Agent", "WorkBuddy/5.3.8 WorkBuddy/5.3.8 CLI/2.115.0"),
             ("X-Requested-With", "XMLHttpRequest"),
@@ -141,17 +149,40 @@ def sanitize_system_content(content: str) -> str:
     return result
 
 
+def _load_fingerprint_system_template(preset_name: str) -> str:
+    """读取预设 ``fingerprint_system_file`` 指向的 system 模板文件。
+
+    返回文件全文；预设不存在/无该键/文件读取失败返回空字符串。
+    """
+    preset = PRESETS.get(preset_name)
+    if not preset:
+        return ""
+    fname = str(preset.get("fingerprint_system_file", "") or "")
+    if not fname:
+        return ""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", fname)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError as e:
+        _log.warning("fingerprint_system_file %s 读取失败, 回退短模板: %s", path, e)
+        return ""
+
+
 def get_fingerprint_system_prefix(preset_name: str, model_name: str = "") -> str:
     """返回预设要求的 system 消息特征内容（``fingerprint_system`` 模板）。
 
     用于 ``require_system`` 预设：无论请求体缺 system 还是自带非特征 system
     （如 Trae 的 "powered by TRAE"），都必须在 messages 最前面放一条该内容，
     上游才能识别为目标客户端。支持 ``{model}`` 占位符。
+
+    优先级：``fingerprint_system_file``（完整模板文件，如 workbuddy 的 6000
+    字符真实系统提示）> ``fingerprint_system``（短模板）> 默认模板。
     无模板时返回默认的 "This conversation is powered by {model}"。
     """
     preset = PRESETS.get(preset_name)
-    tpl = ""
-    if preset:
+    tpl = _load_fingerprint_system_template(preset_name)
+    if not tpl and preset:
         tpl = str(preset.get("fingerprint_system", "") or "")
     if not tpl:
         tpl = "This conversation is powered by {model}"

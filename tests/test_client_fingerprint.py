@@ -21,6 +21,7 @@ import pytest
 
 from zhongzhuan.proxy.client_presets import (
     PRESETS,
+    get_fingerprint_system_prefix,
     get_headers,
     is_valid_preset_name,
     list_presets,
@@ -294,19 +295,22 @@ class TestInjectSystemMessage:
         )
         msgs = json.loads(out)["messages"]
         assert msgs[0]["role"] == "system"
-        assert msgs[0]["content"] == "This conversation is powered by gpt-5.6-sol"
+        assert msgs[0]["content"].startswith("This conversation is powered by gpt-5.6-sol")
+        # 2026-08-07：workbuddy 特征 system 升级为完整模板（上游校验 3500+ 字符段）
+        assert len(msgs[0]["content"]) > 4000
         assert len(msgs) == 2
 
     def test_workbuddy_does_not_duplicate_when_first_system_is_fingerprint(self):
         """第一条 system 已是特征内容 → 原样返回（不重复注入）。"""
         h = _make_handler()
+        fp = get_fingerprint_system_prefix("workbuddy", "gpt-5.6-sol")
         orig = [
-            {"role": "system", "content": "This conversation is powered by gpt-5.6-sol"},
+            {"role": "system", "content": fp},
             {"role": "user", "content": "hi"},
         ]
         raw = self._body(orig)
         out = h._inject_system_message(raw, self._make_key("workbuddy"), "gpt-5.6-sol")
-        assert out is raw  # 原样返回
+        assert json.loads(out) == json.loads(raw)  # 内容原样返回（无重复注入）
 
     def test_workbuddy_prepends_fingerprint_when_system_is_foreign(self):
         """请求体自带非特征 system（如 Trae 的 "powered by TRAE"）→ 最前面插入特征 system，
@@ -323,7 +327,8 @@ class TestInjectSystemMessage:
         msgs = json.loads(out)["messages"]
         assert len(msgs) == 3
         assert msgs[0]["role"] == "system"
-        assert msgs[0]["content"] == "This conversation is powered by gpt-5.6-sol"
+        assert msgs[0]["content"].startswith("This conversation is powered by gpt-5.6-sol")
+        assert len(msgs[0]["content"]) > 4000
         assert "TRAE" in msgs[1]["content"]  # 原 system 保留在后面
 
     def test_workbuddy_prepends_when_first_message_is_not_system(self):
@@ -336,7 +341,8 @@ class TestInjectSystemMessage:
         )
         msgs = json.loads(out)["messages"]
         assert msgs[0]["role"] == "system"
-        assert msgs[0]["content"] == "This conversation is powered by gpt-5.6-sol"
+        assert msgs[0]["content"].startswith("This conversation is powered by gpt-5.6-sol")
+        assert len(msgs[0]["content"]) > 4000
         assert len(msgs) == 2
 
     def test_no_preset_zero_impact(self):
