@@ -116,6 +116,51 @@ class TestRequestConversion:
         cc = convert_responses_request_to_chatcompletions(self._codex_request())
         assert cc["messages"][0] == {"role": "system", "content": "You are a coding agent."}
 
+    def test_developer_role_is_remapped_to_system(self):
+        # Chat Completions has no `developer` role; non-OpenAI upstreams 400 it.
+        # The translator must fold developer -> system (codex-relay style fix).
+        body = {
+            "model": "claude-x",
+            "input": [
+                {"type": "message", "role": "developer", "content": "You are Codex."},
+                {"type": "message", "role": "user", "content": "hi"},
+            ],
+        }
+        cc = convert_responses_request_to_chatcompletions(body)
+        assert cc["messages"][0] == {"role": "system", "content": "You are Codex."}
+        assert cc["messages"][1]["role"] == "user"
+
+    def test_developer_role_combined_with_instructions(self):
+        # Both the top-level instructions and an inline developer message must
+        # become system messages (instructions first, then developer).
+        body = {
+            "model": "claude-x",
+            "instructions": "Global system instruction.",
+            "input": [
+                {"type": "message", "role": "developer", "content": "Developer overlay."},
+                {"type": "message", "role": "user", "content": "go"},
+            ],
+        }
+        cc = convert_responses_request_to_chatcompletions(body)
+        assert [m["role"] for m in cc["messages"]] == ["system", "system", "user"]
+        assert cc["messages"][0]["content"] == "Global system instruction."
+        assert cc["messages"][1]["content"] == "Developer overlay."
+
+    def test_developer_role_in_replayed_chain_is_remapped(self):
+        # previous_response_id chains flatten past transcripts (role:
+        # "developer") into body["input"]; they must also fold to system.
+        body = {
+            "model": "claude-x",
+            "input": [
+                {"type": "message", "role": "developer", "content": "replayed developer"},
+                {"type": "message", "role": "assistant", "content": "prior answer"},
+                {"type": "message", "role": "user", "content": "follow-up"},
+            ],
+        }
+        cc = convert_responses_request_to_chatcompletions(body)
+        assert all(m["role"] != "developer" for m in cc["messages"])
+        assert cc["messages"][0] == {"role": "system", "content": "replayed developer"}
+
     def test_max_output_tokens_maps_to_max_tokens(self):
         cc = convert_responses_request_to_chatcompletions(self._codex_request())
         assert cc["max_tokens"] == 1024

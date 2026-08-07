@@ -199,7 +199,16 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
             content = item.get("content")
             if isinstance(content, list):
                 content = [_convert_content_block(c) for c in content]
-            result["messages"].append({"role": item["role"], "content": content})
+            # Chat Completions has no `developer` role -- only `system`.  Remap
+            # it so strict non-OpenAI upstreams don't reject the request with a
+            # 400.  This covers BOTH the current turn AND replayed transcript
+            # items from previous_response_id chains, which are flattened into
+            # body["input"] (see chain.build_upstream_input) and carry
+            # role: "developer" verbatim from the native Responses store.
+            # The OpenAI-native Responses path (gpt-5.6-sol) is unaffected: it
+            # never enters this translator and keeps developer as-is.
+            role = ROLE_SYSTEM if item["role"] == "developer" else item["role"]
+            result["messages"].append({"role": role, "content": content})
 
         elif item_type == ITEM_FUNCTION_CALL:
             name = item.get("name")
