@@ -71,7 +71,7 @@ from ..proxy.protocol.responses_models import (
     make_function_call_item_id_stable,
     make_message_item_id,
 )
-from ..proxy.protocol.tool_accumulator import ToolCallAccumulator, ToolCallCollection
+from ..proxy.protocol.tool_accumulator import ToolCallAccumulator, ToolCallCollection, split_namespace_name
 from ..store.background_jobs import TERMINAL_STATUSES
 from ..store.response_store import ResponseRecord, ResponseStore
 from .budget import BACKGROUND_BUDGET, BudgetLedger, CircuitBreaker, ExecutionBudget
@@ -192,7 +192,7 @@ class _JobRun:
 
     def tool_item(self, acc: ToolCallAccumulator) -> dict[str, Any]:
         """One accumulated tool call as it must appear in ``output``."""
-        return {
+        item: dict[str, Any] = {
             "id": acc.item_id or make_function_call_item_id_stable(self.response_id, acc.output_index),
             "type": "function_call",
             # ``arguments_done`` records what actually happened during the run
@@ -203,6 +203,10 @@ class _JobRun:
             "name": acc.name,
             "arguments": acc.arguments,
         }
+        if acc.namespace:
+            # Codex 26.x MCP 子代理：补回 namespace 字段才能路由回 MCP server。
+            item["namespace"] = acc.namespace
+        return item
 
     def output_items(self, *, status: str) -> list[dict[str, Any]]:
         """Rebuild the ``output`` array from what this run actually produced.
@@ -629,9 +633,34 @@ class BackgroundWorker:
             source_index=source_index,
         )
         acc.replace_name(name)
+        # Codex 26.x MCP 子代理还原（与流式 pipeline 一致）：TRANSLATE 上游返回
+        # 摊平名（mcp__subagents__-spawn_agent）→ 拆成 namespace + 裸工具名；
+        # NATIVE 上游直接在 chunk 里带 ``namespace`` → 直接保留。
+        if name:
+            ns, sub = split_namespace_name(name)
+            if ns:
+                acc.namespace = ns
+                if sub:
+                    acc.replace_name(sub)
+        chunk_ns = str(chunk.get("namespace") or "")
+        if chunk_ns:
+            acc.namespace = chunk_ns
+            prefix = chunk_ns + "-"
+            if acc.name.startswith(prefix):
+                acc.replace_name(acc.name[len(prefix) :])
         acc.append_arguments(fragment)
 
         if not acc.item_added:
+            item: dict[str, Any] = {
+                "id": acc.item_id,
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": acc.call_id,
+                "name": acc.name,
+                "arguments": "",
+            }
+            if acc.namespace:
+                item["namespace"] = acc.namespace
             await self._emit(
                 run,
                 emitter,
@@ -639,14 +668,7 @@ class BackgroundWorker:
                 {
                     "type": "response.output_item.added",
                     "output_index": acc.output_index,
-                    "item": {
-                        "id": acc.item_id,
-                        "type": "function_call",
-                        "status": "in_progress",
-                        "call_id": acc.call_id,
-                        "name": acc.name,
-                        "arguments": "",
-                    },
+                    "item": item,
                 },
             )
             acc.item_added = True

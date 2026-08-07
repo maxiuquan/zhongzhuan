@@ -905,11 +905,6 @@ class ProxyHandler:
             assert call is not None
             key = call.key
             tried.add(key.key_id)
-            try:
-                with open("/tmp/last_upstream_body.json", "wb") as _f:
-                    _f.write(call.body)
-            except OSError:
-                pass
 
             # A7. Open the upstream and read its response header.  ``UpstreamClient
             # .stream`` is an async generator that yields exactly one response
@@ -944,7 +939,6 @@ class ProxyHandler:
                 mark_network_failure(key)
                 continue
 
-            _lg.info(f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} path={call.path}")
             upstream_headers = dict(upstream_resp.headers)
             if upstream_resp.status_code >= 400:
                 # An upstream error before the first byte is a normal HTTP error --
@@ -1011,24 +1005,12 @@ class ProxyHandler:
             # 若流在没有内容的情况下结束 → 视为空响应 → 换 key 重试（透明）。
             buf: list[bytes] = []
             has_content = False
-            ev_counter: dict[str, int] = {}
-            all_frames: list[bytes] = []
             try:
                 async for frame in frames:
-                    all_frames.append(frame)
                     if committed:
                         await resp.write(frame)
-                    else:
-                        buf.append(frame)
-                    for _ln in frame.decode("utf-8", "replace").splitlines():
-                        if _ln.startswith("data:"):
-                            _p = _ln[5:].strip()
-                            if _p and _p != "[DONE]":
-                                try:
-                                    _t = str(json.loads(_p).get("type", "?"))
-                                    ev_counter[_t] = ev_counter.get(_t, 0) + 1
-                                except Exception:
-                                    ev_counter["<unparsed>"] = ev_counter.get("<unparsed>", 0) + 1
+                        continue
+                    buf.append(frame)
                     if _v3_frame_has_content(frame):
                         has_content = True
                         if deferred is not None:
@@ -1066,12 +1048,6 @@ class ProxyHandler:
                     self._set_sticky(session_key, key.key_id, required_caps)
                     asyncio.create_task(self._persist_sticky_binding(session_key, key.key_id, required_caps))
                 status = pipeline.state if pipeline.state in ("completed", "failed", "incomplete") else "incomplete"
-                _lg.info(f"[v3-stream] done key_id={key.key_id} status={status} committed=True reason={pipeline.stats.terminal_reason} events={ev_counter}")
-                try:
-                    with open("/tmp/last_resp_stream.txt", "wb") as _f:
-                        _f.write(b"".join(all_frames))
-                except OSError:
-                    pass
                 await self._persist_v3_stream_terminal(
                     prep,
                     status,

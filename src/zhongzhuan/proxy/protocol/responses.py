@@ -17,6 +17,7 @@ from typing import Any
 
 from .responses_bridge import ResponsesTurnBridge
 from .responses_models import HOSTED_TOOL_CAPABILITY, Capability, NAMESPACE_TOOL_TYPE, ReasoningEventMode
+from .tool_accumulator import split_namespace_name
 from .translator_base import finish_translator
 
 # ---- OpenAI / Responses API constants (stable string values) ----
@@ -338,16 +339,26 @@ def chatcompletions_to_responses(resp: Any, model: str = "") -> Any:
         )
     for tc in message.get("tool_calls") or []:
         fn = tc.get("function") or {}
-        output.append(
-            {
-                "id": f"fc_{tc.get('id', '')}",
-                "type": ITEM_FUNCTION_CALL,
-                "call_id": tc.get("id", ""),
-                "name": fn.get("name", ""),
-                "arguments": fn.get("arguments", "{}"),
-                "status": "completed",
-            }
-        )
+        flat_name = str(fn.get("name", "") or "")
+        # Codex 26.x MCP 子代理（namespace 工具）还原（与流式 pipeline 一致）：
+        # 请求侧把 ``type:"namespace"`` 容器摊平成 ``mcp__subagents__-spawn_agent``
+        # 发给 Chat 上游，上游回包里的 function.name 就是这个摊平名。回程必须
+        # 拆回裸名 + 补回 ``namespace`` 字段，否则 Codex 的 router 不知道把这次
+        # function_call 路由回哪个 MCP server（``unsupported call``，codex-relay
+        # #17 / Palantir 修法）。
+        ns, bare_name = split_namespace_name(flat_name)
+        fc_item: dict = {
+            "id": f"fc_{tc.get('id', '')}",
+            "type": ITEM_FUNCTION_CALL,
+            "call_id": tc.get("id", ""),
+            "name": bare_name if ns else flat_name,
+            "arguments": fn.get("arguments", "{}"),
+            "status": "completed",
+        }
+        if ns:
+            # 关键：补回 namespace 字段，Codex 才能路由回对应 MCP server。
+            fc_item["namespace"] = ns
+        output.append(fc_item)
 
     usage = resp.get("usage") or {}
     return {
