@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -904,6 +905,11 @@ class ProxyHandler:
             assert call is not None
             key = call.key
             tried.add(key.key_id)
+            try:
+                with open("/tmp/last_upstream_body.json", "wb") as _f:
+                    _f.write(call.body)
+            except OSError:
+                pass
 
             # A7. Open the upstream and read its response header.  ``UpstreamClient
             # .stream`` is an async generator that yields exactly one response
@@ -938,6 +944,7 @@ class ProxyHandler:
                 mark_network_failure(key)
                 continue
 
+            _lg.info(f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} path={call.path}")
             upstream_headers = dict(upstream_resp.headers)
             if upstream_resp.status_code >= 400:
                 # An upstream error before the first byte is a normal HTTP error --
@@ -990,23 +997,38 @@ class ProxyHandler:
                 store=deferred,
             )
             cancelled = asyncio.Event()
+            _pc = self._v3_pipeline_config()  # AC-7.4
+            if self._v3_request_wants_reasoning(prep.body_obj):
+                _pc = replace(_pc, emit_empty_reasoning=True)
             frames = pipeline.run(
                 adapter.iter_chunks(upstream_resp.aiter_bytes()),
                 client_cancelled=cancelled,
                 key_health=key,  # read-only: a disconnect is not a key failure
-                config=self._v3_pipeline_config(),  # AC-7.4
+                config=_pc,
             )
 
             # 缓冲上游帧，直到出现「首个内容帧」才提交 200 给客户端。
             # 若流在没有内容的情况下结束 → 视为空响应 → 换 key 重试（透明）。
             buf: list[bytes] = []
             has_content = False
+            ev_counter: dict[str, int] = {}
+            all_frames: list[bytes] = []
             try:
                 async for frame in frames:
+                    all_frames.append(frame)
                     if committed:
                         await resp.write(frame)
-                        continue
-                    buf.append(frame)
+                    else:
+                        buf.append(frame)
+                    for _ln in frame.decode("utf-8", "replace").splitlines():
+                        if _ln.startswith("data:"):
+                            _p = _ln[5:].strip()
+                            if _p and _p != "[DONE]":
+                                try:
+                                    _t = str(json.loads(_p).get("type", "?"))
+                                    ev_counter[_t] = ev_counter.get(_t, 0) + 1
+                                except Exception:
+                                    ev_counter["<unparsed>"] = ev_counter.get("<unparsed>", 0) + 1
                     if _v3_frame_has_content(frame):
                         has_content = True
                         if deferred is not None:
@@ -1044,6 +1066,12 @@ class ProxyHandler:
                     self._set_sticky(session_key, key.key_id, required_caps)
                     asyncio.create_task(self._persist_sticky_binding(session_key, key.key_id, required_caps))
                 status = pipeline.state if pipeline.state in ("completed", "failed", "incomplete") else "incomplete"
+                _lg.info(f"[v3-stream] done key_id={key.key_id} status={status} committed=True reason={pipeline.stats.terminal_reason} events={ev_counter}")
+                try:
+                    with open("/tmp/last_resp_stream.txt", "wb") as _f:
+                        _f.write(b"".join(all_frames))
+                except OSError:
+                    pass
                 await self._persist_v3_stream_terminal(
                     prep,
                     status,
@@ -1308,6 +1336,32 @@ class ProxyHandler:
                 bridge = ResponsesBridgeConfig()
             self._v3_pipeline_cfg = PipelineConfig.from_config(bridge)
         return self._v3_pipeline_cfg
+
+    @staticmethod
+    def _v3_request_wants_reasoning(body_obj: dict[str, Any]) -> bool:
+        """Whether the inbound Responses request asks for a reasoning lifecycle.
+
+        Codex 26.x desktop sends ``reasoning: {effort, summary: 'detailed'}``
+        (+ ``include: ['reasoning.encrypted_content']``).  Any of the following
+        counts as "wants reasoning": a non-empty ``reasoning`` config object, a
+        ``reasoning_effort`` string, or an ``include`` list mentioning
+        ``reasoning``.  When the upstream then delivers no ``reasoning_content``
+        at all, the pipeline synthesises an empty reasoning item so the strict
+        client still sees the full reasoning lifecycle (issue ⑩).
+        """
+        if not isinstance(body_obj, dict):
+            return False
+        reasoning = body_obj.get("reasoning")
+        if isinstance(reasoning, dict) and reasoning:
+            return True
+        if isinstance(body_obj.get("reasoning_effort"), str) and body_obj["reasoning_effort"]:
+            return True
+        include = body_obj.get("include")
+        if isinstance(include, list):
+            for entry in include:
+                if isinstance(entry, str) and "reasoning" in entry:
+                    return True
+        return False
 
     @staticmethod
     async def _aclose_quietly(agen: Any) -> None:

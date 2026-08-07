@@ -221,6 +221,9 @@ class UpstreamSSEChunkAdapter:
                 text = delta.get("content")
                 if isinstance(text, str) and text:
                     chunks.append({"type": "text", "delta": text})
+                reasoning = delta.get("reasoning_content")
+                if isinstance(reasoning, str) and reasoning:
+                    chunks.append({"type": "reasoning", "delta": reasoning})
                 chunks.extend(self._openai_tool_calls(delta.get("tool_calls")))
             if choice.get("finish_reason"):
                 # Chat Completions has no per-call terminator: finish_reason is

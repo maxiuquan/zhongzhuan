@@ -94,6 +94,14 @@ class PipelineConfig:
     connect_seconds: float = 15.0
     #: Criterion ⑤ (R-P1-27): heartbeat arrival gap must never exceed this.
     max_heartbeat_gap_seconds: float = 16.0
+    #: Codex 26.x "Concurrent reasoning summaries"（请求带
+    #: ``reasoning.summary='detailed'``）期望每个响应都有 reasoning 生命周期
+    #: 事件；上游对 gpt-5.6-sol 在真实请求下不回 reasoning_content（2026-08-07
+    #: 实测 8 个变体全为 0 帧）。开启后：若整个流从未发出任何 reasoning 事件，
+    #: 在 message item 前补发一个空 reasoning item 的完整生命周期，让严格客户端
+    #: 不再因缺失 reasoning 生命周期而直接结束会话（默认关闭，由 handler 按请求
+    #: 是否要求推理决定开启）。
+    emit_empty_reasoning: bool = False
 
     def __post_init__(self) -> None:
         """AC-7.2 / AC-7.3: clamp configured values back inside 铁律 5.
@@ -231,6 +239,13 @@ class ResponsePipeline:
         #: 否则严格客户端（Codex / OpenAI SDK）会因「delta without active item」
         #: 丢弃整个响应（issue ③）。
         self._message_part_id: str | None = None
+        #: 上游 ``reasoning_content`` 对应的 reasoning item 状态。Codex 26.x 桌面版
+        #: 启用了 concurrent reasoning summaries，期望响应流带 reasoning 事件
+        #: （reasoning_summary_text.* 家族）；缺失时客户端会直接结束会话且不渲染
+        #: 文本（2026-08-07 实测：上游返回 reasoning_content，relay 之前丢弃）。
+        self._open_reasoning: dict[str, Any] | None = None
+        self._reasoning_text: list[str] = []
+        self._reasoning_part_id: str | None = None
         self._output_index = 0
         self._done = False
         #: P0-2: set when the upstream sent an *explicit* completion signal.
@@ -275,9 +290,64 @@ class ResponsePipeline:
             return frames
         kind = str(chunk.get("type") or "")
 
-        if kind in ("text", "output_text.delta"):
+        if kind in ("reasoning", "reasoning_summary_text.delta"):
+            delta = str(chunk.get("delta", chunk.get("text", "")) or "")
+            if not delta:
+                return frames
+            if self._open_reasoning is None:
+                idx = self._output_index
+                self._output_index += 1
+                item_id = "rs_{0}_{1}".format(self.response_id, idx)
+                self._open_reasoning = {"id": item_id, "output_index": idx}
+                self._reasoning_text = []
+                self._reasoning_part_id = "pt_{0}".format(item_id)
+                frames.append(
+                    await self._emit(
+                        "response.output_item.added",
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": idx,
+                            "item": {"id": item_id, "type": "reasoning", "status": "in_progress"},
+                        },
+                    )
+                )
+                frames.append(
+                    await self._emit(
+                        "response.reasoning_summary_part.added",
+                        {
+                            "type": "response.reasoning_summary_part.added",
+                            "item_id": item_id,
+                            "output_index": idx,
+                            "summary_index": 0,
+                            "part": {"type": "summary_text", "text": ""},
+                        },
+                    )
+                )
+            frames.append(
+                await self._emit(
+                    "response.reasoning_summary_text.delta",
+                    {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": self._open_reasoning["id"],
+                        "output_index": self._open_reasoning["output_index"],
+                        "summary_index": 0,
+                        "delta": delta,
+                    },
+                )
+            )
+            self._reasoning_text.append(delta)
+            self.state = "streaming"
+
+        elif kind in ("text", "output_text.delta"):
             delta = str(chunk.get("delta", chunk.get("text", "")) or "")
             if self._open_message is None:
+                # OpenAI 顺序：reasoning item 在 message item 前完整结束。
+                # 若上游 reasoning_content 已发完而 text 开始，先关闭 reasoning。
+                frames.extend(await self._close_reasoning())
+                # Codex 26.x concurrent-reasoning 客户端：若请求要求推理但上游
+                # 全程未给 reasoning_content，在首个文本前补一个空的 reasoning
+                # 生命周期，避免客户端直接结束会话（issue ⑩）。
+                frames.extend(await self._ensure_reasoning_lifecycle())
                 idx = self._output_index
                 self._output_index += 1
                 item_id = make_message_item_id(self.response_id, idx)
@@ -440,9 +510,131 @@ class ResponsePipeline:
 
         return frames
 
+    async def _close_reasoning(self, *, incomplete: bool = False) -> list[bytes]:
+        """Close an open reasoning item (summary_text family), if any."""
+        frames: list[bytes] = []
+        if self._open_reasoning is None:
+            return frames
+        idx = self._open_reasoning["output_index"]
+        item_id = self._open_reasoning["id"]
+        full_text = "".join(self._reasoning_text)
+        frames.append(
+            await self._emit(
+                "response.reasoning_summary_text.done",
+                {
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": item_id,
+                    "output_index": idx,
+                    "summary_index": 0,
+                    "text": full_text,
+                },
+            )
+        )
+        if self._reasoning_part_id is not None:
+            frames.append(
+                await self._emit(
+                    "response.reasoning_summary_part.done",
+                    {
+                        "type": "response.reasoning_summary_part.done",
+                        "item_id": item_id,
+                        "output_index": idx,
+                        "summary_index": 0,
+                        "part": {"type": "summary_text", "text": full_text},
+                    },
+                )
+            )
+            self._reasoning_part_id = None
+        frames.append(
+            await self._emit(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": idx,
+                    "item": {
+                        "id": item_id,
+                        "type": "reasoning",
+                        "status": "incomplete" if incomplete else "completed",
+                    },
+                },
+            )
+        )
+        self._open_reasoning = None
+        return frames
+
+    async def _ensure_reasoning_lifecycle(self) -> list[bytes]:
+        """Emit a full (empty) reasoning item lifecycle when the stream never did.
+
+        Codex 26.x 启用了 concurrent reasoning summaries：请求带
+        ``reasoning.summary='detailed'`` 时，客户端期望流中至少出现一次
+        ``reasoning_summary_part.added`` → ``reasoning_summary_text.delta`` →
+        ``reasoning_summary_text.done`` → ``reasoning_summary_part.done`` →
+        ``output_item.done``（type=reasoning）。上游（gpt-5.6-sol 经
+        work.freemodel.dev）在真实 Codex 请求下不返回任何 ``reasoning_content``
+        （2026-08-07 实测 8 个变体全部为 0 帧），此时若流里从未出现 reasoning
+        事件，Codex 会因等不到生命周期而**直接结束会话且不渲染任何文本**。
+
+        ``emit_empty_reasoning`` 开启时，在正常完成路径上补一个空 reasoning
+        item：文本为空，但生命周期完整，客户端因此能正常渲染后续的 output_text。
+        """
+        frames: list[bytes] = []
+        if not self._config.emit_empty_reasoning:
+            return frames
+        if self._open_reasoning is not None or self._reasoning_text:
+            # 上游已提供过真实 reasoning（无论是否还在流中）→ 无需补。
+            return frames
+        if self._open_message is not None or self._tools.list_all():
+            # message / tool item 已开：此时再插一个 reasoning 会打乱
+            # output_index 顺序（OpenAI 要求 reasoning 在 message 前）。
+            # 仅在一切输出开始之前补。
+            return frames
+        idx = self._output_index
+        self._output_index += 1
+        item_id = "rs_{0}_{1}".format(self.response_id, idx)
+        part_id = "pt_{0}".format(item_id)
+        self._open_reasoning = {"id": item_id, "output_index": idx}
+        self._reasoning_text = []
+        self._reasoning_part_id = part_id
+        frames.append(
+            await self._emit(
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": idx,
+                    "item": {"id": item_id, "type": "reasoning", "status": "in_progress"},
+                },
+            )
+        )
+        frames.append(
+            await self._emit(
+                "response.reasoning_summary_part.added",
+                {
+                    "type": "response.reasoning_summary_part.added",
+                    "item_id": item_id,
+                    "output_index": idx,
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": ""},
+                },
+            )
+        )
+        frames.append(
+            await self._emit(
+                "response.reasoning_summary_text.delta",
+                {
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": item_id,
+                    "output_index": idx,
+                    "summary_index": 0,
+                    "delta": "",
+                },
+            )
+        )
+        frames.extend(await self._close_reasoning(incomplete=False))
+        return frames
+
     async def _close_open_items(self, *, incomplete: bool) -> list[bytes]:
         """Close any still-open items (truncation uses ``incomplete=True``)."""
         frames: list[bytes] = []
+        frames.extend(await self._close_reasoning(incomplete=incomplete))
         if self._open_message is not None:
             idx = self._open_message["output_index"]
             item_id = self._open_message["id"]
