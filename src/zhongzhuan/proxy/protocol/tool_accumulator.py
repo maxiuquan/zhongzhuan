@@ -36,6 +36,41 @@ from .responses_models import (
 )
 
 
+#: namespace 摊平分隔符，与 ``responses.py`` 的 :data:`NAMESPACE_FLAT_SEP` 保持一致。
+#: 摊平名形如 ``mcp__subagents__-spawn_agent`` —— ``mcp__{server}__`` 是 namespace，
+#: 连字符后是子工具名。回包还原只依赖「连字符分隔 + 前缀含 ``mcp__``」这个约定，
+#: 不需要额外的映射表。（为什么是 ``-`` 而不是 ``.``：OpenAI Chat Completions
+#: 的 function name 正则 ``^[a-zA-Z0-9_-]+$`` 不允许点，2026-08-07 实测上游 400。）
+NAMESPACE_FLAT_SEP: str = "-"
+_NAMESPACE_PREFIX: str = "mcp__"
+
+
+def split_namespace_name(flat_name: str) -> tuple[str, str]:
+    """把摊平的 function 名还原成 ``(namespace, subtool_name)``。
+
+    规则（与 codex-relay #17 结论一致，分隔符按上游约束用连字符）：
+
+    * ``mcp__subagents__-spawn_agent`` -> ``("mcp__subagents__", "spawn_agent")``；
+    * 嵌套 namespace 摊平后是 ``mcp__outer__-mcp__inner__-subtool``，取**最后**
+      一个连字符前段做 namespace（Codex 只认一层 ``mcp__{server}__``），名字
+      保留最后一段——用 ``rpartition`` 而非 ``partition``，因为 namespace 名
+      本身可能含连字符（``mcp__a-b__``）；
+    * 不是摊平名（无连字符、或前缀不是 ``mcp__``）-> ``("", 原样)`` —— 普通
+      function 调用不受影响。
+
+    Args:
+        flat_name: 上游返回的 function 名。
+
+    Returns:
+        ``(namespace, subtool_name)``；namespace 为空表示非 namespace 调用。
+    """
+    name = flat_name or ""
+    if NAMESPACE_FLAT_SEP in name and name.startswith(_NAMESPACE_PREFIX):
+        ns, _, rest = name.rpartition(NAMESPACE_FLAT_SEP)
+        return ns, rest
+    return "", name
+
+
 @dataclass
 class ToolCallAccumulator:
     """Accumulate one tool call across arbitrary SSE fragmentation.
@@ -54,6 +89,16 @@ class ToolCallAccumulator:
     item_added: bool = False
     arguments_done: bool = False
     item_done: bool = False
+
+    #: Codex 26.x MCP 子代理命名空间（如 ``mcp__subagents__``）。
+    #:
+    #: TRANSLATE 路径把请求里的 ``type:"namespace"`` 容器摊平成点分隔 function
+    #: 名（``mcp__subagents__-spawn_agent``），回包时要把摊平名**还原**成
+    #: ``name=spawn_agent`` + ``namespace=mcp__subagents__``，Codex 才能把这次
+    #: function_call 路由回对应的 MCP server（codex-relay #17 / Palantir 修法）。
+    #: 该字段由 :meth:`split_namespace_name` 解析摊平名得到，pipeline 发射
+    #: ``output_item.added/done`` 时写进 item。
+    namespace: str = ""
 
     #: Accumulation mode for ``name``: append or full-value replace (§5.3).
     name_mode: str = "replace"
@@ -252,4 +297,5 @@ class ToolCallCollection:
 __all__ = [
     "ToolCallAccumulator",
     "ToolCallCollection",
+    "split_namespace_name",
 ]

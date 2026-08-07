@@ -16,7 +16,7 @@ import time
 from typing import Any
 
 from .responses_bridge import ResponsesTurnBridge
-from .responses_models import HOSTED_TOOL_CAPABILITY, Capability, ReasoningEventMode
+from .responses_models import HOSTED_TOOL_CAPABILITY, Capability, NAMESPACE_TOOL_TYPE, ReasoningEventMode
 from .translator_base import finish_translator
 
 # ---- OpenAI / Responses API constants (stable string values) ----
@@ -97,6 +97,74 @@ def _convert_tool(tool: Any) -> Any:
             **({"strict": tool["strict"]} if "strict" in tool else {}),
         },
     }
+
+
+#: namespace 摊平分隔符。Codex 桌面版 26.x 用 ``type:"namespace"`` 容器声明
+#: MCP 子代理工具组（如 ``mcp__subagents__`` 下的 ``spawn_agent``）。Chat
+#: Completions / Messages 上游没有 namespace 概念，必须摊平成普通 function。
+#: 命名 ``mcp__{server}__{subtool}``——但 **必须用连字符 ``-`` 分隔**
+#: ``mcp__{server}`` 与子工具名：
+#:
+#: * 上游硬约束：OpenAI Chat Completions 的 function name 正则
+#:   ``^[a-zA-Z0-9_-]+$``，**点 ``.`` 不合法**（2026-08-07 实测 macc.eu.cc
+#:   直接 400 ``Invalid 'tools[0].name': string does not match pattern``）；
+#: * 无歧义：``mcp__subagents__`` 内不含 ``-``，用 ``rpartition("-")`` 一定能
+#:   把 ``mcp__subagents__-spawn_agent`` 拆回 ``(namespace, subtool)``；
+#: * 别无分隔符拼接（``mcp__subagents__spawn_agent``）会让还原逻辑分不清
+#:   边界（``__`` 在 namespace 名里已经出现）。
+NAMESPACE_FLAT_SEP: str = "-"
+
+
+def _flatten_namespace_tool(tool: dict) -> list[dict]:
+    """把一条 ``type:"namespace"`` 工具摊平成若干普通 function 工具。
+
+    返回的每个 function 名形如 ``{namespace_name}{sep}{subtool_name}``，例如
+    ``mcp__subagents__-spawn_agent``。子工具可能本身也是 namespace（嵌套），
+    这里只摊平一层（Codex 的 MCP 桥接最多一层）；非 function 子工具（hosted
+    之类）跳过，与上层 hosted tool drop 语义一致。
+    """
+    ns_name = str(tool.get("name") or "").strip()
+    if not ns_name:
+        return []
+    out: list[dict] = []
+    for sub in tool.get("tools") or []:
+        if not isinstance(sub, dict):
+            continue
+        sub_type = str(sub.get("type") or "")
+        if sub_type == NAMESPACE_TOOL_TYPE:
+            # 嵌套 namespace：递归摊平（前缀叠加）。
+            for nested in _flatten_namespace_tool(sub):
+                out.append(_prefix_function_name(nested, ns_name))
+            continue
+        if sub_type != "function" and not sub.get("function"):
+            # 子工具不是 function 形态（如 hosted 子工具）：Chat Completions
+            # 无合法表达，与顶层 hosted drop 一致。
+            continue
+        fn = sub.get("function") if isinstance(sub.get("function"), dict) else sub
+        sub_name = str(fn.get("name") or "").strip()
+        if not sub_name:
+            continue
+        out.append(
+            {
+                "type": BLOCK_FUNCTION,
+                "function": {
+                    "name": "{0}{1}{2}".format(ns_name, NAMESPACE_FLAT_SEP, sub_name),
+                    "description": str(fn.get("description") or ""),
+                    "parameters": _normalize_tool_parameters(fn.get("parameters")),
+                },
+            }
+        )
+    return out
+
+
+def _prefix_function_name(tool: dict, prefix: str) -> dict:
+    """给一个已摊平的 function 工具名加前缀（嵌套 namespace 用）。"""
+    if not isinstance(tool, dict):
+        return tool
+    fn = tool.get("function")
+    if isinstance(fn, dict) and fn.get("name"):
+        tool = {**tool, "function": {**fn, "name": "{0}{1}{2}".format(prefix, NAMESPACE_FLAT_SEP, fn["name"])}}
+    return tool
 
 
 def convert_responses_request_to_chatcompletions(body: dict) -> dict:
@@ -187,8 +255,19 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
     if isinstance(body.get("tools"), list):
         converted_tools: list[dict] = []
         for tool in body["tools"]:
-            if isinstance(tool, dict) and tool.get("type") in HOSTED_TOOL_CAPABILITY:
+            if not isinstance(tool, dict):
+                mapped = _convert_tool(tool)
+                if mapped:
+                    converted_tools.append(mapped)
+                continue
+            if tool.get("type") in HOSTED_TOOL_CAPABILITY:
                 continue  # hosted tool: illegal in Chat Completions, drop
+            if tool.get("type") == NAMESPACE_TOOL_TYPE:
+                # Codex 26.x namespace 容器（MCP 子代理工具组）：Chat Completions
+                # 无 namespace 概念，摊平成普通 function（点分隔名）。子工具丢失
+                # 的 hosted 能力语义与顶层 hosted drop 一致。
+                converted_tools.extend(_flatten_namespace_tool(tool))
+                continue
             mapped = _convert_tool(tool)
             if mapped:
                 converted_tools.append(mapped)

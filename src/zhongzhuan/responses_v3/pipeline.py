@@ -47,7 +47,7 @@ from ..proxy.protocol.responses_models import (
     make_function_call_item_id,
     make_message_item_id,
 )
-from ..proxy.protocol.tool_accumulator import ToolCallAccumulator, ToolCallCollection
+from ..proxy.protocol.tool_accumulator import ToolCallAccumulator, ToolCallCollection, split_namespace_name
 from ..store.response_store import ResponseStore
 
 
@@ -412,24 +412,45 @@ class ResponsePipeline:
                 source_index=chunk.get("source_index"),
             )
             acc.replace_name(name)
+            # Codex 26.x MCP 子代理还原：
+            # * NATIVE 上游直接在 chunk 里带 ``namespace``（真 responses API）——
+            #   直接保留；若 name 还带着 ``{namespace}-`` 前缀则剥掉（上游两种
+            #   风格都可能）；
+            # * TRANSLATE 上游返回摊平名（mcp__x__-tool）——拆成 namespace +
+            #   子工具名（split_namespace_name 兜底）。
+            if name:
+                ns, sub = split_namespace_name(name)
+                if ns:
+                    acc.namespace = ns
+                    if sub:
+                        acc.replace_name(sub)
+            chunk_ns = str(chunk.get("namespace") or "")
+            if chunk_ns:
+                acc.namespace = chunk_ns
+                prefix = chunk_ns + "-"
+                if acc.name.startswith(prefix):
+                    acc.replace_name(acc.name[len(prefix) :])
             acc.append_arguments(fragment)
             if not acc.item_added:
                 idx = acc.output_index
                 self._output_index = max(self._output_index, idx + 1)
+                item = {
+                    "id": _tool_item_id(acc),
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": acc.call_id,
+                    "name": acc.name,
+                    "arguments": "",
+                }
+                if acc.namespace:
+                    item["namespace"] = acc.namespace
                 frames.append(
                     await self._emit(
                         "response.output_item.added",
                         {
                             "type": "response.output_item.added",
                             "output_index": idx,
-                            "item": {
-                                "id": _tool_item_id(acc),
-                                "type": "function_call",
-                                "status": "in_progress",
-                                "call_id": acc.call_id,
-                                "name": name,
-                                "arguments": "",
-                            },
+                            "item": item,
                         },
                     )
                 )
@@ -482,6 +503,7 @@ class ResponsePipeline:
                                     "call_id": done_acc.call_id,
                                     "name": done_acc.name,
                                     "arguments": done_acc.arguments,
+                                    **({"namespace": done_acc.namespace} if done_acc.namespace else {}),
                                 },
                             },
                         )
@@ -507,6 +529,7 @@ class ResponsePipeline:
                                     "call_id": done_acc.call_id,
                                     "name": done_acc.name,
                                     "arguments": done_acc.arguments,
+                                    **({"namespace": done_acc.namespace} if done_acc.namespace else {}),
                                 },
                             },
                         )

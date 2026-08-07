@@ -338,15 +338,22 @@ class UpstreamSSEChunkAdapter:
             source_index = _int_or(payload.get("output_index"), 0)
             call_id = str(payload.get("call_id") or payload.get("item_id") or "")
             self._track_tool(source_index, call_id)
-            return [
-                {
-                    "type": "tool_call",
-                    "call_id": call_id,
-                    "name": str(payload.get("name") or ""),
-                    "arguments": str(payload.get("delta") or ""),
-                    "source_index": source_index,
-                }
-            ]
+            chunk: dict[str, Any] = {
+                "type": "tool_call",
+                "call_id": call_id,
+                "name": str(payload.get("name") or ""),
+                "arguments": str(payload.get("delta") or ""),
+                "source_index": source_index,
+            }
+            # NATIVE 上游（真 responses API）可能在 function_call item 上带
+            # ``namespace``（Codex 26.x MCP 子代理）。透传到 chunk，pipeline 在
+            # 发射 output_item 时保留它，Codex 才能路由回 MCP server。
+            ns = str(payload.get("namespace") or "")
+            if not ns and isinstance(payload.get("item"), dict):
+                ns = str(payload["item"].get("namespace") or "")
+            if ns:
+                chunk["namespace"] = ns
+            return [chunk]
         if etype == "response.function_call_arguments.done":
             return self._close_tool(_int_or(payload.get("output_index"), 0))
         if etype in _NATIVE_TERMINAL_EVENTS:

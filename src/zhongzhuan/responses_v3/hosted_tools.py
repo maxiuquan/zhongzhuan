@@ -66,6 +66,7 @@ from typing import Any, Mapping
 from ..proxy.protocol.responses_errors import to_incomplete_details
 from ..proxy.protocol.responses_models import (
     HOSTED_TOOL_CAPABILITY,
+    NAMESPACE_TOOL_TYPE,
     Capability,
     ErrorClass,
     HostedToolSpec,
@@ -102,8 +103,8 @@ TOOL_CHOICE_LITERALS: frozenset[str] = frozenset({"auto", "none", "required"})
 
 #: ``tool_choice`` 为对象时允许的 ``type``。``function`` 是 OpenAI 官方形态；
 #: hosted tool 也可以被点名（``{"type": "web_search"}``），所以 hosted 的
-#: type 全集同样合法。
-_TOOL_CHOICE_OBJECT_TYPES: frozenset[str] = frozenset({"function", "allowed_tools", "custom"}) | HOSTED_TOOL_TYPES
+#: type 全集同样合法。``namespace`` 是 Codex 26.x 的工具容器，也放行。
+_TOOL_CHOICE_OBJECT_TYPES: frozenset[str] = frozenset({"function", "allowed_tools", "custom"}) | HOSTED_TOOL_TYPES | {NAMESPACE_TOOL_TYPE}
 
 #: §4-Q4 给定的错误消息模板。逐字对齐 PRD 的建议错误体 —— 客户端可以拿
 #: ``capability`` 名去查配置，拿 ``upstream_mode`` 提示去改部署。

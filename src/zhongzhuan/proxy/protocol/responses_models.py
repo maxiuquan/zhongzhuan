@@ -231,6 +231,17 @@ HOSTED_TOOL_CAPABILITY: dict[str, Capability] = {
     "tool_search": Capability.TOOL_SEARCH,
 }
 
+#: Codex 桌面版 26.x 的 namespace 工具容器类型（工具类型白名单）。
+#:
+#: 形态：``{"type": "namespace", "name": "mcp__subagents__", "tools": [...]}``。
+#: namespace 不是 hosted tool —— 中继既不执行它、也不需要任何上游能力承载；它
+#: 只是 Codex 用来声明 MCP 子代理工具组的**工具容器**，语义上是透传 / 摊平。
+#: 因此它**不进入** :data:`HOSTED_TOOL_CAPABILITY`（否则会被识别成 hosted tool、
+#: 产生能力路由需求、还破坏 ``HOSTED_TOOL_TYPES`` 的计数断言）；它在请求翻译
+#: （``proxy/protocol/responses.py`` 的 namespace 分支）与回包还原（pipeline 的
+#: ``namespace`` 字段注入）两侧共用，故放在公共常量层。
+NAMESPACE_TOOL_TYPE: str = "namespace"
+
 
 # ---------------------------------------------------------------------------
 # 4. Error classes (§10.2) and terminal reasons (§9.4)
