@@ -13,15 +13,14 @@ from ..upstream import UpstreamClient
 
 #: Codex (desktop) model-discovery endpoint — degraded-mode fallback model
 #: slugs used only when the store is unavailable.  In normal operation the
-#: real list comes from the store's ``is_fallback`` models (what Codex actually
-#: sees in production); this list merely keeps the endpoint honest if the
-#: store can't be reached.
-_CODEX_FALLBACK_MODEL_SLUGS = [
-    "oc-glm-5.2-free",
-    "oc-glm-5.1-free",
-    "oc-kimi-k2.7-code-free",
-    "oc-deepseek-v4-flash-free",
-    "oc-mimo-v2.5-free",
+#: Real list comes from the store's *official* models (``is_fallback=False``,
+#: ``enabled=True``) — that's what Codex should see in production. This static
+#: list is only a last-resort safety net used when the store can't be reached
+#: (e.g. DB down), so Codex still gets a usable catalog instead of an empty one.
+_CODEX_OFFICIAL_MODEL_SLUGS = [
+    "gpt-5.6-sol",
+    "agnes-2.5-flash",
+    "glm-5.2",
 ]
 
 
@@ -373,10 +372,11 @@ class ProxyServer:
         )
 
     async def _codex_model_slugs(self) -> list[str]:
-        """Return the model slugs Codex should see — our fallback models.
+        """Return the model slugs Codex should see — our *official* models.
 
-        Prefers the store's ``is_fallback`` models (production reality); falls
-        back to a static list only when the store is unreachable.
+        Returns every enabled, non-fallback model from the store (production
+        reality); falls back to a static official-model list only when the
+        store is unreachable.
         """
         if self.store is not None:
             try:
@@ -386,13 +386,13 @@ class ProxyServer:
                 names = [
                     m.name
                     for m in rows
-                    if getattr(m, "is_fallback", False) and m.enabled
+                    if m.enabled and not getattr(m, "is_fallback", False)
                 ]
                 if names:
                     return names
             except Exception:
                 pass
-        return list(_CODEX_FALLBACK_MODEL_SLUGS)
+        return list(_CODEX_OFFICIAL_MODEL_SLUGS)
 
     @staticmethod
     def _build_codex_model_info(slug: str) -> dict:

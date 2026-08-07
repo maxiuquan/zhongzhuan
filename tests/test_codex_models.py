@@ -9,6 +9,7 @@ import pytest
 from aiohttp import web
 
 from zhongzhuan.proxy.server import ProxyServer
+from zhongzhuan.store.models import Model
 
 
 class _FakeToken:
@@ -72,15 +73,12 @@ async def test_valid_token_returns_models(server, aiohttp_client, monkeypatch):
     monkeypatch.setattr(
         "zhongzhuan.store.access_tokens.get_token_by_value", _good
     )
-    # force a known 6-model list
+    # force a known official-model list (non-fallback)
     async def _slugs():
         return [
-            "oc-glm-5.2-free",
-            "oc-glm-5.1-free",
-            "oc-kimi-k2.7-code-free",
-            "oc-deepseek-v4-flash-free",
-            "oc-mimo-v2.5-free",
-            "oc-qwen3-coder-free",
+            "gpt-5.6-sol",
+            "agnes-2.5-flash",
+            "glm-5.2",
         ]
 
     monkeypatch.setattr(server, "_codex_model_slugs", _slugs)
@@ -92,7 +90,7 @@ async def test_valid_token_returns_models(server, aiohttp_client, monkeypatch):
     assert resp.status == 200, await resp.text()
     body = await resp.json()
     assert "models" in body
-    assert len(body["models"]) == 6
+    assert len(body["models"]) == 3
     # alias path identical
     resp2 = await client.get(
         "/v1/api/codex/models", headers={"Authorization": "Bearer zz-goodtoken"}
@@ -102,7 +100,7 @@ async def test_valid_token_returns_models(server, aiohttp_client, monkeypatch):
 
 
 def test_model_info_shape():
-    info = ProxyServer._build_codex_model_info("oc-glm-5.2-free")
+    info = ProxyServer._build_codex_model_info("gpt-5.6-sol")
     required = {
         "slug",
         "display_name",
@@ -125,11 +123,35 @@ def test_model_info_shape():
         "use_responses_lite",
     }
     assert set(info.keys()) == required
-    assert info["slug"] == "oc-glm-5.2-free"
-    assert info["display_name"] == "glm-5.2-free"
+    assert info["slug"] == "gpt-5.6-sol"
+    assert info["display_name"] == "gpt-5.6-sol"
     assert info["use_responses_lite"] is False
     assert info["supports_parallel_tool_calls"] is True
     assert info["truncation_policy"] == {"mode": "bytes", "limit": 200000}
     # empty reasoning -> Codex won't send `reasoning` to upstreams that lack it
     assert info["supported_reasoning_levels"] == []
     assert info["supports_reasoning_summaries"] is False
+
+
+async def test_codex_model_slugs_excludes_fallback_and_disabled(monkeypatch):
+    """The live query must surface only enabled, non-fallback (official) models."""
+    official = Model(
+        name="gpt-5.6-sol", upstream_base="x", upstream_model="y",
+        enabled=True, is_fallback=False,
+    )
+    fallback = Model(
+        name="oc-glm-5.2-free", upstream_base="x", upstream_model="y",
+        enabled=True, is_fallback=True,
+    )
+    disabled_official = Model(
+        name="glm-5.2", upstream_base="x", upstream_model="y",
+        enabled=False, is_fallback=False,
+    )
+
+    async def _fake_list(_store):
+        return [official, fallback, disabled_official]
+
+    monkeypatch.setattr("zhongzhuan.store.models.list_models", _fake_list)
+    s = ProxyServer(upstream_clients={}, store=object())  # truthy, non-None
+    names = await s._codex_model_slugs()
+    assert names == ["gpt-5.6-sol"]
