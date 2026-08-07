@@ -41,6 +41,18 @@ def make_proxy_auth_middleware(store) -> Middleware:
         if request.path == "/v1/models" and request.method == "GET":
             return await handler(request)
 
+        # The Codex model-discovery endpoint performs its OWN Bearer-token
+        # check inside the handler, so the two forms
+        #   GET /v1/api/codex/models   and   GET /api/codex/models
+        # (the latter lives outside /v1/ and is never seen by this middleware)
+        # stay behaviour-identical.  Exempt it here to avoid a second,
+        # quota-bearing pass that could 401 a valid token on an empty body.
+        if (
+            request.path in ("/v1/api/codex/models", "/api/codex/models")
+            and request.method == "GET"
+        ):
+            return await handler(request)
+
         # Check token: prefer x-api-key (Anthropic clients), fallback Authorization: Bearer (OpenAI clients)
         token = request.headers.get("x-api-key", "").strip()
         if not token:

@@ -11,6 +11,19 @@ from .handler import make_handler
 from ..store import Store
 from ..upstream import UpstreamClient
 
+#: Codex (desktop) model-discovery endpoint — degraded-mode fallback model
+#: slugs used only when the store is unavailable.  In normal operation the
+#: real list comes from the store's ``is_fallback`` models (what Codex actually
+#: sees in production); this list merely keeps the endpoint honest if the
+#: store can't be reached.
+_CODEX_FALLBACK_MODEL_SLUGS = [
+    "oc-glm-5.2-free",
+    "oc-glm-5.1-free",
+    "oc-kimi-k2.7-code-free",
+    "oc-deepseek-v4-flash-free",
+    "oc-mimo-v2.5-free",
+]
+
 
 class ProxyServer:
     def __init__(
@@ -123,6 +136,12 @@ class ProxyServer:
         app.router.add_delete("/v1/responses/{response_id}", handler)
         app.router.add_post("/v1/responses/{response_id}/cancel", handler)
         app.router.add_get("/v1/responses/{response_id}/input_items", handler)
+        # Codex (desktop) model-discovery endpoint — must be registered before
+        # the /v1/{tail:.*} catch-all so it is matched explicitly.  Both the
+        # /v1/ and the alias /api/ form are handled by the same method, which
+        # performs its own Bearer-token check (see proxy/auth.py exemption).
+        app.router.add_get("/v1/api/codex/models", self._codex_models)
+        app.router.add_get("/api/codex/models", self._codex_models)
         app.router.add_route("*", "/v1/{tail:.*}", handler)
         # T33 (R-P2-07/08/09)：分层健康检查 + Prometheus /metrics 导出。
         app.router.add_get("/healthz", self._health_liveness)
@@ -311,6 +330,103 @@ class ProxyServer:
         for g in self.groups:
             items.append({"id": g.get("name", ""), "object": "model"})
         return web.json_response({"object": "list", "data": items})
+
+    # ------------------------------------------------------------------
+    # Codex (desktop) model-discovery endpoint
+    #   GET /v1/api/codex/models   (alias: GET /api/codex/models)
+    # Codex 0.146.x calls this with `?client_version=...` and
+    # `Authorization: Bearer <key>` and expects `{"models": [ModelInfo...]}`.
+    # The ModelInfo shape mirrors codex-rs' `ModelInfo` struct exactly — every
+    # non-`#[serde(default)]` field must be present or Codex refuses to start.
+    # ------------------------------------------------------------------
+
+    async def _codex_models(self, request: web.Request) -> web.Response:
+        # Auth: same token table as /v1/responses (proxy/auth.py exempts this
+        # path so the check lives here and is identical for both URL forms).
+        auth = request.headers.get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip()
+        if not token:
+            token = request.headers.get("x-api-key", "").strip()
+        if not token or self.store is None:
+            return self._codex_unauthorized()
+        from ..store.access_tokens import get_token_by_value
+
+        at = await get_token_by_value(self.store, token)
+        # Reuse the same validity rules as the proxy auth middleware
+        # (enabled / not revoked / not expired / quota), but always answer 401
+        # for this discovery endpoint regardless of the failure reason.
+        ok, _ = at.check_quota("") if at is not None else (False, "no token")
+        if not ok:
+            return self._codex_unauthorized()
+
+        names = await self._codex_model_slugs()
+        models = [self._build_codex_model_info(n) for n in names]
+        # `?client_version=...` is informational (Codex 0.146.x sends it); the
+        # response shape is exactly `{"models": [...]}`.
+        return web.json_response({"models": models})
+
+    @staticmethod
+    def _codex_unauthorized() -> web.Response:
+        return web.json_response(
+            {"error": {"message": "invalid or missing access token", "type": "unauthorized"}},
+            status=401,
+        )
+
+    async def _codex_model_slugs(self) -> list[str]:
+        """Return the model slugs Codex should see — our fallback models.
+
+        Prefers the store's ``is_fallback`` models (production reality); falls
+        back to a static list only when the store is unreachable.
+        """
+        if self.store is not None:
+            try:
+                from ..store.models import list_models as _list_models_db
+
+                rows = await _list_models_db(self.store)
+                names = [
+                    m.name
+                    for m in rows
+                    if getattr(m, "is_fallback", False) and m.enabled
+                ]
+                if names:
+                    return names
+            except Exception:
+                pass
+        return list(_CODEX_FALLBACK_MODEL_SLUGS)
+
+    @staticmethod
+    def _build_codex_model_info(slug: str) -> dict:
+        """Build a codex-rs ``ModelInfo`` dict for *slug*.
+
+        Every field below is required by codex-rs' deserializer (any missing
+        non-``#[serde(default)]`` field makes Codex refuse to start).  Values
+        are chosen to be safe for the OpenCode Free fallback models we serve:
+        no reasoning advertised (upstreams may not support it), parallel tool
+        calls on (needed for the MCP sub-agent bridge), and
+        ``use_responses_lite: false`` so Codex stays on the legacy request path.
+        """
+        display = slug[len("oc-"):] if slug.startswith("oc-") else slug
+        return {
+            "slug": slug,
+            "display_name": display,
+            "description": None,
+            "supported_reasoning_levels": [],
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": True,
+            "priority": 1,
+            "availability_nux": None,
+            "upgrade": None,
+            "base_instructions": "You are a helpful coding agent.",
+            "supports_reasoning_summaries": False,
+            "support_verbosity": False,
+            "default_verbosity": None,
+            "apply_patch_tool_type": None,
+            "truncation_policy": {"mode": "bytes", "limit": 200000},
+            "supports_parallel_tool_calls": True,
+            "experimental_supported_tools": [],
+            "use_responses_lite": False,
+        }
 
 
 def _make_gzip_middleware(min_size: int = 1024):
