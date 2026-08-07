@@ -1490,7 +1490,37 @@ async def test_t9_upstream_4xx_is_passed_through_not_retried_forever(astore):
 
 @pytest.mark.asyncio
 async def test_t9_hosted_tool_is_refused_with_a_standard_error(astore):
-    """An unsupported hosted tool is an honest 4xx, never a fabricated 200."""
+    """An unsupported hosted tool is an honest 4xx, never a fabricated 200.
+
+    ``web_search`` is now a transparently *forwarded* capability
+    (UPSTREAM_FORWARDED_CAPABILITIES), so it no longer exercises the refusal
+    path -- we use ``computer`` here instead, which has no local executor and
+    is not in the forwarded set, so it must still be refused up front.
+    """
+    up = MockUpstream()
+    await up.start()
+    p = await _start_proxy(up.url, astore)
+    try:
+        status, obj = await _post_json(
+            p,
+            "/v1/responses",
+            {"model": "gpt-4o", "input": "use the computer", "tools": [{"type": "computer"}]},
+        )
+        assert status >= 400, obj
+        assert isinstance(obj.get("error"), dict), obj
+        assert up.request_count == 0, "a refused capability still burned an upstream call"
+    finally:
+        await p.close()
+        await up.stop()
+
+
+async def test_t9b_web_search_forwarded_to_upstream(astore):
+    """``web_search`` is a forwarded capability: it reaches the upstream as a
+    real 200, never a fabricated refusal.
+
+    This is the post-T25 behaviour change that made the old T9 stale: the
+    bridge no longer claims to host web search, it just forwards it.
+    """
     up = MockUpstream()
     await up.start()
     p = await _start_proxy(up.url, astore)
@@ -1500,9 +1530,8 @@ async def test_t9_hosted_tool_is_refused_with_a_standard_error(astore):
             "/v1/responses",
             {"model": "gpt-4o", "input": "search the web", "tools": [{"type": "web_search"}]},
         )
-        assert status >= 400, obj
-        assert isinstance(obj.get("error"), dict), obj
-        assert up.request_count == 0, "a refused capability still burned an upstream call"
+        assert status == 200, obj
+        assert up.request_count == 1, "web_search must be forwarded, not refused"
     finally:
         await p.close()
         await up.stop()
