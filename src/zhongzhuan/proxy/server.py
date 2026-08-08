@@ -303,7 +303,11 @@ class ProxyServer:
                 from ..store.groups import list_groups as _list_groups_db
 
                 ms = await _list_models_db(self.store)
-                self.models = [{"name": m.name} for m in ms]
+                # 仅暴露「启用且非兜底」模型：oc-* 等 is_fallback 模型是
+                # 上游池耗尽时的内部兜底，不应出现在 /v1/models 发现列表。
+                self.models = [
+                    {"name": m.name} for m in ms if m.enabled and not m.is_fallback
+                ]
                 rows = await _list_groups_db(self.store)
                 self.groups = [
                     {

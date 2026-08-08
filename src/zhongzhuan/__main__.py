@@ -390,8 +390,14 @@ async def run_foreground(
         await client.start()
         upstream_clients[base_url] = client
 
-    # Load models and groups for /v1/models（兜底模型已在 DB，自动包含）
-    models_data = [{"name": m.name} for m in await list_models(store)]
+    # Load models and groups for /v1/models.
+    # 仅暴露「启用且非兜底」的模型：oc-* 等 is_fallback 模型是上游
+    # 池耗尽时的内部兜底实现细节，不应出现在给下游的模型发现列表里。
+    models_data = [
+        {"name": m.name}
+        for m in await list_models(store)
+        if m.enabled and not m.is_fallback
+    ]
     from zhongzhuan.store.groups import list_groups as list_groups_db
 
     groups_data = [
