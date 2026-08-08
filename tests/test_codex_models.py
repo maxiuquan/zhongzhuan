@@ -155,3 +155,86 @@ async def test_codex_model_slugs_excludes_fallback_and_disabled(monkeypatch):
     s = ProxyServer(upstream_clients={}, store=object())  # truthy, non-None
     names = await s._codex_model_slugs()
     assert names == ["gpt-5.6-sol"]
+
+
+# ----------------------------------------------------------------------
+# /v1/models UA-based routing: Codex clients get the codex catalog shape,
+# everyone else keeps the original OpenAI `{"object":"list","data":[...]}`.
+# ----------------------------------------------------------------------
+
+def _make_models_app(server):
+    app = web.Application()
+    app.router.add_get("/v1/models", server._list_models)
+    return app
+
+
+async def test_models_route_codex_ua_returns_codex_catalog(aiohttp_client, monkeypatch):
+    s = ProxyServer(upstream_clients={}, store=object())
+    async def _slugs():
+        return ["gpt-5.6-sol", "glm-5.2"]
+    monkeypatch.setattr(s, "_codex_model_slugs", _slugs)
+    client = await aiohttp_client(_make_models_app(s))
+
+    # "Codex Desktop/0.146.0"
+    resp = await client.get("/v1/models", headers={"User-Agent": "Codex Desktop/0.146.0"})
+    assert resp.status == 200, await resp.text()
+    body = await resp.json()
+    assert "models" in body
+    assert [m["slug"] for m in body["models"]] == ["gpt-5.6-sol", "glm-5.2"]
+
+    # "codex-tui/0.x" also matches (case-insensitive)
+    resp2 = await client.get("/v1/models", headers={"User-Agent": "codex-tui/0.5"})
+    assert resp2.status == 200
+    assert "models" in await resp2.json()
+
+
+async def test_models_route_non_codex_ua_returns_openai_list(aiohttp_client, monkeypatch):
+    s = ProxyServer(upstream_clients={}, store=object())
+    s.models = [{"name": "gpt-5.6-sol"}, {"name": "glm-5.2"}]
+    s.groups = []
+    client = await aiohttp_client(_make_models_app(s))
+
+    # No UA at all -> OpenAI format
+    resp = await client.get("/v1/models")
+    assert resp.status == 200, await resp.text()
+    body = await resp.json()
+    assert body.get("object") == "list"
+    assert [d["id"] for d in body["data"]] == ["gpt-5.6-sol", "glm-5.2"]
+
+    # A normal OpenAI-compatible client UA -> OpenAI format
+    resp2 = await client.get(
+        "/v1/models", headers={"User-Agent": "OpenAI/Python 1.0"}
+    )
+    assert resp2.status == 200
+    assert (await resp2.json()).get("object") == "list"
+
+
+# ----------------------------------------------------------------------
+# Codex client detection (pure predicate — no aiohttp_client fixture needed)
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "path, headers, expected",
+    [
+        # Every Codex User-Agent flavour seen in the wild.
+        ("/v1/models", {"User-Agent": "codex_cli_rs/0.147.0 (Windows 11; x86_64)"}, True),
+        ("/v1/models", {"User-Agent": "Codex-Desktop/26.803.1 (Windows 11; x86_64)"}, True),
+        ("/v1/models", {"User-Agent": "Codex Desktop/26.803.1"}, True),
+        ("/v1/models", {"User-Agent": "codex-tui/0.5"}, True),
+        ("/v1/models", {"User-Agent": "CODEX/1.0"}, True),
+        # UA rewritten/dropped, but codex-rs still stamps `originator`.
+        ("/v1/models", {"User-Agent": "reqwest/0.12", "originator": "codex_cli_rs"}, True),
+        # Codex model discovery always carries ?client_version=
+        ("/v1/models?client_version=26.803.1", {"User-Agent": "unknown/1.0"}, True),
+        # Non-Codex clients keep the OpenAI shape.
+        ("/v1/models", {"User-Agent": "OpenAI/Python 1.0"}, False),
+        ("/v1/models", {"User-Agent": "curl/8.5.0"}, False),
+        ("/v1/models", {}, False),
+    ],
+)
+def test_is_codex_client(path, headers, expected):
+    from aiohttp.test_utils import make_mocked_request
+
+    s = ProxyServer(upstream_clients={}, store=object())
+    req = make_mocked_request("GET", path, headers=headers)
+    assert s._is_codex_client(req) is expected

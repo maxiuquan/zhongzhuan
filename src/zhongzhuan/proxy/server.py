@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from aiohttp import web
 from aiohttp.payload import Payload
 
@@ -322,7 +324,59 @@ class ProxyServer:
 
         return web.json_response({"name": "zhongzhuan", "version": __version__})
 
-    async def _list_models(self, _request: web.Request) -> web.Response:
+    #: Matches every Codex client flavour seen in the wild — the User-Agent
+    #: changed shape several times across releases:
+    #:   "codex_cli_rs/0.147.0 (...)"    Codex Rust client (CLI/TUI default)
+    #:   "Codex-Desktop/26.803.x (...)"  Codex Desktop 26.422+
+    #:   "Codex Desktop/26.803.x"        older Codex Desktop
+    #: A plain case-insensitive "codex" substring covers all of them.
+    _CODEX_CLIENT_RE = re.compile(r"codex", re.I)
+
+    def _is_codex_client(self, request: web.Request) -> bool:
+        """True when *request* comes from a Codex client.
+
+        The User-Agent alone is not reliable (it has changed shape several
+        times and some builds/proxies drop or rewrite it), so we also look at
+        Codex-specific headers and the ``?client_version=`` discovery query.
+        """
+        if self._CODEX_CLIENT_RE.search(request.headers.get("User-Agent", "")):
+            return True
+        # codex-rs stamps every request with `originator: codex_cli_rs`.
+        for header in ("originator", "x-originator", "x-client-name"):
+            if self._CODEX_CLIENT_RE.search(request.headers.get(header, "")):
+                return True
+        # Any `x-codex-*` style header is a give-away as well.
+        if any(self._CODEX_CLIENT_RE.search(name) for name in request.headers):
+            return True
+        # Codex model discovery always carries `?client_version=<ver>`.
+        if "client_version" in request.query:
+            return True
+        return False
+
+    async def _list_models(self, request: web.Request) -> web.Response:
+        # Codex (desktop / CLI) hits the *standard* /v1/models endpoint for
+        # model discovery too. It cannot parse the OpenAI `{"object":"list",
+        # "data":[...]}` shape and requires its own `{"models":[ModelInfo...]}`
+        # catalog (see _build_codex_model_info). Branch on the client so other
+        # OpenAI-compatible clients keep getting the original format.
+        from loguru import logger
+
+        is_codex = self._is_codex_client(request)
+        # Logged at INFO so the *real* client signature is always recoverable
+        # from the service log when a client ends up on the wrong branch.
+        logger.info(
+            "/v1/models ua={!r} originator={!r} query={} -> {} format".format(
+                request.headers.get("User-Agent", ""),
+                request.headers.get("originator", ""),
+                dict(request.query),
+                "codex" if is_codex else "openai",
+            )
+        )
+        if is_codex:
+            names = await self._codex_model_slugs()
+            models = [self._build_codex_model_info(n) for n in names]
+            return web.json_response({"models": models})
+
         items: list[dict] = []
         for m in self.models:
             items.append({"id": m.get("name", ""), "object": "model"})
@@ -377,19 +431,32 @@ class ProxyServer:
         Returns every enabled, non-fallback model from the store (production
         reality); falls back to a static official-model list only when the
         store is unreachable.
+
+        Codex cannot parse slugs containing "/", so we prefer a model's alias
+        (if it has one). A model with no alias whose name contains "/" is
+        unusable in Codex, so it is omitted from the catalog until an alias is
+        configured.
         """
         if self.store is not None:
             try:
                 from ..store.models import list_models as _list_models_db
 
                 rows = await _list_models_db(self.store)
-                names = [
-                    m.name
-                    for m in rows
-                    if m.enabled and not getattr(m, "is_fallback", False)
-                ]
-                if names:
-                    return names
+                slugs: list[str] = []
+                for m in rows:
+                    if not (m.enabled and not getattr(m, "is_fallback", False)):
+                        continue
+                    alias = (getattr(m, "aliases", "") or "").strip()
+                    if alias:
+                        slug = alias.split(",")[0].strip()
+                    elif "/" in m.name:
+                        # Codex rejects slugs with "/"; skip until aliased.
+                        continue
+                    else:
+                        slug = m.name
+                    slugs.append(slug)
+                if slugs:
+                    return slugs
             except Exception:
                 pass
         return list(_CODEX_OFFICIAL_MODEL_SLUGS)
