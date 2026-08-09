@@ -306,7 +306,12 @@ class ProxyServer:
                 # 仅暴露「启用且非兜底」模型：oc-* 等 is_fallback 模型是
                 # 上游池耗尽时的内部兜底，不应出现在 /v1/models 发现列表。
                 self.models = [
-                    {"name": m.name} for m in ms if m.enabled and not m.is_fallback
+                    {
+                        "name": m.name,
+                        "exposed": int(getattr(m, "exposed", 1) or 0),
+                    }
+                    for m in ms
+                    if m.enabled and not m.is_fallback
                 ]
                 rows = await _list_groups_db(self.store)
                 self.groups = [
@@ -315,6 +320,9 @@ class ProxyServer:
                         "name": r.get("name"),
                         "strategy": r.get("strategy"),
                         "members": [m["model_id"] for m in (r.get("members") or [])],
+                        # 仅用于 /v1/models 展示过滤；路由不看这个字段，
+                        # 隐藏的分组依旧能被显式调用。
+                        "exposed": int(r.get("exposed", 1) or 0),
                     }
                     for r in rows
                 ]
@@ -381,10 +389,16 @@ class ProxyServer:
             models = [self._build_codex_model_info(n) for n in names]
             return web.json_response({"models": models})
 
+        # 后台「暴露管理」的 exposed 开关同样作用于标准 /v1/models：隐藏项
+        # 只是从发现列表消失，仍可被客户端显式按名字调用（路由不受影响）。
         items: list[dict] = []
         for m in self.models:
+            if not m.get("exposed", 1):
+                continue
             items.append({"id": m.get("name", ""), "object": "model"})
         for g in self.groups:
+            if not g.get("exposed", 1):
+                continue
             items.append({"id": g.get("name", ""), "object": "model"})
         return web.json_response({"object": "list", "data": items})
 

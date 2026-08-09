@@ -393,8 +393,10 @@ async def run_foreground(
     # Load models and groups for /v1/models.
     # 仅暴露「启用且非兜底」的模型：oc-* 等 is_fallback 模型是上游
     # 池耗尽时的内部兜底实现细节，不应出现在给下游的模型发现列表里。
+    # ``exposed`` (M011) 只影响*发现列表*，不影响路由：被隐藏的模型/分组
+    # 仍可被客户端显式按名字调用，只是不出现在 /v1/models 里。
     models_data = [
-        {"name": m.name}
+        {"name": m.name, "exposed": int(getattr(m, "exposed", 1) or 0)}
         for m in await list_models(store)
         if m.enabled and not m.is_fallback
     ]
@@ -406,6 +408,8 @@ async def run_foreground(
             "name": g["name"],
             "strategy": g["strategy"],
             "members": [m["model_id"] for m in (g.get("members") or [])],
+            # 展示开关；handler 的 _set_groups 只读 name/members，额外键无害。
+            "exposed": int(g.get("exposed", 1) or 0),
         }
         for g in await list_groups_db(store)
     ]
