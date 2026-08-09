@@ -44,19 +44,36 @@ from .responses_models import (
 NAMESPACE_FLAT_SEP: str = "-"
 _NAMESPACE_PREFIX: str = "mcp__"
 
+#: 回程还原时**额外容忍**的分隔符。出站永远只用 :data:`NAMESPACE_FLAT_SEP`，
+#: 但链路上游/别的中转可能按 codex-relay #17 的原始写法用点摊平
+#: （``mcp__subagents__.spawn_agent``）。点在 OpenAI function name 正则
+#: ``^[a-zA-Z0-9_-]+$`` 里非法 —— 正因如此，收到带点的名字**一定**是别人摊平
+#: 的结果，不可能是合法的普通 function 名，还原它零歧义。
+#:
+#: 顺序有讲究：点优先于连字符。``mcp__x__.spawn-agent`` 若先按连字符切会得到
+#: ``("mcp__x__.spawn", "agent")``（错），先按点切才对。
+_NAMESPACE_INBOUND_SEPS: tuple[str, ...] = (".", NAMESPACE_FLAT_SEP)
+
 
 def split_namespace_name(flat_name: str) -> tuple[str, str]:
     """把摊平的 function 名还原成 ``(namespace, subtool_name)``。
 
-    规则（与 codex-relay #17 结论一致，分隔符按上游约束用连字符）：
+    规则（与 codex-relay #17 结论一致，出站分隔符按上游约束用连字符）：
 
     * ``mcp__subagents__-spawn_agent`` -> ``("mcp__subagents__", "spawn_agent")``；
+    * ``mcp__subagents__.spawn_agent`` -> 同上（兼容点分隔的外部摊平，见
+      :data:`_NAMESPACE_INBOUND_SEPS`）；
     * 嵌套 namespace 摊平后是 ``mcp__outer__-mcp__inner__-subtool``，取**最后**
-      一个连字符前段做 namespace（Codex 只认一层 ``mcp__{server}__``），名字
+      一个分隔符前段做 namespace（Codex 只认一层 ``mcp__{server}__``），名字
       保留最后一段——用 ``rpartition`` 而非 ``partition``，因为 namespace 名
       本身可能含连字符（``mcp__a-b__``）；
-    * 不是摊平名（无连字符、或前缀不是 ``mcp__``）-> ``("", 原样)`` —— 普通
+    * 不是摊平名（无分隔符、或前缀不是 ``mcp__``）-> ``("", 原样)`` —— 普通
       function 调用不受影响。
+
+    **刻意不处理**「无分隔符直接拼接」的 ``mcp__subagents__spawn_agent``：
+    那是一个**合法**的普通 function 名，Codex 客户端自己摊平时就会原样发这种名
+    并期待原样收回（它自己维护映射）。代理若擅自拆开并补 ``namespace``，反而会
+    破坏客户端侧摊平这条路。只有带我们自己或外部**显式分隔符**的名字才还原。
 
     Args:
         flat_name: 上游返回的 function 名。
@@ -65,9 +82,12 @@ def split_namespace_name(flat_name: str) -> tuple[str, str]:
         ``(namespace, subtool_name)``；namespace 为空表示非 namespace 调用。
     """
     name = flat_name or ""
-    if NAMESPACE_FLAT_SEP in name and name.startswith(_NAMESPACE_PREFIX):
-        ns, _, rest = name.rpartition(NAMESPACE_FLAT_SEP)
-        return ns, rest
+    if not name.startswith(_NAMESPACE_PREFIX):
+        return "", name
+    for sep in _NAMESPACE_INBOUND_SEPS:
+        if sep in name:
+            ns, _, rest = name.rpartition(sep)
+            return ns, rest
     return "", name
 
 
