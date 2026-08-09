@@ -168,6 +168,27 @@ def _prefix_function_name(tool: dict, prefix: str) -> dict:
     return tool
 
 
+def _first_flattened_tool_name(tools: Any, ns_name: str) -> str:
+    """返回某个 namespace 工具下第一个摊平后的 function 名（用于 tool_choice 映射）。
+
+    找不到对应 namespace（或它没有任何 function 子工具）时返回空串，调用方据此
+    退化为 "auto"，而不是把空名塞进 ``tool_choice`` 导致上游 400。
+    """
+    if not isinstance(tools, list) or not ns_name:
+        return ""
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") == NAMESPACE_TOOL_TYPE and str(tool.get("name") or "") == ns_name:
+            flat = _flatten_namespace_tool(tool)
+            if flat:
+                fn = flat[0].get("function") or {}
+                name = fn.get("name")
+                if name:
+                    return str(name)
+    return ""
+
+
 def convert_responses_request_to_chatcompletions(body: dict) -> dict:
     """Convert an OpenAI Responses API request body to Chat Completions format."""
     if not isinstance(body, dict) or not body.get("input"):
@@ -217,13 +238,23 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
                 # an assistant shell, otherwise we emit `tool_calls: []` which is
                 # itself invalid for strict upstreams.
                 continue
+            # Codex 26.x MCP 子代理（namespace 工具）往返一致性：上一轮落库的
+            # function_call 项是「裸名 + namespace」形态（由 chatcompletions_to_responses
+            # / pipeline 还原得到）。回程转成 assistant.tool_calls 时必须重新摊平成
+            # ``mcp__subagents__-spawn_agent``，否则与本轮 tools[] 里摊平后的工具名
+            # 对不上，上游/模型会把它当成未知工具（spawn 静默失败的根因之一）。
+            ns = item.get("namespace")
+            if ns and isinstance(ns, str) and ns.strip():
+                call_name = "{0}{1}{2}".format(ns.strip(), NAMESPACE_FLAT_SEP, name)
+            else:
+                call_name = name
             if current_assistant is None:
                 current_assistant = {"role": ROLE_ASSISTANT, "content": None, "tool_calls": []}
             current_assistant["tool_calls"].append(
                 {
                     "id": item.get("call_id"),
                     "type": BLOCK_FUNCTION,
-                    "function": {"name": name, "arguments": item.get("arguments")},
+                    "function": {"name": call_name, "arguments": item.get("arguments")},
                 }
             )
 
@@ -282,6 +313,24 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
             if mapped:
                 converted_tools.append(mapped)
         result["tools"] = converted_tools
+
+    # Responses ``tool_choice`` 的 namespace 型（``{"type":"namespace","name":"mcp__subagents__"}``）
+    # Chat Completions 无对应语义，若原样透传严格上游会 400。映射规则：
+    # * namespace 型 -> 强制该 namespace 下第一个摊平子工具（``{"type":"function",...}``）；
+    #   找不到对应工具时退化为 "auto"（不强制，避免无意义 400）。
+    # * function 型 -> 保留为 ``{"type":"function","function":{"name":...}}``（Responses 的
+    #   ``{"type":"function","function":{...}}`` 在 Chat 侧非标准，简化为 name-only）。
+    # * auto / none / required -> 原样透传（Chat Completions 原生支持）。
+    tc = body.get("tool_choice")
+    if isinstance(tc, dict):
+        tc_type = tc.get("type")
+        if tc_type == NAMESPACE_TOOL_TYPE:
+            flat = _first_flattened_tool_name(body.get("tools"), str(tc.get("name") or ""))
+            result["tool_choice"] = (
+                {"type": "function", "function": {"name": flat}} if flat else "auto"
+            )
+        elif tc_type == "function" and isinstance(tc.get("function"), dict):
+            result["tool_choice"] = {"type": "function", "function": {"name": str(tc["function"].get("name", ""))}}
 
     # Map Responses-only max_output_tokens -> Chat max_tokens.
     if "max_output_tokens" in result:

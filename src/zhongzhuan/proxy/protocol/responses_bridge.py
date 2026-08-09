@@ -37,6 +37,7 @@ from .responses_models import (
     ResponseStatus,
     make_function_call_item_id,
 )
+from .tool_accumulator import split_namespace_name
 from .sse_parser import SSEParser
 from .turn_accumulator import TurnAccumulator
 
@@ -406,15 +407,24 @@ class ResponsesTurnBridge:
 
         acc = self._acc.tools.get(call_id=new_call_id or "", source_index=tc_idx)
         if acc is None:
+            # Codex 26.x MCP 子代理（namespace 工具）：上游回包的 function 名是摊平名
+            # ``mcp__subagents__-spawn_agent``。拆回裸名 + namespace，下游 Codex 才能把
+            # 这次 function_call 路由回对应 MCP server（codex-relay #17 / Palantir 修法）。
+            ns, bare = (split_namespace_name(func_name) if func_name else ("", func_name))
             acc = self._acc.open_tool_call(
                 call_id=new_call_id or "",
                 source_index=tc_idx,
-                name=func_name,
+                name=bare or func_name,
             )
+            if ns:
+                acc.namespace = ns
             frames.extend(self._open_tool_call(acc))
         else:
             if func_name:
-                acc.replace_name(func_name)
+                ns, bare = split_namespace_name(func_name)
+                acc.replace_name(bare if ns else func_name)
+                if ns:
+                    acc.namespace = ns
             if new_call_id:
                 acc.bind_call_id(new_call_id)
 
@@ -439,6 +449,7 @@ class ResponsesTurnBridge:
 
     def _open_tool_call(self, acc) -> list[bytes]:
         item_id = self._tool_item_id(acc)
+        extra = {"namespace": acc.namespace} if acc.namespace else {}
         frames = self._emitter.open_item(
             OutputItem(
                 id=item_id,
@@ -446,6 +457,7 @@ class ResponsesTurnBridge:
                 item_type=ItemType.FUNCTION_CALL,
                 call_id=acc.call_id,
                 name=acc.name,
+                extra=extra,
             )
         )
         return frames
@@ -493,7 +505,7 @@ class ResponsesTurnBridge:
                         item_type=ItemType.FUNCTION_CALL,
                         call_id=acc.call_id,
                         name=acc.name,
-                        extra={"arguments": acc.arguments},
+                        extra={"arguments": acc.arguments, **({"namespace": acc.namespace} if acc.namespace else {})},
                     ),
                     status="completed",
                 )
@@ -511,7 +523,7 @@ class ResponsesTurnBridge:
                         item_type=ItemType.FUNCTION_CALL,
                         call_id=acc.call_id,
                         name=acc.name,
-                        extra={"arguments": acc.arguments},
+                        extra={"arguments": acc.arguments, **({"namespace": acc.namespace} if acc.namespace else {})},
                     ),
                     status="incomplete",
                 )

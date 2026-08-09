@@ -814,6 +814,7 @@ class ResponsePipeline:
                         "call_id": acc.call_id,
                         "name": acc.name,
                         "arguments": acc.arguments,
+                        **({"namespace": acc.namespace} if acc.namespace else {}),
                     },
                 )
             )
