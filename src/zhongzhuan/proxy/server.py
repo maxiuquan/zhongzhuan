@@ -446,13 +446,26 @@ class ProxyServer:
         if self.store is not None:
             try:
                 from ..store.models import list_models as _list_models_db
+                from ..store.groups import list_groups as _list_groups_db
 
-                rows = await _list_models_db(self.store)
                 slugs: list[str] = []
+                seen: set[str] = set()
+                rows = await _list_models_db(self.store)
                 for m in rows:
                     if not (m.enabled and not getattr(m, "is_fallback", False)):
                         continue
-                    slugs.append(m.name)
+                    if m.name not in seen:
+                        seen.add(m.name)
+                        slugs.append(m.name)
+                # Expose model *groups* too (e.g. "juhe/glm5.2") so Codex can
+                # pick an aggregated model.  Skip the internal WorkBuddy meta
+                # group "mf" — a 12-member catch-all that would otherwise show
+                # up as a bare, meaningless "mf" slug to Codex users.
+                for g in await _list_groups_db(self.store):
+                    gname = g.get("name", "")
+                    if gname and gname != "mf" and gname not in seen:
+                        seen.add(gname)
+                        slugs.append(gname)
                 if slugs:
                     return slugs
             except Exception:
