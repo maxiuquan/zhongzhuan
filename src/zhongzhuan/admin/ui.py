@@ -23,11 +23,11 @@ INDEX_HTML = """<!doctype html>
 <script src="/ui/static/echarts.min.js"></script>
 <style>
 :root{
-  --bg:#0d1117; --bg-card:#161b22; --bg-hover:#1c2128; --bg-input:#0d1117;
-  --border:#30363d; --border-muted:#21262d;
-  --text:#e6edf3; --text-muted:#7d8590; --text-subtle:#484f58;
-  --accent:#2f81f7; --accent-hover:#1f6feb;
-  --success:#3fb950; --warning:#d29922; --danger:#f85149; --orange:#f0883e;
+  --bg:#0f172a; --bg-card:#1e293b; --bg-hover:#334155; --bg-input:#0f172a;
+  --border:#334155; --border-muted:#1e293b;
+  --text:#e2e8f0; --text-muted:#94a3b8; --text-subtle:#64748b;
+  --accent:#6366f1; --accent-hover:#4f46e5;
+  --success:#10b981; --warning:#f59e0b; --danger:#ef4444; --orange:#fb923c;
   --sidebar-w:240px;
   --radius:6px; --radius-lg:10px;
   --shadow:0 1px 3px rgba(0,0,0,0.3);
@@ -53,7 +53,7 @@ body{
   position:fixed; top:0; left:0; bottom:0; display:flex; flex-direction:column; z-index:50;
 }
 .sidebar-brand{padding:18px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
-.sidebar-brand .icon{width:28px;height:28px;border-radius:6px;background:linear-gradient(135deg,var(--accent),#6f3ff5);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff}
+.sidebar-brand .icon{width:28px;height:28px;border-radius:6px;background:linear-gradient(135deg,var(--accent),#8b5cf6);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#fff}
 .sidebar-brand .name{font-size:16px;font-weight:700;color:var(--text)}
 .sidebar-brand .ver{font-size:11px;color:var(--text-muted);margin-left:auto}
 .sidebar-nav{flex:1;overflow-y:auto;padding:8px 0}
@@ -97,7 +97,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 .exp-row .name{font-weight:500}
 .exp-row .meta{margin-left:auto;font-size:11px;color:var(--text-subtle)}
 .exp-row .tag{font-size:10px;padding:1px 6px;border-radius:10px;margin-left:6px}
-.exp-row .tag.fb{background:rgba(255,165,0,0.15);color:#e09600}
+.exp-row .tag.fb{background:rgba(251,146,60,0.15);color:var(--orange)}
 .exp-row .tag.off{background:var(--bg-input);color:var(--text-subtle)}
 th{text-align:left;padding:10px 12px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:0.3px}
 td{padding:10px 12px;border-bottom:1px solid var(--border-muted)}
@@ -118,7 +118,7 @@ tr.group-header td{background:var(--bg-input);font-weight:600;color:var(--accent
 /* ---- 表单 ---- */
 label{font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;font-weight:500}
 input,select,textarea{background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:var(--radius);font-size:13px;width:100%;font-family:inherit;transition:border-color 0.15s}
-input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(47,129,247,0.15)}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(99,102,241,0.15)}
 textarea{min-height:100px;resize:vertical;font-family:ui-monospace,Consolas,monospace}
 .form-group{margin-bottom:12px}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -495,18 +495,18 @@ async function loadOverview() {
 }
 
 function renderCharts(u) {
-  const dark = {backgroundColor:"transparent", textStyle:{color:"#7d8590", fontFamily:"inherit"}, grid:{left:48, right:24, top:30, bottom:32}};
-  const axisLine = {lineStyle:{color:"#30363d"}};
-  const axisLabel = {color:"#7d8590", fontSize:11};
+  const dark = {backgroundColor:"transparent", textStyle:{color:"#94a3b8", fontFamily:"inherit"}, grid:{left:48, right:24, top:30, bottom:32}};
+  const axisLine = {lineStyle:{color:"#334155"}};
+  const axisLabel = {color:"#94a3b8", fontSize:11};
 
   // 1. 请求趋势折线
   let c1 = charts.trend || echarts.init(document.getElementById("chartTrend"));
   c1.setOption({
     ...dark,
-    tooltip:{trigger:"axis", backgroundColor:"#161b22", borderColor:"#30363d", textStyle:{color:"#e6edf3"}},
+    tooltip:{trigger:"axis", backgroundColor:"#1e293b", borderColor:"#334155", textStyle:{color:"#e2e8f0"}},
     xAxis:{type:"category", data:(u.daily||[]).map(d=>d.date), axisLine, axisLabel},
-    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#21262d"}}},
-    series:[{name:"请求数", type:"line", smooth:true, data:(u.daily||[]).map(d=>d.requests), itemStyle:{color:"#2f81f7"}, areaStyle:{color:"rgba(47,129,247,0.15)"}}],
+    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#1e293b"}}},
+    series:[{name:"请求数", type:"line", smooth:true, data:(u.daily||[]).map(d=>d.requests), itemStyle:{color:"#6366f1"}, areaStyle:{color:"rgba(99,102,241,0.15)"}}],
     legend:{show:false}
   });
   charts.trend = c1;
@@ -516,12 +516,12 @@ function renderCharts(u) {
   const pieData = (u.by_model||[]).slice(0, 8).map(m => ({name:m.model_name||"unknown", value:m.requests}));
   c2.setOption({
     ...dark,
-    tooltip:{trigger:"item", backgroundColor:"#161b22", borderColor:"#30363d", textStyle:{color:"#e6edf3"}},
-    legend:{type:"scroll", orient:"vertical", right:8, top:"center", textStyle:{color:"#7d8590", fontSize:11}},
+    tooltip:{trigger:"item", backgroundColor:"#1e293b", borderColor:"#334155", textStyle:{color:"#e2e8f0"}},
+    legend:{type:"scroll", orient:"vertical", right:8, top:"center", textStyle:{color:"#94a3b8", fontSize:11}},
     series:[{
       type:"pie", radius:["40%","70%"], center:["38%","50%"],
       data:pieData, label:{show:false},
-      color:["#2f81f7","#3fb950","#d29922","#f85149","#a371f7","#f0883e","#79c0ff","#56d4de"]
+      color:["#6366f1","#10b981","#f59e0b","#ef4444","#8b5cf6","#fb923c","#38bdf8","#22d3ee"]
     }]
   });
   charts.pie = c2;
@@ -530,13 +530,13 @@ function renderCharts(u) {
   let c3 = charts.tokens || echarts.init(document.getElementById("chartTokens"));
   c3.setOption({
     ...dark,
-    tooltip:{trigger:"axis", backgroundColor:"#161b22", borderColor:"#30363d", textStyle:{color:"#e6edf3"}},
-    legend:{data:["输入","输出"], textStyle:{color:"#7d8590", fontSize:11}, top:0},
+    tooltip:{trigger:"axis", backgroundColor:"#1e293b", borderColor:"#334155", textStyle:{color:"#e2e8f0"}},
+    legend:{data:["输入","输出"], textStyle:{color:"#94a3b8", fontSize:11}, top:0},
     xAxis:{type:"category", data:(u.daily||[]).map(d=>d.date), axisLine, axisLabel},
-    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#21262d"}}},
+    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#1e293b"}}},
     series:[
-      {name:"输入", type:"bar", stack:"tok", data:(u.daily||[]).map(d=>d.tokens_in), itemStyle:{color:"#2f81f7"}},
-      {name:"输出", type:"bar", stack:"tok", data:(u.daily||[]).map(d=>d.tokens_out), itemStyle:{color:"#3fb950"}}
+      {name:"输入", type:"bar", stack:"tok", data:(u.daily||[]).map(d=>d.tokens_in), itemStyle:{color:"#6366f1"}},
+      {name:"输出", type:"bar", stack:"tok", data:(u.daily||[]).map(d=>d.tokens_out), itemStyle:{color:"#10b981"}}
     ]
   });
   charts.tokens = c3;
@@ -545,10 +545,10 @@ function renderCharts(u) {
   let c4 = charts.cost || echarts.init(document.getElementById("chartCost"));
   c4.setOption({
     ...dark,
-    tooltip:{trigger:"axis", backgroundColor:"#161b22", borderColor:"#30363d", textStyle:{color:"#e6edf3"}, valueFormatter:v=>"¥"+Number(v).toFixed(4)},
+    tooltip:{trigger:"axis", backgroundColor:"#1e293b", borderColor:"#334155", textStyle:{color:"#e2e8f0"}, valueFormatter:v=>"¥"+Number(v).toFixed(4)},
     xAxis:{type:"category", data:(u.daily||[]).map(d=>d.date), axisLine, axisLabel},
-    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#21262d"}}},
-    series:[{name:"成本", type:"line", smooth:true, data:(u.daily||[]).map(d=>d.cost), itemStyle:{color:"#d29922"}, areaStyle:{color:"rgba(210,153,34,0.2)"}}],
+    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#1e293b"}}},
+    series:[{name:"成本", type:"line", smooth:true, data:(u.daily||[]).map(d=>d.cost), itemStyle:{color:"#f59e0b"}, areaStyle:{color:"rgba(210,153,34,0.2)"}}],
     legend:{show:false}
   });
   charts.cost = c4;
@@ -1148,7 +1148,7 @@ function copyText(text) {
 function showTokenModal() {
   document.getElementById("modalContent").innerHTML = `
     <h3 style="display:flex;align-items:center;gap:8px">创建访问令牌
-      <span class="tag" style="background:rgba(47,129,247,0.15);color:var(--accent)">下游 API Key</span>
+      <span class="tag" style="background:rgba(99,102,241,0.15);color:var(--accent)">下游 API Key</span>
     </h3>
     <div class="form-group"><label>标签</label>
       <input id="f_tlabel" placeholder="例如：Trae 专用" autocomplete="off">
