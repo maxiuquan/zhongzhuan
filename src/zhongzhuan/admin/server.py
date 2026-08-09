@@ -15,6 +15,7 @@ from .api_export_import import register_routes as register_export
 from .api_auth import register_routes as register_auth
 from .api_tokens import register_routes as register_tokens
 from .api_fallback import register_routes as register_fallback
+from .api_exposure import register_routes as register_exposure
 from .auth import make_auth_middleware, init_jwt_secret
 from .notify import configure_reload_target
 from .ui import mount_ui
@@ -73,6 +74,7 @@ class AdminServer:
         register_export(app, self)
         register_tokens(app, self)
         register_fallback(app, self)
+        register_exposure(app, self)
 
         # UI
         mount_ui(app, self)

@@ -452,7 +452,9 @@ class ProxyServer:
                 seen: set[str] = set()
                 rows = await _list_models_db(self.store)
                 for m in rows:
-                    if not (m.enabled and not getattr(m, "is_fallback", False)):
+                    # 暴露给 Codex 需同时满足：启用、非兜底、且 exposed 开关打开。
+                    if not (m.enabled and not getattr(m, "is_fallback", False)
+                            and getattr(m, "exposed", True)):
                         continue
                     if m.name not in seen:
                         seen.add(m.name)
@@ -460,10 +462,13 @@ class ProxyServer:
                 # Expose model *groups* too (e.g. "juhe/glm5.2") so Codex can
                 # pick an aggregated model.  Skip the internal WorkBuddy meta
                 # group "mf" — a 12-member catch-all that would otherwise show
-                # up as a bare, meaningless "mf" slug to Codex users.
+                # up as a bare, meaningless "mf" slug to Codex users.  Also
+                # honour each group's own exposed switch.
                 for g in await _list_groups_db(self.store):
                     gname = g.get("name", "")
-                    if gname and gname != "mf" and gname not in seen:
+                    if (gname and gname != "mf"
+                            and g.get("exposed", True)
+                            and gname not in seen):
                         seen.add(gname)
                         slugs.append(gname)
                 if slugs:

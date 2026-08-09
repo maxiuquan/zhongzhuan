@@ -28,6 +28,7 @@ def register_routes(app: web.Application, ctx) -> None:
             name=data["name"],
             strategy=data["strategy"],
             fallback_enabled=bool(data.get("fallback_enabled", True)),
+            exposed=bool(data.get("exposed", True)),
         )
         g = await create_group(ctx.store, g)
         members = data.get("members", [])
@@ -55,6 +56,7 @@ def register_routes(app: web.Application, ctx) -> None:
             name=data["name"],
             strategy=data["strategy"],
             fallback_enabled=bool(data.get("fallback_enabled", True)),
+            exposed=bool(data.get("exposed", True)),
         )
         await update_group(ctx.store, group_id, g)
         # Only touch members when the field is explicitly provided (list, possibly empty).

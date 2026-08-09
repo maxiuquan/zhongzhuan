@@ -89,6 +89,16 @@ body{
 .card-header h2{font-size:14px;color:var(--text);font-weight:600}
 .card-header .actions{display:flex;gap:8px}
 table{width:100%;border-collapse:collapse;font-size:13px}
+.exposure-list{max-height:520px;overflow-y:auto;border:1px solid var(--border);border-radius:8px}
+.exp-row{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-muted)}
+.exp-row:last-child{border-bottom:none}
+.exp-row:hover{background:var(--bg-hover)}
+.exp-row input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.exp-row .name{font-weight:500}
+.exp-row .meta{margin-left:auto;font-size:11px;color:var(--text-subtle)}
+.exp-row .tag{font-size:10px;padding:1px 6px;border-radius:10px;margin-left:6px}
+.exp-row .tag.fb{background:rgba(255,165,0,0.15);color:#e09600}
+.exp-row .tag.off{background:var(--bg-input);color:var(--text-subtle)}
 th{text-align:left;padding:10px 12px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:0.3px}
 td{padding:10px 12px;border-bottom:1px solid var(--border-muted)}
 tr:hover td{background:var(--bg-hover)}
@@ -196,6 +206,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
       <div class="nav-item" data-tab="models" onclick="showTab('models')"><span class="icon">&#9650;</span>模型管理</div>
       <div class="nav-item" data-tab="keys" onclick="showTab('keys')"><span class="icon">&#9755;</span>Key 池</div>
       <div class="nav-item" data-tab="groups" onclick="showTab('groups')"><span class="icon">&#9638;</span>分组策略</div>
+      <div class="nav-item" data-tab="exposure" onclick="showTab('exposure')"><span class="icon">&#9783;</span>暴露管理</div>
       <div class="nav-section">访问控制</div>
       <div class="nav-item" data-tab="tokens" onclick="showTab('tokens')" id="navTokens" style="display:none"><span class="icon">&#9673;</span>访问令牌</div>
       <div class="nav-section">运维</div>
@@ -311,6 +322,35 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
           <div id="logsTable"></div>
         </div>
       </div>
+
+      <!-- 暴露管理 -->
+      <div class="tab" id="tab-exposure">
+        <div class="card">
+          <div class="card-header">
+            <h2>暴露管理（Codex 模型发现）</h2>
+            <div class="actions">
+              <button class="btn small" onclick="exposureSelectAll(true)">全选</button>
+              <button class="btn small" onclick="exposureSelectAll(false)">全不选</button>
+              <button class="btn small" onclick="loadExposure()">刷新</button>
+              <button class="btn primary" onclick="saveExposure()">保存暴露设置</button>
+            </div>
+          </div>
+          <p style="color:var(--text-muted);font-size:12px;margin:4px 0 14px">
+            勾选的模型 / 分组会出现在 Codex 的模型下拉（<code>/v1/models</code> 与 <code>/v1/api/codex/models</code>）。取消勾选则立即从 Codex 发现列表隐藏（保存后实时生效，无需重启）。内部聚合分组 <code>mf</code> 始终不暴露。
+          </p>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+            <div>
+              <h3 style="margin:0 0 8px">模型</h3>
+              <input id="exposureModelSearch" class="form-control" placeholder="过滤模型名…" oninput="renderExposure()" style="margin-bottom:8px;width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+              <div id="exposureModelList" class="exposure-list"></div>
+            </div>
+            <div>
+              <h3 style="margin:0 0 8px">分组</h3>
+              <div id="exposureGroupList" class="exposure-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -420,7 +460,7 @@ function doLogout() {
 }
 
 // ---- Tab 切换 ----
-const titles = {dashboard:"仪表盘", models:"模型管理", keys:"Key 池", groups:"分组策略", tokens:"访问令牌", logs:"请求日志"};
+const titles = {dashboard:"仪表盘", models:"模型管理", keys:"Key 池", groups:"分组策略", exposure:"暴露管理", tokens:"访问令牌", logs:"请求日志"};
 function showTab(name) {
   document.querySelectorAll(".tab").forEach(t => { t.style.display = "none"; t.classList.remove("active"); });
   document.querySelectorAll(".nav-item").forEach(a => a.classList.remove("active"));
@@ -433,6 +473,7 @@ function showTab(name) {
   if (name === "models") { loadModels(); loadFallbackStatus(); }
   if (name === "keys") { loadModels(); loadKeys(); }
   if (name === "groups") loadGroups();
+  if (name === "exposure") loadExposure();
   if (name === "tokens") loadTokens();
   if (name === "logs") loadLogs();
 }
@@ -1310,6 +1351,72 @@ function importConfig() {
     } catch(e) { console.error("导入失败", e); alert("导入失败: " + e.message); }
   };
   input.click();
+}
+
+// ---- 暴露管理（Codex 模型发现）----
+let exposureModels = [], exposureGroups = [];
+
+async function loadExposure() {
+  const d = await api("/api/exposure");
+  if (!d) return;
+  exposureModels = d.models || [];
+  exposureGroups = d.groups || [];
+  renderExposure();
+}
+
+function renderExposure() {
+  const q = (document.getElementById("exposureModelSearch").value || "").trim().toLowerCase();
+  const ml = document.getElementById("exposureModelList");
+  ml.innerHTML = "";
+  for (const m of exposureModels) {
+    if (q && !m.name.toLowerCase().includes(q)) continue;
+    const row = document.createElement("label");
+    row.className = "exp-row";
+    let tags = "";
+    if (m.is_fallback) tags += '<span class="tag fb">兜底</span>';
+    if (!m.enabled) tags += '<span class="tag off">未启用</span>';
+    row.innerHTML =
+      '<input type="checkbox" data-type="model" data-id="' + m.id + '"' + (m.exposed ? " checked" : "") + ">" +
+      '<span class="name">' + esc(m.name) + "</span>" +
+      '<span class="meta">' + tags + "</span>";
+    ml.appendChild(row);
+  }
+  if (!ml.children.length) ml.innerHTML = '<div class="exp-row" style="color:var(--text-subtle)">无匹配模型</div>';
+
+  const gl = document.getElementById("exposureGroupList");
+  gl.innerHTML = "";
+  for (const g of exposureGroups) {
+    const row = document.createElement("label");
+    row.className = "exp-row";
+    row.innerHTML =
+      '<input type="checkbox" data-type="group" data-id="' + g.id + '"' + (g.exposed ? " checked" : "") + ">" +
+      '<span class="name">' + esc(g.name) + "</span>" +
+      '<span class="meta">' + g.members + " 个成员</span>";
+    gl.appendChild(row);
+  }
+  if (!gl.children.length) gl.innerHTML = '<div class="exp-row" style="color:var(--text-subtle)">无分组</div>';
+}
+
+function exposureSelectAll(state) {
+  document.querySelectorAll('#exposureModelList input[type="checkbox"], #exposureGroupList input[type="checkbox"]')
+    .forEach(c => { c.checked = state; });
+}
+
+async function saveExposure() {
+  const models = {}, groups = {};
+  document.querySelectorAll('#exposureModelList input[type="checkbox"]').forEach(c => {
+    models[c.getAttribute("data-id")] = c.checked;
+  });
+  document.querySelectorAll('#exposureGroupList input[type="checkbox"]').forEach(c => {
+    groups[c.getAttribute("data-id")] = c.checked;
+  });
+  const r = await api("/api/exposure", {method:"POST", body: JSON.stringify({models, groups})});
+  if (r && r.ok) {
+    alert("已保存：" + (r.saved?.models || 0) + " 个模型、" + (r.saved?.groups || 0) + " 个分组的暴露设置");
+    loadExposure();
+  } else {
+    alert("保存失败");
+  }
 }
 
 // ---- 启动 ----

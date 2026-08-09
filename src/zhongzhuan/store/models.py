@@ -37,6 +37,9 @@ class Model:
     # 格式: [{"name":"X-Foo","value":"bar"},{"name":"X-Request-ID","value":"{{uuid}}"}]
     # （v009 新增列）。选预设时此字段不使用但保留值, 方便来回切换不丢失。
     custom_headers: str = ""
+    # 是否暴露给 Codex 模型发现（/v1/models 的 Codex 分支 与
+    # /v1/api/codex/models）。1=暴露, 0=隐藏（v011 新增列, 默认暴露）。
+    exposed: bool = True
     id: int | None = None
     created_at: int | None = None
     updated_at: int | None = None
@@ -56,12 +59,12 @@ class Model:
 # 列顺序：id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,
 #         protocol,anthropic_version,max_tokens_default,upstream_path_override,
 #         is_fallback,aliases,capabilities,upstream_mode,client_preset,custom_headers,
-#         created_at,updated_at
+#         exposed,created_at,updated_at
 _COLS = (
     "id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,"
     "protocol,anthropic_version,max_tokens_default,upstream_path_override,"
     "is_fallback,aliases,capabilities,upstream_mode,client_preset,custom_headers,"
-    "created_at,updated_at"
+    "exposed,created_at,updated_at"
 )
 
 
@@ -85,16 +88,17 @@ def _row(r: tuple) -> Model:
         upstream_mode=r[15] if len(r) > 15 and r[15] else "bonded",
         client_preset=r[16] if len(r) > 16 and r[16] else "",
         custom_headers=r[17] if len(r) > 17 and r[17] else "",
-        created_at=r[18] if len(r) > 18 else None,
-        updated_at=r[19] if len(r) > 19 else None,
+        exposed=bool(r[18]) if len(r) > 18 else True,
+        created_at=r[19] if len(r) > 19 else None,
+        updated_at=r[20] if len(r) > 20 else None,
     )
 
 
 async def create_model(s: Store, m: Model) -> Model:
     now = Store.now()
     m.id = await s.execute(
-        """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, capabilities, upstream_mode, client_preset, custom_headers, created_at, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, capabilities, upstream_mode, client_preset, custom_headers, exposed, created_at, updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             m.name,
             m.upstream_base,
@@ -113,6 +117,7 @@ async def create_model(s: Store, m: Model) -> Model:
             getattr(m, "upstream_mode", "bonded"),
             getattr(m, "client_preset", ""),
             getattr(m, "custom_headers", ""),
+            int(m.exposed),
             now,
             now,
         ),
@@ -146,7 +151,7 @@ async def list_models(s: Store) -> list[Model]:
 async def update_model(s: Store, model_id: int, m: Model) -> None:
     now = Store.now()
     await s.execute(
-        """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, protocol=?, anthropic_version=?, max_tokens_default=?, upstream_path_override=?, is_fallback=?, aliases=?, capabilities=?, upstream_mode=?, client_preset=?, custom_headers=?, updated_at=? WHERE id=?""",
+        """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, protocol=?, anthropic_version=?, max_tokens_default=?, upstream_path_override=?, is_fallback=?, aliases=?, capabilities=?, upstream_mode=?, client_preset=?, custom_headers=?, exposed=?, updated_at=? WHERE id=?""",
         (
             m.name,
             m.upstream_base,
@@ -165,6 +170,7 @@ async def update_model(s: Store, model_id: int, m: Model) -> None:
             getattr(m, "upstream_mode", "bonded"),
             getattr(m, "client_preset", ""),
             getattr(m, "custom_headers", ""),
+            int(m.exposed),
             now,
             model_id,
         ),

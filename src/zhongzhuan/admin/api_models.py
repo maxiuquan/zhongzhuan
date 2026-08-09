@@ -86,6 +86,7 @@ def _payload_to_model(data: dict) -> Model:
         upstream_mode=data.get("upstream_mode", "bonded"),
         client_preset=data.get("client_preset", ""),
         custom_headers=data.get("custom_headers", ""),
+        exposed=bool(data.get("exposed", True)),
     )
 
 
@@ -144,6 +145,7 @@ def _to_dict(m: Model) -> dict:
         "upstream_mode": m.upstream_mode,
         "client_preset": m.client_preset,
         "custom_headers": m.custom_headers,
+        "exposed": m.exposed,
         "created_at": m.created_at,
         "updated_at": m.updated_at,
     }
