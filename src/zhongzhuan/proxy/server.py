@@ -436,10 +436,12 @@ class ProxyServer:
         reality); falls back to a static official-model list only when the
         store is unreachable.
 
-        Codex cannot parse slugs containing "/", so we prefer a model's alias
-        (if it has one). A model with no alias whose name contains "/" is
-        unusable in Codex, so it is omitted from the catalog until an alias is
-        configured.
+        We expose each model's *normal* name verbatim — no alias rewriting,
+        and no skipping of slugs that contain "/".  Codex routes the request
+        back by exact name match (handler.py matches both name and aliases),
+        so the canonical name is always the safest slug to advertise.  The
+        "-"-style aliases were only ever a workaround for older Codex builds
+        that choked on "/"; 26.x displays the raw names fine.
         """
         if self.store is not None:
             try:
@@ -450,15 +452,7 @@ class ProxyServer:
                 for m in rows:
                     if not (m.enabled and not getattr(m, "is_fallback", False)):
                         continue
-                    alias = (getattr(m, "aliases", "") or "").strip()
-                    if alias:
-                        slug = alias.split(",")[0].strip()
-                    elif "/" in m.name:
-                        # Codex rejects slugs with "/"; skip until aliased.
-                        continue
-                    else:
-                        slug = m.name
-                    slugs.append(slug)
+                    slugs.append(m.name)
                 if slugs:
                     return slugs
             except Exception:
