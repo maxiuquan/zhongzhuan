@@ -217,6 +217,27 @@ def _reasoning_map_for(key) -> dict | None:
     return m if m else None
 
 
+def _prepare_reasoning_for_body(body_obj: dict, key) -> tuple[dict, dict | None]:
+    """Apply A/D blocklist + M013 per-model reasoning translation.
+
+    Returns ``(modified_body_obj, pending_fragment)``.  The caller must apply
+    ``pending_fragment`` to the *final* upstream request dict after any protocol
+    translation.  A ``None`` fragment means "strip reasoning for this level".
+    """
+    # A/D: upstreams known to reject reasoning_effort
+    if _reasoning_effort_blocked_for(key):
+        _strip_reasoning_effort(body_obj)
+    # M013: per-model, per-channel canonical-level -> native-fragment map
+    pending_frag: dict | None = None
+    re_map = _reasoning_map_for(key)
+    if re_map is not None:
+        norm = _extract_reasoning_norm(body_obj)
+        if norm is not None:
+            _strip_all_reasoning(body_obj)
+            pending_frag = re_map.get(norm)
+    return body_obj, pending_frag
+
+
 def _response_is_empty(inbound_protocol: str, parsed: Any) -> bool:
     """判断一个已解析的 200 响应是否为「空响应」（无任何内容）。
 
@@ -1740,24 +1761,11 @@ class ProxyHandler:
             carries the status + JSON body to return to the client.
         """
         key = decision.key
-        # Reasoning-effort compatibility (A flag + D learned cache): strip
-        # reasoning_effort / reasoning.effort before building the upstream body
-        # when this upstream is known to reject it.
-        if _reasoning_effort_blocked_for(key):
-            if _strip_reasoning_effort(body_obj):
-                final_body = json.dumps(body_obj, ensure_ascii=False).encode()
-        # Per-model reasoning translation (M013): if this model carries a
-        # reasoning_effort_map, normalise the inbound effort to a canonical
-        # level and re-emit it via the upstream-native fragment recorded in the
-        # map.  A ``None`` fragment means "strip for this level".  When the map
-        # is absent we fall through to the legacy A/D behaviour.
-        _pending_frag: dict | None = None
-        _re_map = _reasoning_map_for(key)
-        if _re_map is not None:
-            _norm = _extract_reasoning_norm(body_obj)
-            if _norm is not None:
-                _strip_all_reasoning(body_obj)
-                _pending_frag = _re_map.get(_norm)
+        # A/D blocklist + per-model reasoning translation (M013).
+        body_obj, _pending_frag = _prepare_reasoning_for_body(body_obj, key)
+        # Re-encode so the native passthrough path below never forwards stale
+        # reasoning fields after stripping.
+        final_body = json.dumps(body_obj, ensure_ascii=False).encode()
         # The capability router already picked a candidate; honour its
         # NATIVE/TRANSLATE path decision instead of re-deriving from the body.
         upstream_path = getattr(decision, "upstream_path", "") or ""
@@ -2771,9 +2779,17 @@ class ProxyHandler:
                 outbound_protocol = k.upstream_protocol
                 need_translation = inbound_protocol != outbound_protocol
 
+                # Parse body once; apply A/D + M013 reasoning translation before
+                # any protocol-specific conversion so both translated and
+                # passthrough paths respect the per-model reasoning map.
+                try:
+                    body_obj_t = ctx.body or {}
+                except (json.JSONDecodeError, ValueError):
+                    body_obj_t = {}
+                body_obj_t, _pending_frag = _prepare_reasoning_for_body(body_obj_t, k)
+
                 # Prepare body, path, and headers
                 upstream_path = path
-                final_body = ctx.raw_body
                 headers = dict(base_headers)
                 # Non-streaming: allow upstream compression for faster response transfer.
                 # httpx handles transparent decompression.
@@ -2781,12 +2797,6 @@ class ProxyHandler:
                 # avoid compressing SSE chunk boundaries.
 
                 if need_translation:
-                    # Translate request body
-                    try:
-                        body_obj_t = ctx.body or {}
-                    except (json.JSONDecodeError, ValueError):
-                        body_obj_t = {}
-
                     if inbound_protocol == "anthropic" and outbound_protocol == "openai":
                         translated_req = translate_request_a2o(body_obj_t, k.max_tokens_default)
                         upstream_path = "/v1/chat/completions"
@@ -2812,6 +2822,8 @@ class ProxyHandler:
 
                     if k.upstream_model:
                         translated_req["model"] = k.upstream_model
+                    if _pending_frag:
+                        translated_req.update(_pending_frag)
 
                     final_body = json.dumps(translated_req, ensure_ascii=False).encode()
 
@@ -2826,11 +2838,11 @@ class ProxyHandler:
 
                     headers["Content-Length"] = str(len(final_body))
                 else:
+                    final_body = json.dumps(body_obj_t, ensure_ascii=False).encode()
                     if requested_model and k.upstream_model and requested_model != k.upstream_model:
-                        final_body = _swap_model_name(ctx.raw_body, requested_model, k.upstream_model)
+                        final_body = _swap_model_name(final_body, requested_model, k.upstream_model)
                     headers["Authorization"] = f"Bearer {k.api_key}"
-                    if final_body is not ctx.raw_body:
-                        headers["Content-Length"] = str(len(final_body))
+                    headers["Content-Length"] = str(len(final_body))
 
                 # 客户端指纹模拟（v009）：Authorization 注入后、path 处理前注入
                 self._apply_client_fingerprint(headers, k)
@@ -3162,18 +3174,16 @@ class ProxyHandler:
                     outbound_protocol = protocol_override or k.upstream_protocol
                     need_translation = inbound_protocol != outbound_protocol
 
+                    # Apply A/D + M013 reasoning translation once per retry so
+                    # each candidate key's per-model map is respected.
+                    body_obj_s, _pending_frag = _prepare_reasoning_for_body(body_obj, k)
+
                     # Prepare body, path, headers
                     upstream_path = path
-                    final_body = body
                     headers = dict(base_headers)
                     headers["Accept-Encoding"] = "identity"
 
                     if need_translation:
-                        # ``body_obj`` comes from RequestContext and is the
-                        # authoritative parse result, including a valid empty
-                        # object. Never parse the raw bytes again on retries.
-                        body_obj_s = body_obj
-
                         if inbound_protocol == "anthropic" and outbound_protocol == "openai":
                             translated_req = translate_request_a2o(body_obj_s, k.max_tokens_default)
                             upstream_path = "/v1/chat/completions"
@@ -3197,6 +3207,8 @@ class ProxyHandler:
 
                         if k.upstream_model:
                             translated_req["model"] = k.upstream_model
+                        if _pending_frag:
+                            translated_req.update(_pending_frag)
 
                         final_body = json.dumps(translated_req, ensure_ascii=False).encode()
 
@@ -3211,11 +3223,11 @@ class ProxyHandler:
 
                         headers["Content-Length"] = str(len(final_body))
                     else:
+                        final_body = json.dumps(body_obj_s, ensure_ascii=False).encode()
                         if requested_model and k.upstream_model and requested_model != k.upstream_model:
-                            final_body = _swap_model_name(body, requested_model, k.upstream_model)
+                            final_body = _swap_model_name(final_body, requested_model, k.upstream_model)
                         headers["Authorization"] = f"Bearer {k.api_key}"
-                        if final_body is not body:
-                            headers["Content-Length"] = str(len(final_body))
+                        headers["Content-Length"] = str(len(final_body))
 
                     # 客户端指纹模拟（v009）：Authorization 注入后、path 处理前注入
                     self._apply_client_fingerprint(headers, k)
