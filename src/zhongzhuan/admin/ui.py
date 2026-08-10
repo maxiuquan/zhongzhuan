@@ -916,10 +916,11 @@ async function testKey(id) {
   testResults[id] = {ok: r.ok, latency: r.latency_ms, error: r.error};
   loadKeys();
   // 显示详情
+  let rline = r.reasoning_summary ? ("\\n思考等级: " + r.reasoning_summary) : "";
   if (r.ok) {
-    alert("连通性测试通过\\n\\n模型: " + r.model + "\\n延迟: " + r.latency_ms + "ms\\nURL: " + r.url);
+    alert("连通性测试通过\\n\\n模型: " + r.model + "\\n延迟: " + r.latency_ms + "ms\\nURL: " + r.url + rline);
   } else {
-    alert("连通性测试失败\\n\\n状态码: " + r.status + "\\n错误: " + r.error + "\\nURL: " + r.url);
+    alert("连通性测试失败\\n\\n状态码: " + r.status + "\\n错误: " + r.error + "\\nURL: " + r.url + rline);
   }
 }
 

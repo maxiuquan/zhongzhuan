@@ -44,6 +44,10 @@ class Model:
     # False 时代理构建上游请求体前剥除 reasoning_effort / reasoning.effort，
     # 避免不支持该参数的上游回 400。
     supports_reasoning_effort: bool = True
+    # 思考等级映射(JSON 字符串, 由「测试连通性」探针自动写入, v013):
+    # 标准等级 none|low|medium|high|ultra → 该上游原生推理参数片段(任意 JSON),
+    # 或 null(该档剥除)。空字符串 = 未探测, 退回 v012 的 A 开关 + D 自愈。
+    reasoning_effort_map: str = ""
     id: int | None = None
     created_at: int | None = None
     updated_at: int | None = None
@@ -63,13 +67,13 @@ class Model:
 # 列顺序：id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,
 #         protocol,anthropic_version,max_tokens_default,upstream_path_override,
 #         is_fallback,aliases,capabilities,upstream_mode,client_preset,custom_headers,
-#         exposed,created_at,updated_at,supports_reasoning_effort
-# （supports_reasoning_effort 必须置于末尾，与 M012 ALTER 追加的物理列顺序及 _row 索引一致）
+#         exposed,created_at,updated_at,supports_reasoning_effort,reasoning_effort_map
+# （列必须置于末尾，与 M012/M013 ALTER 追加的物理列顺序及 _row 索引一致）
 _COLS = (
     "id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,"
     "protocol,anthropic_version,max_tokens_default,upstream_path_override,"
     "is_fallback,aliases,capabilities,upstream_mode,client_preset,custom_headers,"
-    "exposed,created_at,updated_at,supports_reasoning_effort"
+    "exposed,created_at,updated_at,supports_reasoning_effort,reasoning_effort_map"
 )
 
 
@@ -95,6 +99,7 @@ def _row(r: tuple) -> Model:
         custom_headers=r[17] if len(r) > 17 and r[17] else "",
         exposed=bool(r[18]) if len(r) > 18 else True,
         supports_reasoning_effort=bool(r[21]) if len(r) > 21 else True,
+        reasoning_effort_map=r[22] if len(r) > 22 else "",
         created_at=r[19] if len(r) > 19 else None,
         updated_at=r[20] if len(r) > 20 else None,
     )
@@ -103,8 +108,8 @@ def _row(r: tuple) -> Model:
 async def create_model(s: Store, m: Model) -> Model:
     now = Store.now()
     m.id = await s.execute(
-        """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, capabilities, upstream_mode, client_preset, custom_headers, exposed, supports_reasoning_effort, created_at, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, capabilities, upstream_mode, client_preset, custom_headers, exposed, supports_reasoning_effort, created_at, updated_at, reasoning_effort_map)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             m.name,
             m.upstream_base,
@@ -127,6 +132,7 @@ async def create_model(s: Store, m: Model) -> Model:
             int(m.supports_reasoning_effort),
             now,
             now,
+            m.reasoning_effort_map or "",
         ),
     )
     m.created_at = now
@@ -158,7 +164,7 @@ async def list_models(s: Store) -> list[Model]:
 async def update_model(s: Store, model_id: int, m: Model) -> None:
     now = Store.now()
     await s.execute(
-        """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, protocol=?, anthropic_version=?, max_tokens_default=?, upstream_path_override=?, is_fallback=?, aliases=?, capabilities=?, upstream_mode=?, client_preset=?, custom_headers=?, exposed=?, supports_reasoning_effort=?, updated_at=? WHERE id=?""",
+        """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, protocol=?, anthropic_version=?, max_tokens_default=?, upstream_path_override=?, is_fallback=?, aliases=?, capabilities=?, upstream_mode=?, client_preset=?, custom_headers=?, exposed=?, supports_reasoning_effort=?, reasoning_effort_map=?, updated_at=? WHERE id=?""",
         (
             m.name,
             m.upstream_base,
@@ -179,6 +185,7 @@ async def update_model(s: Store, model_id: int, m: Model) -> None:
             getattr(m, "custom_headers", ""),
             int(m.exposed),
             int(m.supports_reasoning_effort),
+            m.reasoning_effort_map or "",
             now,
             model_id,
         ),

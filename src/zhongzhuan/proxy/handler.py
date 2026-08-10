@@ -91,6 +91,12 @@ def _looks_like_chat_error(data: bytes, headers: dict | None = None) -> bool:
 #: (upstream_base, upstream_model) tuples known to reject ``reasoning_effort``.
 _RE_BLOCKED: set[tuple[str, str]] = set()
 _RE_BLOCKED_LOCK = threading.Lock()
+#: Per-(upstream_base, upstream_model) reasoning_effort_map, rebuilt from the
+#: ``models.reasoning_effort_map`` column on every reload.  Maps a canonical
+#: level (none|low|medium|high|ultra) to the upstream-native JSON fragment to
+#: inject, or ``None`` to strip the param for that level.
+_REASONING_MAP: dict[tuple[str, str], dict] = {}
+_REASONING_MAP_LOCK = threading.Lock()
 
 
 # Phrases that mean the *parameter itself* is refused (not merely a bad value).
@@ -151,6 +157,64 @@ def _strip_reasoning_effort(body_obj: dict) -> bool:
         reasoning.pop("effort", None)
         removed = True
     return removed
+
+
+# Canonical reasoning levels exposed to downstream clients (M013).
+_RE_LEVELS = ("none", "low", "medium", "high", "ultra")
+_RE_NORM_ALIASES = {
+    "none": "none", "off": "none", "minimal": "none",
+    "low": "low", "medium": "medium", "high": "high",
+    "ultra": "ultra", "xhigh": "ultra",
+}
+
+
+def _extract_reasoning_norm(body_obj: dict) -> str | None:
+    """Return the canonical reasoning level requested by the client, or None.
+
+    Accepts both the OpenAI/chat spelling (``reasoning_effort``) and the
+    Responses spelling (``reasoning.effort``), plus the ``xhigh`` alias.
+    """
+    raw = None
+    re_val = body_obj.get("reasoning_effort")
+    if isinstance(re_val, str) and re_val:
+        raw = re_val
+    elif isinstance(body_obj.get("reasoning"), dict):
+        raw = body_obj["reasoning"].get("effort")
+    if raw is None:
+        return None
+    return _RE_NORM_ALIASES.get(str(raw).strip().lower())
+
+
+def _strip_all_reasoning(body_obj: dict) -> None:
+    """Remove every inbound reasoning field so the per-model map can re-inject
+    the upstream-native representation cleanly (no stale/duplicate fields)."""
+    body_obj.pop("reasoning_effort", None)
+    body_obj.pop("reasoning", None)
+
+
+def _parse_reasoning_map(raw) -> dict | None:
+    """Parse the ``models.reasoning_effort_map`` column into
+    ``{level: fragment_or_None}`` or None if absent/empty/invalid."""
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        try:
+            data = json.loads(s)
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def _reasoning_map_for(key) -> dict | None:
+    """Fetch the per-model reasoning map for ``key``'s upstream, or None."""
+    m = _REASONING_MAP.get((key.upstream_base, key.upstream_model))
+    return m if m else None
 
 
 def _response_is_empty(inbound_protocol: str, parsed: Any) -> bool:
@@ -1682,6 +1746,18 @@ class ProxyHandler:
         if _reasoning_effort_blocked_for(key):
             if _strip_reasoning_effort(body_obj):
                 final_body = json.dumps(body_obj, ensure_ascii=False).encode()
+        # Per-model reasoning translation (M013): if this model carries a
+        # reasoning_effort_map, normalise the inbound effort to a canonical
+        # level and re-emit it via the upstream-native fragment recorded in the
+        # map.  A ``None`` fragment means "strip for this level".  When the map
+        # is absent we fall through to the legacy A/D behaviour.
+        _pending_frag: dict | None = None
+        _re_map = _reasoning_map_for(key)
+        if _re_map is not None:
+            _norm = _extract_reasoning_norm(body_obj)
+            if _norm is not None:
+                _strip_all_reasoning(body_obj)
+                _pending_frag = _re_map.get(_norm)
         # The capability router already picked a candidate; honour its
         # NATIVE/TRANSLATE path decision instead of re-deriving from the body.
         upstream_path = getattr(decision, "upstream_path", "") or ""
@@ -1745,6 +1821,8 @@ class ProxyHandler:
                     translated_req.pop("stream", None)
                 if key.upstream_model:
                     translated_req["model"] = key.upstream_model
+                if _pending_frag:
+                    translated_req.update(_pending_frag)
             final_body = json.dumps(translated_req, ensure_ascii=False).encode()
             if outbound_protocol == "anthropic":
                 headers["x-api-key"] = key.api_key
@@ -1767,6 +1845,9 @@ class ProxyHandler:
                 native_body["stream"] = stream
                 mutated = True
             if mutated:
+                final_body = json.dumps(native_body, ensure_ascii=False).encode()
+            if _pending_frag and isinstance(native_body, dict):
+                native_body.update(_pending_frag)
                 final_body = json.dumps(native_body, ensure_ascii=False).encode()
             headers["Authorization"] = f"Bearer {key.api_key}"
             headers.pop("x-api-key", None)
@@ -2276,14 +2357,20 @@ class ProxyHandler:
             from ..store.models import list_models as _list_models_db
 
             ms = await _list_models_db(self.store)
-            blocked = {
-                (m.upstream_base, m.upstream_model)
-                for m in ms
-                if not getattr(m, "supports_reasoning_effort", True)
-            }
+            blocked = set()
+            new_map: dict[tuple[str, str], dict] = {}
+            for m in ms:
+                if not getattr(m, "supports_reasoning_effort", True):
+                    blocked.add((m.upstream_base, m.upstream_model))
+                rm = _parse_reasoning_map(getattr(m, "reasoning_effort_map", None))
+                if rm:
+                    new_map[(m.upstream_base, m.upstream_model)] = rm
             with _RE_BLOCKED_LOCK:
                 _RE_BLOCKED.clear()
                 _RE_BLOCKED.update(blocked)
+            with _REASONING_MAP_LOCK:
+                _REASONING_MAP.clear()
+                _REASONING_MAP.update(new_map)
             _lg.info(
                 f"[reasoning_effort] blocklist rebuilt: {len(blocked)} upstream(s) reject reasoning_effort"
             )

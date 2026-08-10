@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from urllib.parse import urlparse
 
@@ -12,6 +14,55 @@ from ..crypto import mask
 from ..store.keys import ApiKey, create_key, list_keys, delete_key, update_key, get_key_cipher
 from ..store.models import get_model_by_id
 from .notify import notify_proxy_reload
+
+
+# 标准思考等级(与代理翻译层对齐, M013)
+_PROBE_LEVELS = ("low", "medium", "high", "ultra")
+_NORM_STR = {"low": "low", "medium": "medium", "high": "high", "ultra": "xhigh"}
+_NORM_BUDGET = {"low": 1024, "medium": 2048, "high": 4096, "ultra": 8192}
+
+
+def _chat_reasoning_candidates(level: str) -> list[tuple[str, dict]]:
+    """Candidate reasoning-field shapes to blind-probe against a chat upstream."""
+    s = _NORM_STR[level]
+    b = _NORM_BUDGET[level]
+    return [
+        ("reasoning_effort", {"reasoning_effort": s}),
+        ("reasoning_effort_obj", {"reasoning": {"effort": s}}),
+        ("thinking_budget", {"thinking": {"budget_tokens": b}}),
+        ("thinking_type", {"thinking": {"type": "enabled", "budget_tokens": b}}),
+        ("enable_thinking", {"enable_thinking": True, "thinking_budget": b}),
+    ]
+
+
+def _anthropic_reasoning_candidates(level: str) -> list[tuple[str, dict]]:
+    b = _NORM_BUDGET[level]
+    return [("thinking", {"thinking": {"type": "enabled", "budget_tokens": b}})]
+
+
+async def _probe_reasoning_levels(client, url, headers, protocol, base_factory):
+    """Probe which standard reasoning levels this upstream actually accepts.
+
+    For each level, send minimal requests (one per candidate shape) and record
+    the first shape that returns 2xx.  Returns ``{level: fragment_or_None}``.
+    ``None`` means every candidate was rejected (strip the param for that level).
+    """
+    shapes_for = _anthropic_reasoning_candidates if protocol == "anthropic" else _chat_reasoning_candidates
+
+    async def probe_one(level):
+        for _name, frag in shapes_for(level):
+            payload = base_factory()
+            payload.update(frag)
+            try:
+                resp = await client.post(url, headers=headers, json=payload)
+            except Exception:
+                continue
+            if 200 <= resp.status_code < 300:
+                return frag
+        return None
+
+    results = await asyncio.gather(*(probe_one(lvl) for lvl in _PROBE_LEVELS))
+    return {lvl: frag for lvl, frag in zip(_PROBE_LEVELS, results)}
 
 
 def _build_upstream_url(
@@ -216,28 +267,63 @@ def register_routes(app: web.Application, ctx) -> None:
                 "stream": False,
             }
 
+        def _make_base():
+            if protocol == "anthropic":
+                return {"model": upstream_model, "max_tokens": 16384,
+                        "messages": [{"role": "user", "content": "hi"}]}
+            messages = [{"role": "user", "content": "hi"}]
+            if has_fingerprint:
+                messages.insert(0, {"role": "system",
+                                    "content": "This conversation is powered by " + upstream_model})
+            return {"model": upstream_model, "max_tokens": 1, "messages": messages, "stream": False}
+
         t0 = time.time()
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, headers=headers, json=payload)
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                # 基础连通性 ping 与思考等级探针同轮并发
+                ping_task = client.post(url, headers=headers, json=payload)
+                probe_task = _probe_reasoning_levels(client, url, headers, protocol, _make_base)
+                ping_resp, probe_map = await asyncio.gather(ping_task, probe_task)
             latency = int((time.time() - t0) * 1000)
-            ok = 200 <= resp.status_code < 300
-            # 尝试解析错误信息
+            ok = 200 <= ping_resp.status_code < 300
+            # 写回探针结果到 model 行(思考等级映射, M013)
+            reasoning_summary = ""
+            if probe_map is not None:
+                try:
+                    await ctx.store.execute(
+                        "UPDATE models SET reasoning_effort_map=? WHERE id=?",
+                        (json.dumps(probe_map, ensure_ascii=False), model.id),
+                    )
+                    try:
+                        await notify_proxy_reload()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                supported = [k for k, v in probe_map.items() if v is not None]
+                unsupported = [k for k, v in probe_map.items() if v is None]
+                parts = []
+                if supported:
+                    parts.append("支持 " + "/".join(supported))
+                if unsupported:
+                    parts.append("不支持 " + "/".join(unsupported))
+                reasoning_summary = "思考等级 " + ("；".join(parts) if parts else "未探测")
             err_msg = ""
             if not ok:
                 try:
-                    err_obj = resp.json()
-                    err_msg = err_obj.get("error", {}).get("message") or err_obj.get("message") or str(resp.status_code)
+                    err_obj = ping_resp.json()
+                    err_msg = err_obj.get("error", {}).get("message") or err_obj.get("message") or str(ping_resp.status_code)
                 except Exception:
-                    err_msg = resp.text[:200] if resp.text else str(resp.status_code)
+                    err_msg = ping_resp.text[:200] if ping_resp.text else str(ping_resp.status_code)
             return web.json_response(
                 {
                     "ok": ok,
-                    "status": resp.status_code,
+                    "status": ping_resp.status_code,
                     "latency_ms": latency,
                     "url": url,
                     "model": upstream_model,
                     "error": err_msg,
+                    "reasoning_summary": reasoning_summary,
                 }
             )
         except httpx.TimeoutException:
