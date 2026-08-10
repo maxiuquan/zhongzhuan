@@ -87,6 +87,7 @@ def _payload_to_model(data: dict) -> Model:
         client_preset=data.get("client_preset", ""),
         custom_headers=data.get("custom_headers", ""),
         exposed=bool(data.get("exposed", True)),
+        supports_reasoning_effort=bool(data.get("supports_reasoning_effort", True)),
     )
 
 
@@ -146,6 +147,7 @@ def _to_dict(m: Model) -> dict:
         "client_preset": m.client_preset,
         "custom_headers": m.custom_headers,
         "exposed": m.exposed,
+        "supports_reasoning_effort": m.supports_reasoning_effort,
         "created_at": m.created_at,
         "updated_at": m.updated_at,
     }

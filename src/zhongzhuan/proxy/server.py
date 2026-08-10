@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from aiohttp import web
 from aiohttp.payload import Payload
+
+logger = logging.getLogger(__name__)
 
 from .auth import make_proxy_auth_middleware
 from .cors import make_cors_middleware
@@ -116,6 +119,12 @@ class ProxyServer:
             # at startup — before any worker can serve traffic — so the log
             # always opens with "which implementation is in force".
             self._audit_startup()
+            # Build the reasoning_effort blocklist from model flags at boot so
+            # incompatible upstreams are stripped before the first request.
+            try:
+                await handler._rebuild_reasoning_effort_blocklist()
+            except Exception:
+                logger.exception("initial reasoning_effort blocklist rebuild failed")
             await handler.start_background_tasks()
 
         async def _on_cleanup(app: web.Application) -> None:

@@ -40,6 +40,10 @@ class Model:
     # 是否暴露给 Codex 模型发现（/v1/models 的 Codex 分支 与
     # /v1/api/codex/models）。1=暴露, 0=隐藏（v011 新增列, 默认暴露）。
     exposed: bool = True
+    # 上游是否支持 reasoning_effort 参数（v012 新增列, 默认支持）。
+    # False 时代理构建上游请求体前剥除 reasoning_effort / reasoning.effort，
+    # 避免不支持该参数的上游回 400。
+    supports_reasoning_effort: bool = True
     id: int | None = None
     created_at: int | None = None
     updated_at: int | None = None
@@ -59,12 +63,13 @@ class Model:
 # 列顺序：id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,
 #         protocol,anthropic_version,max_tokens_default,upstream_path_override,
 #         is_fallback,aliases,capabilities,upstream_mode,client_preset,custom_headers,
-#         exposed,created_at,updated_at
+#         exposed,created_at,updated_at,supports_reasoning_effort
+# （supports_reasoning_effort 必须置于末尾，与 M012 ALTER 追加的物理列顺序及 _row 索引一致）
 _COLS = (
     "id,name,upstream_base,upstream_model,rpm_limit,tpm_limit,enabled,weight,"
     "protocol,anthropic_version,max_tokens_default,upstream_path_override,"
     "is_fallback,aliases,capabilities,upstream_mode,client_preset,custom_headers,"
-    "exposed,created_at,updated_at"
+    "exposed,created_at,updated_at,supports_reasoning_effort"
 )
 
 
@@ -89,6 +94,7 @@ def _row(r: tuple) -> Model:
         client_preset=r[16] if len(r) > 16 and r[16] else "",
         custom_headers=r[17] if len(r) > 17 and r[17] else "",
         exposed=bool(r[18]) if len(r) > 18 else True,
+        supports_reasoning_effort=bool(r[21]) if len(r) > 21 else True,
         created_at=r[19] if len(r) > 19 else None,
         updated_at=r[20] if len(r) > 20 else None,
     )
@@ -97,8 +103,8 @@ def _row(r: tuple) -> Model:
 async def create_model(s: Store, m: Model) -> Model:
     now = Store.now()
     m.id = await s.execute(
-        """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, capabilities, upstream_mode, client_preset, custom_headers, exposed, created_at, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, capabilities, upstream_mode, client_preset, custom_headers, exposed, supports_reasoning_effort, created_at, updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             m.name,
             m.upstream_base,
@@ -118,6 +124,7 @@ async def create_model(s: Store, m: Model) -> Model:
             getattr(m, "client_preset", ""),
             getattr(m, "custom_headers", ""),
             int(m.exposed),
+            int(m.supports_reasoning_effort),
             now,
             now,
         ),
@@ -151,7 +158,7 @@ async def list_models(s: Store) -> list[Model]:
 async def update_model(s: Store, model_id: int, m: Model) -> None:
     now = Store.now()
     await s.execute(
-        """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, protocol=?, anthropic_version=?, max_tokens_default=?, upstream_path_override=?, is_fallback=?, aliases=?, capabilities=?, upstream_mode=?, client_preset=?, custom_headers=?, exposed=?, updated_at=? WHERE id=?""",
+        """UPDATE models SET name=?, upstream_base=?, upstream_model=?, rpm_limit=?, tpm_limit=?, enabled=?, weight=?, protocol=?, anthropic_version=?, max_tokens_default=?, upstream_path_override=?, is_fallback=?, aliases=?, capabilities=?, upstream_mode=?, client_preset=?, custom_headers=?, exposed=?, supports_reasoning_effort=?, updated_at=? WHERE id=?""",
         (
             m.name,
             m.upstream_base,
@@ -171,6 +178,7 @@ async def update_model(s: Store, model_id: int, m: Model) -> None:
             getattr(m, "client_preset", ""),
             getattr(m, "custom_headers", ""),
             int(m.exposed),
+            int(m.supports_reasoning_effort),
             now,
             model_id,
         ),

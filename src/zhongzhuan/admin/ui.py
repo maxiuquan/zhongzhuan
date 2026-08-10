@@ -711,6 +711,7 @@ function showModelModal(model) {
       <div style="color:var(--text-subtle);font-size:12px;margin-top:6px">支持模板变量：<code>{{uuid}}</code>（每请求生成新 UUID）。禁止 Authorization/Host/Content-Length 等受控头。</div>
     </div>
     <div class="form-group"><label>启用</label><select id="f_enabled"><option value="1" ${isEdit && model.enabled ? "selected" : ""}>是</option><option value="0" ${isEdit && !model.enabled ? "selected" : ""}>否</option></select></div>
+    <div class="form-group"><label>上游支持 reasoning_effort <span style="color:var(--text-subtle)">(上游不兼容该参数时报 400 时关闭；关闭后代理自动剥除，请求照常通过)</span></label><select id="f_supports_reasoning_effort"><option value="1" ${(!isEdit || model.supports_reasoning_effort) ? "selected" : ""}>是（默认）</option><option value="0" ${isEdit && !model.supports_reasoning_effort ? "selected" : ""}>否</option></select></div>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveModel(${isEdit ? model.id : ""})">保存</button></div>`;
   document.getElementById("modal").classList.add("show");
 
@@ -816,6 +817,7 @@ async function saveModel(id) {
     enabled: document.getElementById("f_enabled").value === "1",
     client_preset: clientPreset,
     custom_headers: customHeadersJson,
+    supports_reasoning_effort: document.getElementById("f_supports_reasoning_effort").value === "1",
   };
   if (!body.name || !body.upstream_base) { alert("名称和上游地址不能为空"); return; }
   let r;

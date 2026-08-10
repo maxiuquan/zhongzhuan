@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
@@ -65,6 +66,72 @@ def _looks_like_chat_error(data: bytes, headers: dict | None = None) -> bool:
     if not data:
         return False
     return bool(_CHAT_ERROR_RE.search(data[:2000]))
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-effort compatibility (A flag + D self-heal)
+# ---------------------------------------------------------------------------
+# Some upstreams (certain third-party relays, domestic model gateways, non-
+# reasoning members of aggregate groups) reject the OpenAI ``reasoning_effort``
+# parameter with ``400 Unsupported parameter: 'reasoning_effort'``.  We never
+# want to expose that 400 to the client, so:
+#
+#   * A -- the ``supports_reasoning_effort`` model flag (DB column, default 1)
+#     seeds :data:`_RE_BLOCKED` at startup / on every reload.  Requests to a
+#     blocked (upstream_base, upstream_model) have the param stripped *before*
+#     they leave the proxy.
+#   * D -- if an upstream we haven't seen before still rejects it, we strip the
+#     param and transparently retry the *same* request (client sees only the
+#     successful response), then remember the rejection in :data:`_RE_BLOCKED`
+#     so subsequent calls skip it with zero waste.
+#
+# Stripping only loses effort control for that upstream; every other feature
+# is untouched, so it is strictly safer than forwarding a param it can't parse.
+
+#: (upstream_base, upstream_model) tuples known to reject ``reasoning_effort``.
+_RE_BLOCKED: set[tuple[str, str]] = set()
+_RE_BLOCKED_LOCK = threading.Lock()
+
+
+def _looks_like_reasoning_effort_error(data: bytes) -> bool:
+    """True if the upstream error body indicates it rejected reasoning_effort.
+
+    We match the literal param name so we never strip reasoning_effort in
+    response to an error about some *other* unsupported parameter.
+    """
+    if not data:
+        return False
+    try:
+        text = data.decode("utf-8", "replace").lower()
+    except Exception:
+        return False
+    return "reasoning_effort" in text
+
+
+def _reasoning_effort_blocked_for(key) -> bool:
+    return (key.upstream_base, key.upstream_model) in _RE_BLOCKED
+
+
+def _block_reasoning_effort_for(key) -> None:
+    with _RE_BLOCKED_LOCK:
+        _RE_BLOCKED.add((key.upstream_base, key.upstream_model))
+
+
+def _strip_reasoning_effort(body_obj: dict) -> bool:
+    """Remove ``reasoning_effort`` / ``reasoning.effort`` from a body in place.
+
+    Returns True if anything was removed (so callers can tell a no-op apart
+    from a real strip and avoid infinite self-heal loops).
+    """
+    removed = False
+    if body_obj.get("reasoning_effort"):
+        body_obj.pop("reasoning_effort", None)
+        removed = True
+    reasoning = body_obj.get("reasoning")
+    if isinstance(reasoning, dict) and reasoning.get("effort"):
+        reasoning.pop("effort", None)
+        removed = True
+    return removed
 
 
 def _response_is_empty(inbound_protocol: str, parsed: Any) -> bool:
@@ -912,95 +979,124 @@ class ProxyHandler:
             decision = self._v3_select_retry_key(prep, candidates, tried)
             if decision is None:
                 break
-            call, call_error = await self._prepare_v3_upstream_call(
-                request=request,
-                body_obj=prep.upstream_body,
-                final_body=prep.final_body,
-                decision=decision,
-                requested_model=ctx.requested_model or "",
-                inbound_protocol="responses",
-                stream=True,
-            )
-            if call_error is not None:
-                if call_error.status_code == 429:
-                    await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
-                    return web.Response(
-                        status=call_error.status_code,
-                        body=call_error.body,
-                        content_type="application/json",
-                    )
-                # 其它「网络前」错误（如该 key 无可用上游）：换下一个 key。
-                continue
-            assert call is not None
-            key = call.key
-            tried.add(key.key_id)
-
-            # A7. Open the upstream and read its response header.  ``UpstreamClient
-            # .stream`` is an async generator that yields exactly one response
-            # inside ``async with client.stream(...)``, so pulling the first item
-            # by hand is what lets us inspect the status *before* committing to a
-            # 200 -- and ``aclose()`` is what later exits that context manager.
-            upstream_gen = call.client.stream(
-                call.method,
-                call.path,
-                headers=call.headers,
-                content=call.body,
-            )
-            try:
-                upstream_resp = await upstream_gen.__anext__()
-            except StopAsyncIteration:
-                await self._aclose_quietly(upstream_gen)
-                mark_network_failure(key)
-                continue
-            except (ConnectionResetError, ConnectionError, OSError) as exc:
-                await self._aclose_quietly(upstream_gen)
-                transport = request.transport
-                if transport is not None and transport.is_closing():
-                    # The client hung up while we were connecting: not the key's
-                    # fault, so its health is left untouched (R-P1-25).
-                    return web.Response(status=499, text="Client Closed Request")
-                _lg.error(f"[v3-stream] key_id={key.key_id} connection error: {type(exc).__name__}: {exc}")
-                mark_network_failure(key)
-                continue
-            except Exception as exc:  # noqa: BLE001 - attribute, never leak a traceback
-                await self._aclose_quietly(upstream_gen)
-                _lg.error(f"[v3-stream] key_id={key.key_id} exception: {type(exc).__name__}: {exc}")
-                mark_network_failure(key)
-                continue
-
-            upstream_headers = dict(upstream_resp.headers)
-            if upstream_resp.status_code >= 400:
-                # An upstream error before the first byte is a normal HTTP error --
-                # turning it into "200 + response.failed" would blind every SDK's
-                # error path (the rejected alternative in §1.4).
-                try:
-                    error_body = await upstream_resp.aread()
-                except Exception:  # noqa: BLE001 - the status is the useful part
-                    error_body = b""
-                await self._aclose_quietly(upstream_gen)
-                _retryable = classify_failure(key, upstream_resp.status_code, upstream_headers)
-                if _retryable:
-                    # Retryable upstream states must not park the key: the next
-                    # request gets to try it again (same rule as the non-stream path).
-                    mark_success(key)
-                _lg.info(
-                    f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} body={error_body[:300]!r}"
+            # Inner loop: a single key may be re-tried once with reasoning_effort
+            # stripped (D self-heal) before we give up on it and move on.
+            _key_succeeded = False
+            _stripped_once = False
+            while True:
+                call, call_error = await self._prepare_v3_upstream_call(
+                    request=request,
+                    body_obj=prep.upstream_body,
+                    final_body=prep.final_body,
+                    decision=decision,
+                    requested_model=ctx.requested_model or "",
+                    inbound_protocol="responses",
+                    stream=True,
                 )
-                if not _retryable:
-                    await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
-                    return web.Response(
-                        status=upstream_resp.status_code,
-                        body=error_body,
-                        content_type="application/json",
-                    )
-                # 可重试（429/5xx/401/403）→ 换下一个 key（尚未提交任何字节给客户端）。
-                # 记下最后一次错误：若所有 key 都以同一理由失败，兜底要透传它。
-                last_upstream_status = upstream_resp.status_code
-                last_upstream_body = error_body
-                continue
+                if call_error is not None:
+                    if call_error.status_code == 429:
+                        await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+                        return web.Response(
+                            status=call_error.status_code,
+                            body=call_error.body,
+                            content_type="application/json",
+                        )
+                    # 其它「网络前」错误（如该 key 无可用上游）：换下一个 key。
+                    break
+                assert call is not None
+                key = call.key
+                tried.add(key.key_id)
 
-            mark_success(key)
-            learn_rate_limits(key, upstream_headers, upstream_resp.status_code)
+                # A7. Open the upstream and read its response header.
+                upstream_gen = call.client.stream(
+                    call.method,
+                    call.path,
+                    headers=call.headers,
+                    content=call.body,
+                )
+                try:
+                    upstream_resp = await upstream_gen.__anext__()
+                except StopAsyncIteration:
+                    await self._aclose_quietly(upstream_gen)
+                    mark_network_failure(key)
+                    break
+                except (ConnectionResetError, ConnectionError, OSError) as exc:
+                    await self._aclose_quietly(upstream_gen)
+                    transport = request.transport
+                    if transport is not None and transport.is_closing():
+                        # The client hung up while we were connecting: not the key's
+                        # fault, so its health is left untouched (R-P1-25).
+                        return web.Response(status=499, text="Client Closed Request")
+                    _lg.error(f"[v3-stream] key_id={key.key_id} connection error: {type(exc).__name__}: {exc}")
+                    mark_network_failure(key)
+                    break
+                except Exception as exc:  # noqa: BLE001 - attribute, never leak a traceback
+                    await self._aclose_quietly(upstream_gen)
+                    _lg.error(f"[v3-stream] key_id={key.key_id} exception: {type(exc).__name__}: {exc}")
+                    mark_network_failure(key)
+                    break
+
+                upstream_headers = dict(upstream_resp.headers)
+                if upstream_resp.status_code >= 400:
+                    try:
+                        error_body = await upstream_resp.aread()
+                    except Exception:  # noqa: BLE001 - the status is the useful part
+                        error_body = b""
+                    # D self-heal: upstream rejected reasoning_effort → strip and
+                    # retry the SAME key once (client sees no error). After the
+                    # strip the body no longer carries the param, so a re-400 on
+                    # the same phrase can't loop (the strip helper returns False).
+                    if (
+                        not _stripped_once
+                        and upstream_resp.status_code in (400, 422)
+                        and _looks_like_reasoning_effort_error(error_body)
+                        and _strip_reasoning_effort(prep.upstream_body)
+                    ):
+                        _block_reasoning_effort_for(key)
+                        _stripped_once = True
+                        # Re-encode the stripped body so the re-issued request
+                        # (esp. the NATIVE passthrough branch, which only
+                        # re-serializes when something else mutated) carries the
+                        # corrected payload, not the stale pre-strip final_body.
+                        prep.final_body = json.dumps(
+                            prep.upstream_body, ensure_ascii=False
+                        ).encode()
+                        _lg.warning(
+                            f"[v3-stream] upstream rejected reasoning_effort "
+                            f"(key_id={key.key_id}); stripping param and retrying same key once"
+                        )
+                        await self._aclose_quietly(upstream_gen)
+                        continue
+                    _retryable = classify_failure(key, upstream_resp.status_code, upstream_headers)
+                    if _retryable:
+                        # Retryable upstream states must not park the key: the next
+                        # request gets to try it again (same rule as the non-stream path).
+                        mark_success(key)
+                    _lg.info(
+                        f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} body={error_body[:300]!r}"
+                    )
+                    if not _retryable:
+                        await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+                        return web.Response(
+                            status=upstream_resp.status_code,
+                            body=error_body,
+                            content_type="application/json",
+                        )
+                    # 可重试（429/5xx/401/403）→ 换下一个 key（尚未提交任何字节给客户端）。
+                    # 记下最后一次错误：若所有 key 都以同一理由失败，兜底要透传它。
+                    last_upstream_status = upstream_resp.status_code
+                    last_upstream_body = error_body
+                    await self._aclose_quietly(upstream_gen)
+                    break
+                # 200: this key works.
+                mark_success(key)
+                learn_rate_limits(key, upstream_headers, upstream_resp.status_code)
+                _key_succeeded = True
+                break
+            if _key_succeeded:
+                break
+            # else: inner loop exited via `break` (network error / retryable
+            # non-RE 4xx / 5xx) → try the next candidate key.
 
             # A8. ---- Phase A 结束：从这里开始状态码是 200。 ----
             adapter = UpstreamSSEChunkAdapter.for_protocol(
@@ -1561,6 +1657,12 @@ class ProxyHandler:
             carries the status + JSON body to return to the client.
         """
         key = decision.key
+        # Reasoning-effort compatibility (A flag + D learned cache): strip
+        # reasoning_effort / reasoning.effort before building the upstream body
+        # when this upstream is known to reject it.
+        if _reasoning_effort_blocked_for(key):
+            if _strip_reasoning_effort(body_obj):
+                final_body = json.dumps(body_obj, ensure_ascii=False).encode()
         # The capability router already picked a candidate; honour its
         # NATIVE/TRANSLATE path decision instead of re-deriving from the body.
         upstream_path = getattr(decision, "upstream_path", "") or ""
@@ -1792,6 +1894,33 @@ class ProxyHandler:
                     session_key=session_key,
                     required_caps=required_caps,
                     force_translate=True,
+                )
+            # D self-heal: the upstream rejected reasoning_effort. Strip it and
+            # re-issue the *same* request once (same key). The client receives
+            # only the successful response. Only fires when reasoning_effort was
+            # actually present (the strip helper returns False otherwise, so a
+            # re-400 on a different reason cannot loop).
+            if (
+                not force_translate
+                and resp.status_code in (400, 422)
+                and _looks_like_reasoning_effort_error(data)
+                and _strip_reasoning_effort(body_obj)
+            ):
+                _block_reasoning_effort_for(key)
+                _lg.warning(
+                    f"[v3] upstream rejected reasoning_effort (key_id={key.key_id}); "
+                    f"stripping param and retrying once"
+                )
+                return await self._run_v3_nonstream(
+                    request=request,
+                    body_obj=body_obj,
+                    final_body=json.dumps(body_obj, ensure_ascii=False).encode(),
+                    decision=decision,
+                    requested_model=requested_model,
+                    inbound_protocol=inbound_protocol,
+                    session_key=session_key,
+                    required_caps=required_caps,
+                    force_translate=force_translate,
                 )
             result = _V3UpstreamResult(resp.status_code, data)
             return result, data
@@ -2108,7 +2237,39 @@ class ProxyHandler:
                 )
             except Exception:
                 _lg.exception("reload groups failed")
+        # Rebuild the reasoning_effort blocklist from the model flags so admin
+        # edits (and the A-flag operational step) hot-apply on every reload.
+        await self._rebuild_reasoning_effort_blocklist()
         return len(self._keys)
+
+    async def _rebuild_reasoning_effort_blocklist(self) -> None:
+        """Rebuild the in-memory set of upstreams that reject reasoning_effort.
+
+        Source of truth: the ``supports_reasoning_effort`` column on models.
+        Called at startup (via ``ProxyServer``'s on_startup) and on every
+        ``/api/reload`` so admin edits hot-apply. The dynamic self-heal (D) then
+        *extends* this set at runtime for any upstream we discover rejects the
+        param, without needing a DB write.
+        """
+        if self.store is None:
+            return
+        try:
+            from ..store.models import list_models as _list_models_db
+
+            ms = await _list_models_db(self.store)
+            blocked = {
+                (m.upstream_base, m.upstream_model)
+                for m in ms
+                if not getattr(m, "supports_reasoning_effort", True)
+            }
+            with _RE_BLOCKED_LOCK:
+                _RE_BLOCKED.clear()
+                _RE_BLOCKED.update(blocked)
+            _lg.info(
+                f"[reasoning_effort] blocklist rebuilt: {len(blocked)} upstream(s) reject reasoning_effort"
+            )
+        except Exception:
+            _lg.exception("rebuild reasoning_effort blocklist failed")
 
     async def _ensure_client(self, upstream_base: str) -> UpstreamClient | None:
         if upstream_base in self._client_cache:
