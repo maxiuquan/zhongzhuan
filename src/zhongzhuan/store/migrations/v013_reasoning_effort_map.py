@@ -10,20 +10,22 @@
 - map 非空时, 翻译层按 map 精确翻译(每档可不同);
 - map 为空时, 退回 v012 的 A 开关 + D 自愈兜底。
 
-默认值 ''（空 map）→ 退回既有行为, 升级无副作用。
+列允许为 NULL（TiDB/MySQL 的 TEXT 列不允许 DEFAULT 值）; NULL/空 → 退回既有
+行为, 升级无副作用。
 """
 
 from __future__ import annotations
 
 from ..migration_engine import Migration
 
-#: SQLite / MySQL / TiDB: TEXT NOT NULL DEFAULT ''。
+#: SQLite / MySQL / TiDB: TEXT 列不允许 DEFAULT, 故声明为可空、无默认值。
+#: 读取侧(_parse_reasoning_map)对 None/空 统一视为「未配置」。
 SQLITE_ALTERS: tuple[str, ...] = (
-    "ALTER TABLE models ADD COLUMN reasoning_effort_map TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE models ADD COLUMN reasoning_effort_map TEXT",
 )
 
 MYSQL_ALTERS: tuple[str, ...] = (
-    "ALTER TABLE models ADD COLUMN reasoning_effort_map TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE models ADD COLUMN reasoning_effort_map TEXT",
 )
 
 
