@@ -93,11 +93,28 @@ _RE_BLOCKED: set[tuple[str, str]] = set()
 _RE_BLOCKED_LOCK = threading.Lock()
 
 
-def _looks_like_reasoning_effort_error(data: bytes) -> bool:
-    """True if the upstream error body indicates it rejected reasoning_effort.
+# Phrases that mean the *parameter itself* is refused (not merely a bad value).
+# We must NOT trigger on enum-value validation errors like "Input should be
+# 'none','low',..." — those upstreams DO support the param; they just got a
+# client value outside the allowed set, and stripping the param there would
+# wrongly downgrade a perfectly compatible upstream forever.
+_RE_UNSUPPORTED_MARKERS = (
+    "unsupported parameter",
+    "unknown parameter",
+    "unexpected parameter",
+    "not supported",
+    "not allowed",
+    "additional properties are not allowed",
+)
 
-    We match the literal param name so we never strip reasoning_effort in
-    response to an error about some *other* unsupported parameter.
+
+def _looks_like_reasoning_effort_error(data: bytes) -> bool:
+    """True if the upstream error body indicates it *refuses* reasoning_effort.
+
+    We require BOTH the literal param name AND an explicit "parameter not
+    supported" phrasing, so a value-enum error (e.g. ``reasoning_effort``
+    outside ``none/low/medium/high/max``) does NOT trick us into stripping a
+    perfectly compatible upstream.
     """
     if not data:
         return False
@@ -105,7 +122,9 @@ def _looks_like_reasoning_effort_error(data: bytes) -> bool:
         text = data.decode("utf-8", "replace").lower()
     except Exception:
         return False
-    return "reasoning_effort" in text
+    if "reasoning_effort" not in text:
+        return False
+    return any(marker in text for marker in _RE_UNSUPPORTED_MARKERS)
 
 
 def _reasoning_effort_blocked_for(key) -> bool:
