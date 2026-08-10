@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import replace
 from types import SimpleNamespace
@@ -36,6 +37,34 @@ _INSTRUCTION_ROLES = ("system", "developer")
 #: 整片抽风时提前放弃——2026-08-06 实测某上游 ALB 连续返回 502 / 首字节前断流，
 #: 三次尝试全部落空，剩下一半 key 根本没被碰过，客户端却已经拿到空回复。
 _V3_STREAM_MAX_SWITCHES = 5
+
+
+# Chat-style error markers: a responses-native upstream (OpenAI-style) never
+# emits these; only a chat.completions-only upstream does.  Used to detect the
+# "model.protocol='responses' but the upstream actually only speaks chat" mis-
+# configuration and auto-degrade that single request to a translated call.
+_CHAT_ERROR_RE = re.compile(
+    rb"messages\s+is\s+(?:a\s+)?required|"
+    rb"expected\s+array|"
+    rb"received\s+undefined|"
+    rb"param\"?\s*:\s*\"?messages|"
+    rb"'messages'",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_chat_error(data: bytes, headers: dict | None = None) -> bool:
+    """True if the upstream error body looks like a chat.completions-only error.
+
+    Heuristic only — strong chat-specific phrases ("messages is required",
+    "expected array", "received undefined", ``param: "messages"``).  A genuinely
+    responses-native upstream (e.g. OpenAI / work.freemodel.dev) does not produce
+    these, so degrading such a request would be a no-op at worst and cannot
+    accidentally rewrite a valid native responses call.
+    """
+    if not data:
+        return False
+    return bool(_CHAT_ERROR_RE.search(data[:2000]))
 
 
 def _response_is_empty(inbound_protocol: str, parsed: Any) -> bool:
@@ -1512,6 +1541,7 @@ class ProxyHandler:
         requested_model: str,
         inbound_protocol: str,
         stream: bool,
+        force_translate: bool = False,
     ) -> tuple["_V3UpstreamCall | None", "_V3UpstreamResult | None"]:
         """Resolve everything needed to *issue* one v3 upstream request.
 
@@ -1547,6 +1577,12 @@ class ProxyHandler:
 
         outbound_protocol = key.upstream_protocol
         need_translation = inbound_protocol != outbound_protocol
+        if force_translate:
+            # Auto-degrade path: caller detected a chat-only upstream error and
+            # wants this request re-issued as a translated chat.completions call
+            # (same key, but speaking the protocol the upstream actually accepts).
+            outbound_protocol = "openai"
+            need_translation = True
         headers: dict[str, str] = {}
         for hk, hv in request.headers.items():
             kl = hk.lower()
@@ -1657,6 +1693,7 @@ class ProxyHandler:
         inbound_protocol: str,
         session_key: str,
         required_caps: frozenset[str],
+        force_translate: bool = False,
     ) -> tuple[Any, bytes]:
         """Execute one non-stream create against the production upstream chain.
 
@@ -1673,6 +1710,7 @@ class ProxyHandler:
             requested_model=requested_model,
             inbound_protocol=inbound_protocol,
             stream=False,
+            force_translate=force_translate,
         )
         if error is not None:
             return error, b""
@@ -1728,6 +1766,33 @@ class ProxyHandler:
                 # Single-shot for now: the full scheduler retry loop is the
                 # T28 pass.  Keep the key healthy for the next request.
                 mark_success(key)
+            # Auto-degrade: a responses-native call (we skipped translation)
+            # got a chat-only-style error ("messages is required", "expected
+            # array", ...).  The model is mis-configured as protocol=responses
+            # but its upstream only speaks chat.  Re-issue once as a translated
+            # chat.completions call (same key) — no-op for genuine native
+            # responses upstreams, which never emit these error phrases.
+            if (
+                not force_translate
+                and inbound_protocol == "responses"
+                and not need_translation
+                and _looks_like_chat_error(data, resp_headers)
+            ):
+                _lg.warning(
+                    f"[v3] responses passthrough returned chat-style error "
+                    f"(key_id={key.key_id}); degrading single request to chat translation"
+                )
+                return await self._run_v3_nonstream(
+                    request=request,
+                    body_obj=body_obj,
+                    final_body=final_body,
+                    decision=decision,
+                    requested_model=requested_model,
+                    inbound_protocol=inbound_protocol,
+                    session_key=session_key,
+                    required_caps=required_caps,
+                    force_translate=True,
+                )
             result = _V3UpstreamResult(resp.status_code, data)
             return result, data
 
@@ -2779,6 +2844,10 @@ class ProxyHandler:
         try:
             # --- Retry loop: keeps trying until a key works or client disconnects ---
             retry_delay = 2.0
+            # Auto-degrade latch: once a responses-native passthrough hits a
+            # chat-only upstream error, the rest of this request's retry round
+            # is re-issued as translated chat.completions (same keys, chat protocol).
+            protocol_override: str | None = None
             while True:
                 tried: set[int] = set()
                 attempt = 0
@@ -2823,7 +2892,7 @@ class ProxyHandler:
                         continue
 
                     # Determine if translation is needed for this key
-                    outbound_protocol = k.upstream_protocol
+                    outbound_protocol = protocol_override or k.upstream_protocol
                     need_translation = inbound_protocol != outbound_protocol
 
                     # Prepare body, path, headers
@@ -2922,6 +2991,23 @@ class ProxyHandler:
                                     f"retryable={_retryable} err={err_txt!r}"
                                 )
                                 if not _retryable:
+                                    # Auto-degrade: a responses-native passthrough
+                                    # hit a chat-only upstream error.  Latch the whole
+                                    # request to translated chat and retry (same keys,
+                                    # chat protocol).  Output translation at 2949 then
+                                    # wraps the chat SSE into responses SSE automatically.
+                                    if (
+                                        not need_translation
+                                        and inbound_protocol == "responses"
+                                        and _looks_like_chat_error(err_body, _up_headers)
+                                    ):
+                                        _lg.warning(
+                                            f"[{id(request):x}] streaming: responses passthrough "
+                                            f"got chat-style error (key_id={k.key_id}); "
+                                            f"degrading to chat translation"
+                                        )
+                                        protocol_override = "openai"
+                                        break
                                     # 请求侧错误（如 400/404/422）：不换 key，直接返回错误。
                                     return web.Response(
                                         status=_st,
