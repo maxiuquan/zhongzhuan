@@ -109,7 +109,7 @@ async def create_model(s: Store, m: Model) -> Model:
     now = Store.now()
     m.id = await s.execute(
         """INSERT INTO models(name, upstream_base, upstream_model, rpm_limit, tpm_limit, enabled, weight, protocol, anthropic_version, max_tokens_default, upstream_path_override, is_fallback, aliases, capabilities, upstream_mode, client_preset, custom_headers, exposed, supports_reasoning_effort, created_at, updated_at, reasoning_effort_map)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             m.name,
             m.upstream_base,
