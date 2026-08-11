@@ -65,6 +65,21 @@ async def _probe_reasoning_levels(client, url, headers, protocol, base_factory):
     return {lvl: frag for lvl, frag in zip(_PROBE_LEVELS, results)}
 
 
+def _already_probed(model) -> bool:
+    """True if this model's reasoning-level mapping has already been probed and
+    recorded.  Once recorded we never re-probe on subsequent connectivity tests
+    (M013 auto-detect, silent) — a channel+model is probed only on its first
+    successful ``test`` request, then the result is reused forever."""
+    raw = getattr(model, "reasoning_effort_map", "") or ""
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return False
+    return isinstance(parsed, dict) and len(parsed) > 0
+
+
 def _build_upstream_url(
     upstream_base: str,
     path_override: str,
@@ -277,17 +292,25 @@ def register_routes(app: web.Application, ctx) -> None:
                                     "content": "This conversation is powered by " + upstream_model})
             return {"model": upstream_model, "max_tokens": 1, "messages": messages, "stream": False}
 
+        # 思考等级探针：仅「首次」连通性测试时探测并落库到 model 行，
+        # 之后(已记录 reasoning_effort_map)不再重复探测(M013 自动探测, 静默执行)。
+        already_probed = _already_probed(model)
         t0 = time.time()
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                # 基础连通性 ping 与思考等级探针同轮并发
-                ping_task = client.post(url, headers=headers, json=payload)
-                probe_task = _probe_reasoning_levels(client, url, headers, protocol, _make_base)
-                ping_resp, probe_map = await asyncio.gather(ping_task, probe_task)
+            if already_probed:
+                # 已探测过：只做基础连通性 ping，不重复探测思考等级。
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    ping_resp = await client.post(url, headers=headers, json=payload)
+                probe_map = None
+            else:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    # 基础连通性 ping 与思考等级探针同轮并发
+                    ping_task = client.post(url, headers=headers, json=payload)
+                    probe_task = _probe_reasoning_levels(client, url, headers, protocol, _make_base)
+                    ping_resp, probe_map = await asyncio.gather(ping_task, probe_task)
             latency = int((time.time() - t0) * 1000)
             ok = 200 <= ping_resp.status_code < 300
-            # 写回探针结果到 model 行(思考等级映射, M013)
-            reasoning_summary = ""
+            # 首次探测结果静默写回 model 行(思考等级映射, M013), 不向前端展示结论。
             if probe_map is not None:
                 try:
                     await ctx.store.execute(
@@ -300,14 +323,6 @@ def register_routes(app: web.Application, ctx) -> None:
                         pass
                 except Exception:
                     pass
-                supported = [k for k, v in probe_map.items() if v is not None]
-                unsupported = [k for k, v in probe_map.items() if v is None]
-                parts = []
-                if supported:
-                    parts.append("支持 " + "/".join(supported))
-                if unsupported:
-                    parts.append("不支持 " + "/".join(unsupported))
-                reasoning_summary = "思考等级 " + ("；".join(parts) if parts else "未探测")
             err_msg = ""
             if not ok:
                 try:
@@ -323,7 +338,6 @@ def register_routes(app: web.Application, ctx) -> None:
                     "url": url,
                     "model": upstream_model,
                     "error": err_msg,
-                    "reasoning_summary": reasoning_summary,
                 }
             )
         except httpx.TimeoutException:

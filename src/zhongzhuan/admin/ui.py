@@ -1012,12 +1012,11 @@ async function testKey(id) {
   if (!r) return;
   testResults[id] = {ok: r.ok, latency: r.latency_ms, error: r.error};
   loadKeys();
-  // 显示详情
-  let rline = r.reasoning_summary ? ("\\n思考等级: " + r.reasoning_summary) : "";
+  // 显示详情（思考等级由系统静默自动探测, 此处不展示）
   if (r.ok) {
-    alert("连通性测试通过\\n\\n模型: " + r.model + "\\n延迟: " + r.latency_ms + "ms\\nURL: " + r.url + rline);
+    alert("连通性测试通过\\n\\n模型: " + r.model + "\\n延迟: " + r.latency_ms + "ms\\nURL: " + r.url);
   } else {
-    alert("连通性测试失败\\n\\n状态码: " + r.status + "\\n错误: " + r.error + "\\nURL: " + r.url + rline);
+    alert("连通性测试失败\\n\\n状态码: " + r.status + "\\n错误: " + r.error + "\\nURL: " + r.url);
   }
 }
 
