@@ -109,6 +109,10 @@ td .tag{vertical-align:middle}
 td>strong{display:inline-block;max-width:100%;word-break:break-word}
 td:last-child{white-space:nowrap}
 td:nth-child(2){word-break:break-all}
+td:nth-child(4),
+td:nth-child(5),
+td:nth-child(6),
+td:nth-child(9){white-space:nowrap}
 tr:hover td{background:var(--bg-hover)}
 tr.group-header td{background:var(--bg-subtle);font-weight:600;color:var(--accent);cursor:pointer;user-select:none;padding:14px 16px;font-size:13.5px;letter-spacing:0.3px;border-top:8px solid var(--bg);border-bottom:1px solid var(--border)}
 tr.group-header:first-child td{border-top:none}
