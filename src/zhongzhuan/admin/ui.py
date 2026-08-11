@@ -85,9 +85,13 @@ body{
 .tab.active{display:block}
 /* ---- 卡片 / 表格 ---- */
 .card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;margin-bottom:16px;box-shadow:var(--shadow)}
-.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
-.card-header h2{font-size:14px;color:var(--text);font-weight:600}
-.card-header .actions{display:flex;gap:8px}
+.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;gap:16px}
+.card-header h2{font-size:14px;color:var(--text);font-weight:600;white-space:nowrap}
+.card-header .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.card-header .actions label{margin:0;font-size:12px;color:var(--text-subtle);font-weight:500;white-space:nowrap}
+.card-header .actions input,
+.card-header .actions select{width:auto;flex:none;min-width:120px;padding:6px 10px;height:34px;font-size:13px}
+.card-header .actions .btn{height:34px;padding:6px 14px}
 table{width:100%;border-collapse:collapse;font-size:13px}
 .exposure-list{max-height:520px;overflow-y:auto;border:1px solid var(--border);border-radius:8px}
 .exp-row{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border-muted)}
@@ -99,11 +103,17 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 .exp-row .tag{font-size:10px;padding:1px 6px;border-radius:10px;margin-left:6px}
 .exp-row .tag.fb{background:rgba(251,146,60,0.15);color:var(--orange)}
 .exp-row .tag.off{background:var(--bg-input);color:var(--text-subtle)}
-th{text-align:left;padding:11px 14px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:0.3px}
-td{padding:11px 14px;border-bottom:1px solid var(--border-muted)}
+th{text-align:left;padding:12px 14px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:0.3px;white-space:nowrap}
+td{padding:12px 14px;border-bottom:1px solid var(--border-muted);vertical-align:top;line-height:1.55;word-break:break-word}
+td .tag{vertical-align:middle}
+td>strong{display:inline-block;max-width:100%;word-break:break-word}
 tr:hover td{background:var(--bg-hover)}
-tr.group-header td{background:var(--bg-subtle);font-weight:600;color:var(--accent);cursor:pointer;user-select:none;padding:13px 16px;font-size:13.5px;letter-spacing:0.3px;border-top:2px solid var(--border);border-bottom:1px solid var(--border)}
+tr.group-header td{background:var(--bg-subtle);font-weight:600;color:var(--accent);cursor:pointer;user-select:none;padding:14px 16px;font-size:13.5px;letter-spacing:0.3px;border-top:8px solid var(--bg);border-bottom:1px solid var(--border)}
+tr.group-header:first-child td{border-top:none}
 tr.group-header:hover td{background:#eaeef5}
+.group-meta{color:var(--text-muted);font-weight:400;font-size:12px;margin-left:6px;display:inline-flex;gap:8px;align-items:center;vertical-align:middle}
+.group-meta .pill{display:inline-flex;align-items:center;padding:3px 10px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;font-size:11px;color:var(--text-muted);font-weight:500;white-space:nowrap}
+.group-meta .pill strong{color:var(--text);margin-right:4px;font-weight:600}
 /* ---- 按钮 ---- */
 .btn{background:var(--bg-card);color:var(--text);border:1px solid var(--border);padding:6px 14px;border-radius:var(--radius);font-size:13px;cursor:pointer;font-family:inherit;transition:all 0.15s;display:inline-flex;align-items:center;gap:6px}
 .btn:hover{background:var(--bg-hover);border-color:#d1d5db}
@@ -279,7 +289,20 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
               <button class="btn primary" onclick="showModelModal()">+ 添加模型</button>
             </div>
           </div>
-          <table><thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>别名</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>
+          <table>
+            <colgroup>
+              <col style="min-width:160px">
+              <col style="min-width:210px">
+              <col style="min-width:150px">
+              <col style="min-width:65px">
+              <col style="min-width:55px">
+              <col style="min-width:65px">
+              <col style="min-width:130px">
+              <col style="min-width:75px">
+              <col style="min-width:60px">
+              <col style="min-width:95px">
+            </colgroup>
+            <thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>别名</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>
           <tbody id="modelTable"></tbody></table>
         </div>
       </div>
@@ -654,24 +677,28 @@ function renderModelTable() {
       const list = groupsMap.get(gkey);
       const isCollapsed = !!collapsed[gkey];
       const arrow = isCollapsed ? "\u25b6" : "\u25bc";
-      let countLabel = '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + list.length + ' 个模型</span>';
-      let extra = "";
+      let meta = '<span class="group-meta"><span class="pill"><strong>' + list.length + '</strong> 个模型</span></span>';
       if (modelGroupMode === "model") {
         // 按「模型名」聚合：amd/deepseek-v4-flash 与 p0/deepseek-v4-flash 视为同一模型，仅上游不同
         const upstreams = [...new Set(list.map(m => (m.name.split('/')[0] || "默认")))];
         const kc = keys.filter(k => list.some(mm => mm.id === k.model_id)).length;
-        countLabel = '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + list.length + ' 个上游</span>';
-        extra = '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + upstreams.map(u => esc(u)).join(' · ') + '</span>' +
-          '<span style="color:var(--text-subtle);font-weight:400;margin-left:8px">' + kc + ' 个 Key</span>';
+        const upStr = esc(upstreams.join(' · '));
+        meta = '<span class="group-meta">' +
+          '<span class="pill"><strong>' + list.length + '</strong> 个上游</span>' +
+          (upstreams.length ? '<span class="pill" title="' + upStr + '">' + upStr + '</span>' : '') +
+          '<span class="pill"><strong>' + kc + '</strong> 个 Key</span>' +
+          '</span>';
       }
       let addBtn = "";
       if (modelGroupMode === "upstream") {
         const gprefix = (list[0].name.split('/')[0] || "") + "/";
-        addBtn = ' <button class="btn small primary" style="margin-left:12px" data-prefix="' + esc(gprefix) + '" data-up="' + esc(gkey) + '" onclick="event.stopPropagation();addModelToGroupBtn(this)">+ 添加模型</button>';
+        addBtn = '<button class="btn small primary" style="margin-left:auto;flex-shrink:0" data-prefix="' + esc(gprefix) + '" data-up="' + esc(gkey) + '" onclick="event.stopPropagation();addModelToGroupBtn(this)">+ 添加模型</button>';
       }
       html += '<tr class="group-header" onclick="toggleModelGroup(' + idx + ')">' +
-        '<td colspan="10"><span style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
-        '<strong>' + esc(gkey) + '</strong>' + countLabel + extra + addBtn + '</td></tr>';
+        '<td colspan="10"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">' +
+        '<span style="display:inline-flex;align-items:center;gap:8px;min-width:0">' +
+        '<span style="display:inline-block;width:16px;color:var(--text-muted);flex-shrink:0">' + arrow + '</span>' +
+        '<strong style="min-width:0">' + esc(gkey) + '</strong></span>' + meta + addBtn + '</div></td></tr>';
       if (!isCollapsed) html += list.map(m => modelRow(m)).join("");
     });
   }
@@ -682,11 +709,13 @@ function renderModelTable() {
     const fbCollapsed = localStorage.getItem("fbModelsCollapsed") !== "0";
     const arrow = fbCollapsed ? "\u25b6" : "\u25bc";
     html += '<tr class="group-header" onclick="toggleFbModels()">' +
-      '<td colspan="10"><span style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
-      '<span class="tag fallback">兜底</span> <strong>内置兜底模型</strong>' +
-      '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + fbMatch.length + ' 个</span>' +
-      '<span style="float:right;color:var(--text-subtle);font-weight:400;font-size:12px">OpenCode Free 自动同步</span>' +
-      '</td></tr>';
+      '<td colspan="10"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">' +
+      '<span style="display:inline-flex;align-items:center;gap:8px;min-width:0">' +
+      '<span style="display:inline-block;width:16px;color:var(--text-muted);flex-shrink:0">' + arrow + '</span>' +
+      '<span class="tag fallback">兜底</span> <strong>内置兜底模型</strong></span>' +
+      '<span class="group-meta"><span class="pill"><strong>' + fbMatch.length + '</strong> 个</span></span>' +
+      '<span style="margin-left:auto;color:var(--text-subtle);font-size:12px;white-space:nowrap">OpenCode Free 自动同步</span>' +
+      '</div></td></tr>';
     if (!fbCollapsed) {
       html += fbMatch.map(m => modelRow(m, true)).join("");
     }
