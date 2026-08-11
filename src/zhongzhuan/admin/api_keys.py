@@ -294,7 +294,9 @@ def register_routes(app: web.Application, ctx) -> None:
 
         # 思考等级探针：仅「首次」连通性测试时探测并落库到 model 行，
         # 之后(已记录 reasoning_effort_map)不再重复探测(M013 自动探测, 静默执行)。
-        already_probed = _already_probed(model)
+        # 带 ?reprobe=1 时无论是否已探测都强制重新探测(后台「重新探测」按钮用)。
+        reprobe = request.query.get("reprobe", "0").lower() in ("1", "true", "yes")
+        already_probed = _already_probed(model) and not reprobe
         t0 = time.time()
         try:
             if already_probed:

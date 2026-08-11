@@ -982,7 +982,7 @@ async function loadKeys() {
               '<td>' + k.priority + '</td>' +
               '<td>' + (k.enabled? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否') + '</td>' +
               '<td>' + connCell + '</td>' +
-              '<td><button class="btn small" onclick="testKey(' + k.id + ')">测试</button> <button class="btn small danger" onclick="delKey(' + k.id + ')">删除</button></td>' +
+              '<td><button class="btn small" onclick="testKey(' + k.id + ')">测试</button> <button class="btn small" onclick="reprobeKey(' + k.id + ')">重探</button> <button class="btn small danger" onclick="delKey(' + k.id + ')">删除</button></td>' +
             '</tr>');
         }
       }
@@ -1004,20 +1004,27 @@ async function delKey(id) {
   if (r !== null) loadKeys();
 }
 
-async function testKey(id) {
+async function testKey(id, reprobe=false) {
   const btn = event?.target;
+  const origText = btn ? btn.textContent : "";
   if (btn) { btn.disabled = true; btn.textContent = "测试中..."; }
-  const r = await api("/api/keys/" + id + "/test", {method:"POST"});
-  if (btn) { btn.disabled = false; btn.textContent = "测试"; }
+  const url = "/api/keys/" + id + "/test" + (reprobe ? "?reprobe=1" : "");
+  const r = await api(url, {method:"POST"});
+  if (btn) { btn.disabled = false; btn.textContent = origText; }
   if (!r) return;
   testResults[id] = {ok: r.ok, latency: r.latency_ms, error: r.error};
   loadKeys();
   // 显示详情（思考等级由系统静默自动探测, 此处不展示）
+  const prefix = reprobe ? "重新探测" : "连通性测试";
   if (r.ok) {
-    alert("连通性测试通过\\n\\n模型: " + r.model + "\\n延迟: " + r.latency_ms + "ms\\nURL: " + r.url);
+    alert(prefix + "通过\\n\\n模型: " + r.model + "\\n延迟: " + r.latency_ms + "ms\\nURL: " + r.url);
   } else {
-    alert("连通性测试失败\\n\\n状态码: " + r.status + "\\n错误: " + r.error + "\\nURL: " + r.url);
+    alert(prefix + "失败\\n\\n状态码: " + r.status + "\\n错误: " + r.error + "\\nURL: " + r.url);
   }
+}
+
+async function reprobeKey(id) {
+  await testKey(id, true);
 }
 
 async function testAllKeys() {
