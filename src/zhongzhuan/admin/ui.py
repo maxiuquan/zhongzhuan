@@ -291,21 +291,23 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
               <button class="btn primary" onclick="showModelModal()">+ 添加模型</button>
             </div>
           </div>
+          <div style="overflow-x:auto;margin:0 -20px;padding:0 20px">
           <table>
             <colgroup>
-              <col style="min-width:170px">
+              <col style="min-width:230px">
               <col style="min-width:240px">
-              <col style="min-width:160px">
+              <col style="min-width:180px">
               <col style="min-width:65px">
               <col style="min-width:60px">
               <col style="min-width:70px">
               <col style="min-width:140px">
-              <col style="min-width:85px">
+              <col style="min-width:90px">
               <col style="min-width:65px">
               <col style="min-width:105px">
             </colgroup>
             <thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>别名</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>
           <tbody id="modelTable"></tbody></table>
+          </div>
         </div>
       </div>
 
