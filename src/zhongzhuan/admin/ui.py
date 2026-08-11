@@ -643,9 +643,9 @@ function renderModelTable() {
         ? (m.upstream_tag || "未标记")
         : modelGroupMode === "upstream"
           ? (m.upstream_base || "未设置上游")
-          : modelGroupMode === "model"
-            ? m.name
-            : (m.name.split(/[-\/]/)[0] || m.name);
+        : modelGroupMode === "model"
+          ? (m.name.split('/').slice(1).join('/') || m.name)
+          : (m.name.split(/[-\/]/)[0] || m.name);
       if (!groupsMap.has(key)) groupsMap.set(key, []);
       groupsMap.get(key).push(m);
     }
@@ -659,10 +659,11 @@ function renderModelTable() {
       let countLabel = '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + list.length + ' 个模型</span>';
       let extra = "";
       if (modelGroupMode === "model") {
-        const m0 = list[0];
-        const kc = keys.filter(k => k.model_id === m0.id).length;
-        countLabel = "";
-        extra = '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + esc(m0.upstream_base || "") + '</span>' +
+        // 按「模型名」聚合：amd/deepseek-v4-flash 与 p0/deepseek-v4-flash 视为同一模型，仅上游不同
+        const upstreams = [...new Set(list.map(m => (m.name.split('/')[0] || "默认")))];
+        const kc = keys.filter(k => list.some(mm => mm.id === k.model_id)).length;
+        countLabel = '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + list.length + ' 个上游</span>';
+        extra = '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + upstreams.map(u => esc(u)).join(' · ') + '</span>' +
           '<span style="color:var(--text-subtle);font-weight:400;margin-left:8px">' + kc + ' 个 Key</span>';
       }
       html += '<tr class="group-header" onclick="toggleModelGroup(' + idx + ')">' +
