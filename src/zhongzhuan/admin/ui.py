@@ -268,7 +268,15 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
         <div class="card">
           <div class="card-header">
             <h2>模型列表</h2>
-            <div class="actions"><button class="btn primary" onclick="showModelModal()">+ 添加模型</button></div>
+            <div class="actions">
+              <label style="font-size:12px;color:var(--text-subtle);margin-right:2px">分组</label>
+              <select id="modelGroupMode" onchange="modelGroupMode=this.value;localStorage.setItem('modelGroupMode',modelGroupMode);loadModels()" style="margin-right:8px">
+                <option value="prefix">按前缀</option>
+                <option value="tag">按上游标签</option>
+                <option value="none">不分组</option>
+              </select>
+              <button class="btn primary" onclick="showModelModal()">+ 添加模型</button>
+            </div>
           </div>
           <table><thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>别名</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>
           <tbody id="modelTable"></tbody></table>
@@ -363,6 +371,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
 <script>
 const API = "";
 let models = [], keys = [], groups = [], authToken = localStorage.getItem("zhongzhuan_token") || "";
+let modelGroupMode = localStorage.getItem("modelGroupMode") || "prefix";
 let loading = 0;
 let charts = {};
 let testResults = {}; // key_id -> {ok, latency, error}
@@ -574,24 +583,44 @@ async function loadModels() {
   await ensurePresetOptions();
   const d = await api("/api/models");
   models = d?.data || [];
+  const sel = document.getElementById("modelGroupMode");
+  if (sel) sel.value = modelGroupMode;
+
   // 自定义模型在前，兜底模型分组永远在最后，且默认折叠
   const custom = models.filter(m => !m.is_fallback);
   const fb = models.filter(m => m.is_fallback);
-  const fbCollapsed = localStorage.getItem("fbModelsCollapsed") !== "0";
-  const arrow = fbCollapsed ? "\u25b6" : "\u25bc";
+
   let html = "";
-  if (custom.length > 0) {
-    html += custom.map(m => `
-      <tr><td><strong>${esc(m.name)}</strong>${presetBadge(m)}</td><td>${esc(m.upstream_base)}</td><td>${esc(m.upstream_model)}</td>
-      <td><code>${m.protocol||"openai"}</code></td>
-      <td>${m.rpm_limit||"不限"}</td><td>${m.tpm_limit||"不限"}</td>
-      <td>${m.aliases? '<code>'+esc(m.aliases)+'</code>' : '<span style="color:var(--text-subtle)">-</span>'}</td>
-      <td><span class="tag custom">自定义</span></td>
-      <td>${m.enabled? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否'}</td>
-      <td><button class="btn small" onclick="editModel(${m.id})">编辑</button> <button class="btn small danger" onclick="delModel(${m.id})">删除</button></td></tr>`).join("");
+  if (modelGroupMode === "none") {
+    html += custom.map(m => modelRow(m)).join("");
+  } else {
+    // 按前缀(默认)或按上游标签聚合为可折叠分组
+    const groupsMap = new Map();
+    for (const m of custom) {
+      const key = modelGroupMode === "tag"
+        ? (m.upstream_tag || "未标记")
+        : (m.name.split(/[-\/]/)[0] || m.name);
+      if (!groupsMap.has(key)) groupsMap.set(key, []);
+      groupsMap.get(key).push(m);
+    }
+    const keysSorted = [...groupsMap.keys()].sort((a, b) => a.localeCompare(b));
+    const collapsed = JSON.parse(localStorage.getItem("modelGroupCollapsed") || "{}");
+    for (const gkey of keysSorted) {
+      const list = groupsMap.get(gkey);
+      const isCollapsed = !!collapsed[gkey];
+      const arrow = isCollapsed ? "\u25b6" : "\u25bc";
+      html += '<tr class="group-header" onclick="toggleModelGroup(' + JSON.stringify(gkey) + ')">' +
+        '<td colspan="10"><span style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
+        '<strong>' + esc(gkey) + '</strong>' +
+        '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + list.length + ' 个模型</span></td></tr>';
+      if (!isCollapsed) html += list.map(m => modelRow(m)).join("");
+    }
   }
+
   // 兜底模型分组（永远在最后，可折叠）
   if (fb.length > 0) {
+    const fbCollapsed = localStorage.getItem("fbModelsCollapsed") !== "0";
+    const arrow = fbCollapsed ? "\u25b6" : "\u25bc";
     html += '<tr class="group-header" onclick="toggleFbModels()">' +
       '<td colspan="10"><span style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
       '<span class="tag fallback">兜底</span> <strong>内置兜底模型</strong>' +
@@ -599,17 +628,47 @@ async function loadModels() {
       '<span style="float:right;color:var(--text-subtle);font-weight:400;font-size:12px">OpenCode Free 自动同步</span>' +
       '</td></tr>';
     if (!fbCollapsed) {
-      html += fb.map(m => `
-      <tr><td><strong>${esc(m.name)}</strong></td><td>${esc(m.upstream_base)}</td><td>${esc(m.upstream_model)}</td>
-      <td><code>${m.protocol||"openai"}</code></td>
-      <td>${m.rpm_limit||"不限"}</td><td>${m.tpm_limit||"不限"}</td>
-      <td>${m.aliases? '<code>'+esc(m.aliases)+'</code>' : '<span style="color:var(--text-subtle)">-</span>'}</td>
-      <td><span class="tag fallback">兜底</span></td>
-      <td>${m.enabled? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否'}</td>
-      <td><button class="btn small" onclick="editModel(${m.id})">编辑</button></td></tr>`).join("");
+      html += fb.map(m => modelRow(m, true)).join("");
     }
   }
   document.getElementById("modelTable").innerHTML = html || '<tr><td colspan="10" class="empty">还没有模型,点击右上角添加</td></tr>';
+}
+
+// 单个模型行（isFb=true 时类型列显示「兜底」而非「自定义」，且不显示编辑/删除）
+function modelRow(m, isFb) {
+  const noteIco = m.note ? ' <span title="' + esc(m.note) + '" style="cursor:help">&#128221;</span>' : '';
+  const typeCell = isFb ? '<span class="tag fallback">兜底</span>'
+    : '<span class="tag custom">自定义</span>';
+  const actions = isFb
+    ? '<button class="btn small" onclick="editModel(' + m.id + ')">编辑</button>'
+    : '<button class="btn small" onclick="editModel(' + m.id + ')">编辑</button> <button class="btn small danger" onclick="delModel(' + m.id + ')">删除</button>';
+  return '<tr><td><strong>' + esc(m.name) + '</strong>' + presetBadge(m) + tagBadge(m) + noteIco + '</td>' +
+    '<td>' + esc(m.upstream_base) + '</td>' +
+    '<td>' + esc(m.upstream_model) + '</td>' +
+    '<td><code>' + (m.protocol || "openai") + '</code></td>' +
+    '<td>' + (m.rpm_limit || "不限") + '</td>' +
+    '<td>' + (m.tpm_limit || "不限") + '</td>' +
+    '<td>' + (m.aliases ? '<code>' + esc(m.aliases) + '</code>' : '<span style="color:var(--text-subtle)">-</span>') + '</td>' +
+    '<td>' + typeCell + '</td>' +
+    '<td>' + (m.enabled ? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否') + '</td>' +
+    '<td>' + actions + '</td></tr>';
+}
+
+// 上游标签徽章：官方=蓝, 中转站=橙, 其他(自定义)=灰
+function tagBadge(m) {
+  if (!m.upstream_tag) return '';
+  const t = m.upstream_tag;
+  let bg = 'rgba(100,116,139,0.15)', color = '#64748b';
+  if (t === '官方') { bg = 'rgba(59,130,246,0.15)'; color = '#60a5fa'; }
+  else if (t === '中转站') { bg = 'rgba(245,158,11,0.15)'; color = '#f59e0b'; }
+  return ' <span class="tag" style="background:' + bg + ';color:' + color + '">' + esc(t) + '</span>';
+}
+
+function toggleModelGroup(gkey) {
+  const collapsed = JSON.parse(localStorage.getItem("modelGroupCollapsed") || "{}");
+  collapsed[gkey] = !collapsed[gkey];
+  localStorage.setItem("modelGroupCollapsed", JSON.stringify(collapsed));
+  loadModels();
 }
 
 function toggleFbModels() {
@@ -674,7 +733,7 @@ function showModelModal(model) {
   // 下拉选项：头"不模拟" + 中间内置预设(按 list_presets 顺序) + 尾"自定义"
   const presetOpts = ['<option value=""' + (preset === "" ? " selected" : "") + '>不模拟</option>']
     .concat(clientPresetOptions.map(p => '<option value="' + esc(p.key) + '"' + (preset === p.key ? " selected" : "") + '>' + esc(p.label) + '</option>'))
-    .concat(['<option value="custom"' + (preset === "custom" ? " selected" : "") + '>自定义</option>']);
+      .concat(['<option value="custom"' + (preset === "custom" ? " selected" : "") + '>自定义</option>']);
 
   // 自定义头初始行：编辑模式解析 model.custom_headers, 否则两空行
   let customRows = [];
@@ -682,6 +741,14 @@ function showModelModal(model) {
     try { customRows = JSON.parse(model.custom_headers) || []; } catch (e) { customRows = []; }
   }
   if (customRows.length === 0) customRows = [{name:"", value:""}, {name:"", value:""}];
+
+  const tag = isEdit ? (model.upstream_tag || "") : "";
+  const isPresetTag = tag === "官方" || tag === "中转站";
+  const tagOpts = [
+    '<option value="官方"' + ((!isEdit || tag === "官方") ? " selected" : "") + '>官方</option>',
+    '<option value="中转站"' + ((isEdit && tag === "中转站") ? " selected" : "") + '>中转站</option>',
+    '<option value="__custom__"' + ((isEdit && tag !== "" && !isPresetTag) ? " selected" : "") + '>自定义</option>',
+  ].join("");
 
   document.getElementById("modalContent").innerHTML = `
     <h3>${isEdit ? "编辑模型" : "添加模型"}</h3>
@@ -692,6 +759,11 @@ function showModelModal(model) {
     </div>
     <div class="form-group"><label>上游完整地址覆盖 <span style="color:var(--text-subtle)">(留空自动拼接,可填路径或完整URL)</span></label><input id="f_upstream_path_override" placeholder="/openai/v1/chat/completions" value="${isEdit ? esc(model.upstream_path_override||"") : ""}"></div>
     <div class="form-group"><label>模型别名 <span style="color:var(--text-subtle)">(逗号分隔,客户端用别名请求时也会路由到此模型)</span></label><input id="f_aliases" placeholder="gpt-4, gpt4, chatgpt" value="${isEdit ? esc(model.aliases||"") : ""}"></div>
+    <div class="form-row">
+      <div class="form-group"><label>上游标签 <span style="color:var(--text-subtle)">(官方 / 中转站 / 自定义,用于备注与分组)</span></label><select id="f_upstream_tag" onchange="toggleUpstreamTag()">${tagOpts}</select></div>
+      <div class="form-group"><label>备注</label><input id="f_note" placeholder="例如: 主账号,限额高" value="${isEdit ? esc(model.note||"") : ""}"></div>
+    </div>
+    <div class="form-group" id="f_tag_custom_wrap" style="display:none"><label>自定义标签</label><input id="f_tag_custom" placeholder="例如: 备用渠道A" value="${isEdit && !isPresetTag && tag ? esc(tag) : ""}"></div>
     <div class="form-row-3">
       <div class="form-group"><label>上游协议</label><select id="f_protocol"><option value="openai" ${isEdit && model.protocol === "openai" ? "selected" : ""}>OpenAI</option><option value="anthropic" ${isEdit && model.protocol === "anthropic" ? "selected" : ""}>Anthropic</option><option value="responses" ${isEdit && model.protocol === "responses" ? "selected" : ""}>Responses</option></select></div>
       <div class="form-group"><label>RPM 限制</label><input id="f_rpm" type="number" value="${isEdit ? model.rpm_limit : 0}"></div>
@@ -712,12 +784,13 @@ function showModelModal(model) {
     </div>
     <div class="form-group"><label>启用</label><select id="f_enabled"><option value="1" ${isEdit && model.enabled ? "selected" : ""}>是</option><option value="0" ${isEdit && !model.enabled ? "selected" : ""}>否</option></select></div>
     <div class="form-group"><label>上游支持 reasoning_effort <span style="color:var(--text-subtle)">(上游不兼容该参数时报 400 时关闭；关闭后代理自动剥除，请求照常通过)</span></label><select id="f_supports_reasoning_effort"><option value="1" ${(!isEdit || model.supports_reasoning_effort) ? "selected" : ""}>是（默认）</option><option value="0" ${isEdit && !model.supports_reasoning_effort ? "selected" : ""}>否</option></select></div>
-    <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveModel(${isEdit ? model.id : ""})">保存</button></div>`;
+    <div class="modal-actions">${isEdit ? '<button class="btn" onclick="showKeyModal(' + model.id + ')">添加 Key</button>' : ''}<button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveModel(${isEdit ? model.id : ""})">保存</button></div>`;
   document.getElementById("modal").classList.add("show");
 
   // 渲染自定义头初始行 + 触发条件展示
   renderCustomHeaderRows(customRows);
   toggleClientPreset();
+  toggleUpstreamTag();
 }
 
 function renderCustomHeaderRows(rows) {
@@ -781,6 +854,13 @@ function toggleClientPreset() {
   }
 }
 
+function toggleUpstreamTag() {
+  const sel = document.getElementById("f_upstream_tag");
+  if (!sel) return;
+  const wrap = document.getElementById("f_tag_custom_wrap");
+  if (wrap) wrap.style.display = (sel.value === "__custom__") ? "block" : "none";
+}
+
 function editModel(id) {
   const m = models.find(x => x.id === id);
   if (m) showModelModal(m);
@@ -805,6 +885,9 @@ async function saveModel(id) {
     const m = models.find(x => x.id === id);
     if (m) customHeadersJson = m.custom_headers || "";
   }
+  const tagSel = document.getElementById("f_upstream_tag").value;
+  const upstream_tag = tagSel === "__custom__" ? (document.getElementById("f_tag_custom").value.trim() || "自定义") : tagSel;
+  const note = document.getElementById("f_note").value.trim();
   const body = {
     name: document.getElementById("f_name").value.trim(),
     upstream_base: document.getElementById("f_upstream_base").value.trim(),
@@ -818,6 +901,8 @@ async function saveModel(id) {
     client_preset: clientPreset,
     custom_headers: customHeadersJson,
     supports_reasoning_effort: document.getElementById("f_supports_reasoning_effort").value === "1",
+    upstream_tag: upstream_tag,
+    note: note,
   };
   if (!body.name || !body.upstream_base) { alert("名称和上游地址不能为空"); return; }
   let r;
@@ -864,7 +949,8 @@ async function loadKeys() {
           '<span class="kg-arrow" style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
           esc(m.name) +
           '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + g.keys.length + ' 个 Key</span>' +
-          '<span style="float:right;color:var(--text-subtle);font-weight:400;font-size:12px">' + esc(m.upstream_base||"") + ' · ' + esc(m.upstream_model||"") + '</span>' +
+          '<span style="float:right;color:var(--text-subtle);font-weight:400;font-size:12px">' + esc(m.upstream_base||"") + ' · ' + esc(m.upstream_model||"") +
+          '<button class="btn small primary" style="margin-left:8px" onclick="event.stopPropagation();showKeyModal(' + mid + ')">+ 添加 Key</button></span>' +
         '</td></tr>');
     if (!isCollapsed) {
       if (g.keys.length === 0) {
@@ -941,12 +1027,12 @@ async function testAllKeys() {
   alert("测试完成\\n\\n成功: " + okCount + " 个\\n失败: " + failCount + " 个");
 }
 
-function showKeyModal() {
+function showKeyModal(presetModelId) {
   // 兜底模型是内置模型，不给它们添加 Key
-  const opts = models.filter(m => !m.is_fallback).map(m => '<option value="' + m.id + '">' + esc(m.name) + '</option>').join("");
+  const opts = models.filter(m => !m.is_fallback).map(m => '<option value="' + m.id + '"' + (presetModelId && m.id === presetModelId ? ' selected' : '') + '>' + esc(m.name) + '</option>').join("");
   document.getElementById("modalContent").innerHTML = `
     <h3>添加 Key</h3>
-    <div class="form-group"><label>模型</label><select id="f_model_id">${opts}</select></div>
+    <div class="form-group"><label>模型</label><select id="f_model_id" ${presetModelId ? 'disabled' : ''}>${opts}</select></div>
     <div class="form-group"><label>标签</label><input id="f_label" placeholder="例如:主账号"></div>
     <div class="form-group"><label>Key 值</label><input id="f_key_value" type="password" placeholder="sk-..."></div>
     <div class="form-group"><label>优先级</label><input id="f_priority" type="number" value="0"><div class="form-hint">数字越大优先级越高</div></div>

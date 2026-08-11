@@ -88,6 +88,8 @@ def _payload_to_model(data: dict) -> Model:
         custom_headers=data.get("custom_headers", ""),
         exposed=bool(data.get("exposed", True)),
         supports_reasoning_effort=bool(data.get("supports_reasoning_effort", True)),
+        upstream_tag=data.get("upstream_tag", ""),
+        note=data.get("note", ""),
     )
 
 
@@ -148,6 +150,8 @@ def _to_dict(m: Model) -> dict:
         "custom_headers": m.custom_headers,
         "exposed": m.exposed,
         "supports_reasoning_effort": m.supports_reasoning_effort,
+        "upstream_tag": m.upstream_tag,
+        "note": m.note,
         "created_at": m.created_at,
         "updated_at": m.updated_at,
     }
