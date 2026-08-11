@@ -85,6 +85,9 @@ body{
 .tab.active{display:block}
 /* ---- 卡片 / 表格 ---- */
 .card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;margin-bottom:16px;box-shadow:var(--shadow)}
+/* 兜底上游卡片：整体收紧 */
+#fallbackCard{padding:14px 16px;margin-bottom:12px}
+#fallbackCard .card-header{margin-bottom:10px}
 .card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;gap:16px}
 .card-header h2{font-size:14px;color:var(--text);font-weight:600;white-space:nowrap}
 .card-header .actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
@@ -268,7 +271,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
       <div class="tab" id="tab-models">
         <div class="card" id="fallbackCard">
           <div class="card-header"><h2>兜底上游（OpenCode Free）</h2></div>
-          <div style="display:flex;gap:24px;align-items:center;flex-wrap:wrap">
+          <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
             <div class="form-group" style="margin:0">
               <label>启用兜底上游</label>
               <select id="fbEnabled" style="width:80px"><option value="1">是</option><option value="0">否</option></select>
@@ -280,7 +283,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
             <button class="btn primary" onclick="saveFallbackConfig()">保存配置</button>
             <button class="btn" id="refreshFallbackBtn" onclick="refreshFallback()">刷新兜底模型</button>
           </div>
-          <div id="fbInfo" style="margin-top:12px;color:var(--text-muted);font-size:12px"></div>
+          <div id="fbInfo" style="margin-top:8px;color:var(--text-muted);font-size:12px"></div>
         </div>
         <div class="card">
           <div class="card-header">
@@ -671,7 +674,7 @@ function renderModelTable() {
       const key = modelGroupMode === "tag"
         ? (m.upstream_tag || "未标记")
         : modelGroupMode === "upstream"
-          ? (m.upstream_base || "未设置上游")
+          ? (m.name.split('/')[0] || "未设置上游")
         : modelGroupMode === "model"
           ? (m.name.split('/').slice(1).join('/') || m.name)
           : (m.name.split(/[-\/]/)[0] || m.name);
@@ -700,7 +703,7 @@ function renderModelTable() {
       let addBtn = "";
       if (modelGroupMode === "upstream") {
         const gprefix = (list[0].name.split('/')[0] || "") + "/";
-        addBtn = '<button class="btn small primary" style="margin-left:auto;flex-shrink:0" data-prefix="' + esc(gprefix) + '" data-up="' + esc(gkey) + '" onclick="event.stopPropagation();addModelToGroupBtn(this)">+ 添加模型</button>';
+        addBtn = '<button class="btn small primary" style="margin-left:14px;flex-shrink:0" data-prefix="' + esc(gprefix) + '" data-up="' + esc(list[0].upstream_base || "") + '" onclick="event.stopPropagation();addModelToGroupBtn(this)">+ 添加模型</button>';
       }
       html += '<tr class="group-header" onclick="toggleModelGroup(' + idx + ')">' +
         '<td colspan="10"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">' +
