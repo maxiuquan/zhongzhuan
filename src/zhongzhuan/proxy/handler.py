@@ -133,6 +133,32 @@ def _looks_like_reasoning_effort_error(data: bytes) -> bool:
     return any(marker in text for marker in _RE_UNSUPPORTED_MARKERS)
 
 
+def _clean_upstream_failure(status_code: int, body: bytes, headers: dict | None):
+    """If the upstream answered with a Cloudflare challenge page, do NOT forward
+    the HTML interstitial to the client.  Return a clean, parseable JSON 502 so
+    downstream clients (Codex / SDKs) get a proper error instead of garbage.
+
+    Returns ``(status, body, content_type)`` — unchanged unless it's a
+    Cloudflare block, in which case ``(502, json_bytes, "application/json")``.
+    """
+    if looks_like_cloudflare_block(status_code, headers or {}, body or b""):
+        payload = json.dumps(
+            {
+                "error": {
+                    "message": (
+                        "upstream endpoint is behind a Cloudflare challenge "
+                        "and could not be reached"
+                    ),
+                    "type": "upstream_blocked",
+                    "code": "cloudflare_challenge",
+                }
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return 502, payload, "application/json"
+    return status_code, body, (headers or {}).get("content_type") or "application/json"
+
+
 def _reasoning_effort_blocked_for(key) -> bool:
     return (key.upstream_base, key.upstream_model) in _RE_BLOCKED
 
@@ -405,6 +431,7 @@ from .retry import (
     mark_empty_response,
     learn_rate_limits,
     classify_failure,
+    looks_like_cloudflare_block,
     reason_for_exhaustion,
 )
 from .scheduler import pick_key
@@ -1452,10 +1479,13 @@ class ProxyHandler:
                 f"status={last_upstream_status} body={last_upstream_body[:300]!r}"
             )
             await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
+            clean_status, clean_body, clean_ctype = _clean_upstream_failure(
+                last_upstream_status, last_upstream_body, None
+            )
             return web.Response(
-                status=last_upstream_status,
-                body=last_upstream_body,
-                content_type="application/json",
+                status=clean_status,
+                body=clean_body,
+                content_type=clean_ctype,
             )
         if last_reason:
             code, detail = "upstream_unavailable", f" (last terminal_reason={last_reason})"
@@ -3048,7 +3078,8 @@ class ProxyHandler:
                     # Other 4xx are request-side errors → return to client.
                     if should_retry:
                         continue
-                    return web.Response(status=status, body=body)
+                    clean_status, clean_body, clean_ctype = _clean_upstream_failure(status, body, resp_headers)
+                    return web.Response(status=clean_status, body=clean_body, content_type=clean_ctype or "application/json")
 
                 # Translate response body if needed
                 _process_start = time.time()
@@ -3390,10 +3421,11 @@ class ProxyHandler:
                                         protocol_override = "openai"
                                         break
                                     # 请求侧错误（如 400/404/422）：不换 key，直接返回错误。
+                                    clean_status, clean_body, clean_ctype = _clean_upstream_failure(_st, err_body, _up_headers)
                                     return web.Response(
-                                        status=_st,
-                                        body=err_body,
-                                        content_type="application/json",
+                                        status=clean_status,
+                                        body=clean_body,
+                                        content_type=clean_ctype,
                                     )
                                 # 可重试类错误：换下一个 key 重试
                                 break

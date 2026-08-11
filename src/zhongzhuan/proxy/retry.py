@@ -167,12 +167,53 @@ def learn_rate_limits(k: KeyHealth, headers: dict, status: int) -> None:
             pass
 
 
+_CLOUDFLARE_BODY_MARKERS = (
+    b"cloudflare",
+    b"cf-chl",
+    b"just a moment",
+    b"checking your browser",
+    b"_cf_chl",
+    b"cf-ray",
+    b"attack-scanner",
+)
+
+
+def looks_like_cloudflare_block(status_code: int, headers: dict, body: bytes = b"") -> bool:
+    """Detect a Cloudflare challenge / interstitial page.
+
+    Cloudflare often answers API calls with HTTP 403 (or 503) and an HTML
+    "Just a moment" / "Checking your browser" page instead of JSON.  Treating
+    that as a normal 403-auth failure wrongly cools the key for an hour, and
+    forwarding the HTML to downstream clients yields unparseable garbage.
+    """
+    h = _lower_headers(headers or {})
+    if "cloudflare" in (h.get("server") or ""):
+        return True
+    if "cf-ray" in h or "cf-mitigated" in h:
+        return True
+    ctype = h.get("content-type") or ""
+    if "text/html" in ctype and status_code in (403, 503, 429):
+        return True
+    low = (body or b"")[:4096].lower()
+    if any(m in low for m in _CLOUDFLARE_BODY_MARKERS):
+        return True
+    return False
+
+
 def classify_failure(k: KeyHealth, status_code: int, headers: dict) -> bool:
     """根据上游状态码分类失败并更新 key 健康状态（优化点2：消除 handler 重复逻辑）。
 
     返回 True 表示可重试（应换下一个 key），False 表示请求侧错误（应直接返回客户端）。
     """
     if status_code in (401, 403):
+        # A 403 originating from behind Cloudflare is a challenge page, not a
+        # key-credential failure: retrying other keys on the same protected
+        # upstream is futile, but classifying it as a server error lets
+        # failover to an alternative upstream (e.g. a non-Cloudflare 中转站)
+        # kick in, and avoids poisoning the key with a 1h auth cooldown.
+        if status_code == 403 and looks_like_cloudflare_block(status_code, headers):
+            mark_server_error(k)
+            return True
         mark_auth_failure(k)
         return True
     if status_code == 429:

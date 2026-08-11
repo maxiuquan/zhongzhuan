@@ -270,11 +270,12 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
             <h2>模型列表</h2>
             <div class="actions">
               <label style="font-size:12px;color:var(--text-subtle);margin-right:2px">分组</label>
-              <select id="modelGroupMode" onchange="modelGroupMode=this.value;localStorage.setItem('modelGroupMode',modelGroupMode);loadModels()" style="margin-right:8px">
+              <select id="modelGroupMode" onchange="modelGroupMode=this.value;localStorage.setItem('modelGroupMode',modelGroupMode);renderModelTable()" style="margin-right:8px">
                 <option value="prefix">按前缀</option>
                 <option value="tag">按上游标签</option>
                 <option value="none">不分组</option>
               </select>
+              <input id="modelSearch" type="text" placeholder="搜索模型名…" oninput="renderModelTable()" style="margin-right:8px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-width:160px">
               <button class="btn primary" onclick="showModelModal()">+ 添加模型</button>
             </div>
           </div>
@@ -370,7 +371,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
 
 <script>
 const API = "";
-let models = [], keys = [], groups = [], authToken = localStorage.getItem("zhongzhuan_token") || "";
+let models = [], keys = [], groups = [], _modelGroupOrder = [], authToken = localStorage.getItem("zhongzhuan_token") || "";
 let modelGroupMode = localStorage.getItem("modelGroupMode") || "prefix";
 let loading = 0;
 let charts = {};
@@ -585,18 +586,24 @@ async function loadModels() {
   models = d?.data || [];
   const sel = document.getElementById("modelGroupMode");
   if (sel) sel.value = modelGroupMode;
+  renderModelTable();
+}
 
-  // 自定义模型在前，兜底模型分组永远在最后，且默认折叠
+// 仅重新渲染表格（分组 / 折叠 / 搜索都走这里，不重新拉接口）
+function renderModelTable() {
   const custom = models.filter(m => !m.is_fallback);
   const fb = models.filter(m => m.is_fallback);
+  const term = (document.getElementById("modelSearch")?.value || "").trim().toLowerCase();
+  const matchName = (m) => !term || (m.name || "").toLowerCase().includes(term);
 
   let html = "";
   if (modelGroupMode === "none") {
-    html += custom.map(m => modelRow(m)).join("");
+    html += custom.filter(matchName).map(m => modelRow(m)).join("");
   } else {
     // 按前缀(默认)或按上游标签聚合为可折叠分组
     const groupsMap = new Map();
     for (const m of custom) {
+      if (!matchName(m)) continue;
       const key = modelGroupMode === "tag"
         ? (m.upstream_tag || "未标记")
         : (m.name.split(/[-\/]/)[0] || m.name);
@@ -604,34 +611,36 @@ async function loadModels() {
       groupsMap.get(key).push(m);
     }
     const keysSorted = [...groupsMap.keys()].sort((a, b) => a.localeCompare(b));
+    _modelGroupOrder = keysSorted;
     const collapsed = JSON.parse(localStorage.getItem("modelGroupCollapsed") || "{}");
-    for (const gkey of keysSorted) {
+    keysSorted.forEach((gkey, idx) => {
       const list = groupsMap.get(gkey);
       const isCollapsed = !!collapsed[gkey];
       const arrow = isCollapsed ? "\u25b6" : "\u25bc";
-      html += '<tr class="group-header" onclick="toggleModelGroup(' + JSON.stringify(gkey) + ')">' +
+      html += '<tr class="group-header" onclick="toggleModelGroup(' + idx + ')">' +
         '<td colspan="10"><span style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
         '<strong>' + esc(gkey) + '</strong>' +
         '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + list.length + ' 个模型</span></td></tr>';
       if (!isCollapsed) html += list.map(m => modelRow(m)).join("");
-    }
+    });
   }
 
   // 兜底模型分组（永远在最后，可折叠）
-  if (fb.length > 0) {
+  const fbMatch = fb.filter(matchName);
+  if (fbMatch.length > 0) {
     const fbCollapsed = localStorage.getItem("fbModelsCollapsed") !== "0";
     const arrow = fbCollapsed ? "\u25b6" : "\u25bc";
     html += '<tr class="group-header" onclick="toggleFbModels()">' +
       '<td colspan="10"><span style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
       '<span class="tag fallback">兜底</span> <strong>内置兜底模型</strong>' +
-      '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + fb.length + ' 个</span>' +
+      '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + fbMatch.length + ' 个</span>' +
       '<span style="float:right;color:var(--text-subtle);font-weight:400;font-size:12px">OpenCode Free 自动同步</span>' +
       '</td></tr>';
     if (!fbCollapsed) {
-      html += fb.map(m => modelRow(m, true)).join("");
+      html += fbMatch.map(m => modelRow(m, true)).join("");
     }
   }
-  document.getElementById("modelTable").innerHTML = html || '<tr><td colspan="10" class="empty">还没有模型,点击右上角添加</td></tr>';
+  document.getElementById("modelTable").innerHTML = html || '<tr><td colspan="10" class="empty">' + (term ? '没有匹配的模型' : '还没有模型,点击右上角添加') + '</td></tr>';
 }
 
 // 单个模型行（isFb=true 时类型列显示「兜底」而非「自定义」，且不显示编辑/删除）
@@ -664,18 +673,20 @@ function tagBadge(m) {
   return ' <span class="tag" style="background:' + bg + ';color:' + color + '">' + esc(t) + '</span>';
 }
 
-function toggleModelGroup(gkey) {
+function toggleModelGroup(idx) {
+  const gkey = _modelGroupOrder[idx];
+  if (!gkey) return;
   const collapsed = JSON.parse(localStorage.getItem("modelGroupCollapsed") || "{}");
   collapsed[gkey] = !collapsed[gkey];
   localStorage.setItem("modelGroupCollapsed", JSON.stringify(collapsed));
-  loadModels();
+  renderModelTable();
 }
 
 function toggleFbModels() {
   // 当前折叠则展开(0)，当前展开则折叠(1)
   const collapsed = localStorage.getItem("fbModelsCollapsed") !== "0";
   localStorage.setItem("fbModelsCollapsed", collapsed ? "0" : "1");
-  loadModels();
+  renderModelTable();
 }
 
 async function refreshFallback() {
