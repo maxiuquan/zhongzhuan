@@ -99,10 +99,11 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 .exp-row .tag{font-size:10px;padding:1px 6px;border-radius:10px;margin-left:6px}
 .exp-row .tag.fb{background:rgba(251,146,60,0.15);color:var(--orange)}
 .exp-row .tag.off{background:var(--bg-input);color:var(--text-subtle)}
-th{text-align:left;padding:10px 12px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:0.3px}
-td{padding:10px 12px;border-bottom:1px solid var(--border-muted)}
+th{text-align:left;padding:11px 14px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:0.3px}
+td{padding:11px 14px;border-bottom:1px solid var(--border-muted)}
 tr:hover td{background:var(--bg-hover)}
-tr.group-header td{background:var(--bg-subtle);font-weight:600;color:var(--accent);cursor:pointer;user-select:none}
+tr.group-header td{background:var(--bg-subtle);font-weight:600;color:var(--accent);cursor:pointer;user-select:none;padding:13px 16px;font-size:13.5px;letter-spacing:0.3px;border-top:2px solid var(--border);border-bottom:1px solid var(--border)}
+tr.group-header:hover td{background:#eaeef5}
 /* ---- 按钮 ---- */
 .btn{background:var(--bg-card);color:var(--text);border:1px solid var(--border);padding:6px 14px;border-radius:var(--radius);font-size:13px;cursor:pointer;font-family:inherit;transition:all 0.15s;display:inline-flex;align-items:center;gap:6px}
 .btn:hover{background:var(--bg-hover);border-color:#d1d5db}
@@ -271,11 +272,8 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
             <div class="actions">
               <label style="font-size:12px;color:var(--text-subtle);margin-right:2px">分组</label>
               <select id="modelGroupMode" onchange="modelGroupMode=this.value;localStorage.setItem('modelGroupMode',modelGroupMode);renderModelTable()" style="margin-right:8px">
-                <option value="prefix">按前缀</option>
-                <option value="tag">按上游标签</option>
                 <option value="upstream">按上游</option>
                 <option value="model">按模型</option>
-                <option value="none">不分组</option>
               </select>
               <input id="modelSearch" type="text" placeholder="搜索模型名…" oninput="renderModelTable()" style="margin-right:8px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-width:160px">
               <button class="btn primary" onclick="showModelModal()">+ 添加模型</button>
@@ -375,7 +373,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
 <script>
 const API = "";
 let models = [], keys = [], groups = [], _modelGroupOrder = [], authToken = localStorage.getItem("zhongzhuan_token") || "";
-let modelGroupMode = localStorage.getItem("modelGroupMode") || "prefix";
+let modelGroupMode = ["upstream","model"].includes(localStorage.getItem("modelGroupMode")) ? localStorage.getItem("modelGroupMode") : "upstream";
 let loading = 0;
 let charts = {};
 let testResults = {}; // key_id -> {ok, latency, error}
@@ -666,9 +664,14 @@ function renderModelTable() {
         extra = '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + upstreams.map(u => esc(u)).join(' · ') + '</span>' +
           '<span style="color:var(--text-subtle);font-weight:400;margin-left:8px">' + kc + ' 个 Key</span>';
       }
+      let addBtn = "";
+      if (modelGroupMode === "upstream") {
+        const gprefix = (list[0].name.split('/')[0] || "") + "/";
+        addBtn = ' <button class="btn small primary" style="margin-left:12px" data-prefix="' + esc(gprefix) + '" data-up="' + esc(gkey) + '" onclick="event.stopPropagation();addModelToGroupBtn(this)">+ 添加模型</button>';
+      }
       html += '<tr class="group-header" onclick="toggleModelGroup(' + idx + ')">' +
         '<td colspan="10"><span style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
-        '<strong>' + esc(gkey) + '</strong>' + countLabel + extra + '</td></tr>';
+        '<strong>' + esc(gkey) + '</strong>' + countLabel + extra + addBtn + '</td></tr>';
       if (!isCollapsed) html += list.map(m => modelRow(m)).join("");
     });
   }
@@ -786,7 +789,7 @@ async function delModel(id) {
   if (r !== null) loadModels();
 }
 
-function showModelModal(model) {
+function showModelModal(model, prefill) {
   const isEdit = !!model;
   const preset = isEdit ? (model.client_preset || "") : "";
   // 下拉选项：头"不模拟" + 中间内置预设(按 list_presets 顺序) + 尾"自定义"
@@ -811,9 +814,9 @@ function showModelModal(model) {
 
   document.getElementById("modalContent").innerHTML = `
     <h3>${isEdit ? "编辑模型" : "添加模型"}</h3>
-    <div class="form-group"><label>名称 <span style="color:var(--text-subtle)">(客户端请求时使用的模型名)</span></label><input id="f_name" value="${isEdit ? esc(model.name) : ""}"></div>
+    <div class="form-group"><label>名称 <span style="color:var(--text-subtle)">(客户端请求时使用的模型名)</span></label><input id="f_name" value="${isEdit ? esc(model.name) : (prefill && prefill.name ? esc(prefill.name) : "")}"></div>
     <div class="form-row">
-      <div class="form-group"><label>上游地址</label><input id="f_upstream_base" placeholder="https://api.openai.com/v1" value="${isEdit ? esc(model.upstream_base) : ""}"></div>
+      <div class="form-group"><label>上游地址</label><input id="f_upstream_base" placeholder="https://api.openai.com/v1" value="${isEdit ? esc(model.upstream_base) : (prefill && prefill.upstream_base ? esc(prefill.upstream_base) : "")}"></div>
       <div class="form-group"><label>上游模型名</label><input id="f_upstream_model" placeholder="gpt-4o" value="${isEdit ? esc(model.upstream_model) : ""}"></div>
     </div>
     <div class="form-group"><label>上游完整地址覆盖 <span style="color:var(--text-subtle)">(留空自动拼接,可填路径或完整URL)</span></label><input id="f_upstream_path_override" placeholder="/openai/v1/chat/completions" value="${isEdit ? esc(model.upstream_path_override||"") : ""}"></div>
@@ -918,6 +921,12 @@ function toggleUpstreamTag() {
   if (!sel) return;
   const wrap = document.getElementById("f_tag_custom_wrap");
   if (wrap) wrap.style.display = (sel.value === "__custom__") ? "block" : "none";
+}
+
+function addModelToGroupBtn(btn) {
+  const prefix = btn.getAttribute("data-prefix") || "";
+  const up = btn.getAttribute("data-up") || "";
+  showModelModal(null, { name: prefix, upstream_base: up });
 }
 
 function editModel(id) {
