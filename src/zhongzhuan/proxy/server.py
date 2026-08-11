@@ -328,7 +328,10 @@ class ProxyServer:
                         "id": r.get("id"),
                         "name": r.get("name"),
                         "strategy": r.get("strategy"),
-                        "members": [m["model_id"] for m in (r.get("members") or [])],
+                        "members": [
+                            {"model_id": m["model_id"], "weight": m.get("weight", 1), "ord": m.get("ord", 0)}
+                            for m in (r.get("members") or [])
+                        ],
                         # 仅用于 /v1/models 展示过滤；路由不看这个字段，
                         # 隐藏的分组依旧能被显式调用。
                         "exposed": int(r.get("exposed", 1) or 0),

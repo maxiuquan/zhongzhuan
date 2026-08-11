@@ -424,7 +424,12 @@ async def run_foreground(
             "id": g["id"],
             "name": g["name"],
             "strategy": g["strategy"],
-            "members": [m["model_id"] for m in (g.get("members") or [])],
+            # 保留 model_id/weight/ord 字典，使 _set_groups 能按 ord 排定
+            # failover 成员顺序（严格按成员顺序故障转移）。
+            "members": [
+                {"model_id": m["model_id"], "weight": m.get("weight", 1), "ord": m.get("ord", 0)}
+                for m in (g.get("members") or [])
+            ],
             # 展示开关；handler 的 _set_groups 只读 name/members，额外键无害。
             "exposed": int(g.get("exposed", 1) or 0),
         }

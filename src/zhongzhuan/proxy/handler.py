@@ -570,16 +570,43 @@ class ProxyHandler:
             binder(self._v3_background_worker)
 
     def _set_groups(self, groups: list[dict]) -> None:
-        """Rebuild the group routing map from a list of group dicts."""
+        """Rebuild the group routing map from a list of group dicts.
+
+        Each group dict may carry ``members`` as either a ``list[int]``
+        (legacy, ord defaults to 0 / insertion order) or a ``list[dict]`` with
+        ``model_id`` / ``weight`` / ``ord`` keys.  We store both:
+
+        * ``members``  — ``set[int]`` of model_ids, used by
+          :meth:`_resolve_candidates` for flat membership tests.
+        * ``member_order`` — ``list[int]`` of model_ids **sorted by ``ord``**,
+          used by the strict failover strategy so a failover group always
+          drains its primary member's keys before spilling to the next.
+        """
         gm: dict[str, dict] = {}
         for g in groups:
             name = (g.get("name") or "").strip()
             if not name:
                 continue
+            raw = g.get("members") or []
+            member_ids: set[int] = set()
+            order_pairs: list[tuple[int, int]] = []
+            for m in raw:
+                if isinstance(m, dict):
+                    mid = m.get("model_id")
+                    ord_ = m.get("ord", 0) or 0
+                else:
+                    mid = m
+                    ord_ = 0
+                if mid is None:
+                    continue
+                member_ids.add(mid)
+                order_pairs.append((ord_, mid))
+            order_pairs.sort(key=lambda x: x[0])
             gm[name] = {
                 "id": g.get("id"),
                 "strategy": g.get("strategy", "round_robin"),
-                "members": set(g.get("members") or []),
+                "members": member_ids,
+                "member_order": [mid for _, mid in order_pairs],
             }
         self._groups = gm
 
@@ -587,8 +614,11 @@ class ProxyHandler:
         """Pick candidate keys based on the requested model name.
 
         - requested_model matches a *group* name → all available keys whose
-          model belongs to that group's members (group-level load balancing
-          via key health scoring; member order/strategy is best-effort).
+          model belongs to that group's members.  When the group's strategy is
+          ``failover``, the retry loop in :meth:`handle` / :meth:`_stream_proxy`
+          / v3 create drains the primary member (lowest ``ord``) first and only
+          spills to the next member once every key of the current member has
+          been tried (see :meth:`_next_failover_key`).
         - requested_model matches a *model* name OR its aliases → keys bound to that model.
         - requested_model was specified but matches nothing (or every matched
           key is unavailable) → **empty list**.  Never fall back to keys of a
@@ -633,6 +663,46 @@ class ProxyHandler:
             return []
 
         return available
+
+    # ------------------------------------------------------------------
+    # Strict member-order failover (故障转移策略实际生效的实现)
+    # ------------------------------------------------------------------
+    def _failover_member_order(self, requested_model: str) -> list[int] | None:
+        """If ``requested_model`` names a group whose strategy is ``failover``,
+        return its member model_ids ordered by ``ord`` (primary first).
+
+        Returns ``None`` for non-groups, groups with no members, or any
+        strategy other than ``failover`` — in which case callers fall back to
+        the flat health-score ``pick_key`` selection (round_robin / weighted).
+        """
+        grp = self._groups.get(requested_model)
+        if not grp or grp.get("strategy") != "failover":
+            return None
+        order = grp.get("member_order") or []
+        return order or None
+
+    @staticmethod
+    def _next_failover_key(
+        candidates: list[KeyHealth],
+        tried: set[int],
+        member_order: list[int],
+    ) -> KeyHealth | None:
+        """Pick the best untried key **within the current member tier**.
+
+        Iterates ``member_order`` (primary → backup).  For each member it
+        considers only that member's keys not yet in ``tried`` and returns the
+        one with the highest health score.  It only advances to the next
+        member once the current member has no untried keys left.  Because the
+        caller threads the same ``tried`` set across retries, a fully-exhausted
+        primary naturally spills to the next member without re-trying keys.
+
+        Returns ``None`` when every member's keys have been tried.
+        """
+        for mid in member_order:
+            pool = [k for k in candidates if k.model_id == mid and k.key_id not in tried]
+            if pool:
+                return pick_key(pool)
+        return None
 
     # ------------------------------------------------------------------
     # T22: Responses v3 HTTP adapter (the only v3 entry point in production).
@@ -933,7 +1003,10 @@ class ProxyHandler:
         resp = None
         payload_bytes = b""
         for _attempt in range(max_switches):
-            decision = self._v3_select_retry_key(prep, candidates, tried)
+            decision = self._v3_select_retry_key(
+                prep, candidates, tried,
+                member_order=self._failover_member_order(ctx.requested_model or ""),
+            )
             if decision is None:
                 break
             attempt_key = decision.key
@@ -1080,7 +1153,10 @@ class ProxyHandler:
 
         for _attempt in range(max_switches):
             # A6. Key / translation / headers / body -- still no network I/O.
-            decision = self._v3_select_retry_key(prep, candidates, tried)
+            decision = self._v3_select_retry_key(
+                prep, candidates, tried,
+                member_order=self._failover_member_order(ctx.requested_model or ""),
+            )
             if decision is None:
                 break
             # Inner loop: a single key may be re-tried once with reasoning_effort
@@ -1404,16 +1480,22 @@ class ProxyHandler:
             status=502,
         )
 
-    def _v3_select_retry_key(self, prep, candidates: list[KeyHealth], tried: set[int]):
+    def _v3_select_retry_key(self, prep, candidates: list[KeyHealth], tried: set[int], member_order: list[int] | None = None):
         """为本轮重试挑选一个尚未尝试过的候选 key。
 
         首轮优先使用 capability 路由已经选定的 key（``prep.decision.key``）；
-        后续轮次在被 ``tried`` 排除的候选里用调度器挑一个，并复用上一轮的原生/
+        后续轮次在被 ``tried`` 排除的候选里挑一个，并复用上一轮的原生/
         翻译路径决策（模型不变，只是换 key）。
+
+        当 ``member_order`` 非空（即请求命中的是 failover 分组）时，按成员
+        ord 顺序挑：先耗尽主成员的全部 key，才落到下一成员。
         """
         if prep.decision is not None and prep.decision.key.key_id not in tried:
             return prep.decision
-        nk = pick_key([c for c in candidates if c.key_id not in tried])
+        if member_order is not None:
+            nk = self._next_failover_key(candidates, tried, member_order)
+        else:
+            nk = pick_key([c for c in candidates if c.key_id not in tried])
         if nk is None:
             return None
         return SimpleNamespace(
@@ -2338,7 +2420,10 @@ class ProxyHandler:
                             "id": r.get("id"),
                             "name": r.get("name"),
                             "strategy": r.get("strategy"),
-                            "members": [m["model_id"] for m in (r.get("members") or [])],
+                            "members": [
+                                {"model_id": m["model_id"], "weight": m.get("weight", 1), "ord": m.get("ord", 0)}
+                                for m in (r.get("members") or [])
+                            ],
                         }
                         for r in rows
                     ]
@@ -2736,6 +2821,8 @@ class ProxyHandler:
         if not is_stream:
             session_key = self._session_key(request, body_obj)
             tried: set[int] = set()
+            # 严格按成员顺序故障转移：failover 组返回按 ord 排的成员顺序，否则 None。
+            failover_order = self._failover_member_order(requested_model)
             while True:
                 # First attempt: prefer the sticky session key (multi-turn continuity)
                 if session_key and not tried:
@@ -2750,9 +2837,17 @@ class ProxyHandler:
                     if sticky_k is None and session_key in self._binding_failover_reasons:
                         # 判据⑥：sticky key 因健康/能力不兼容被拒 → 记录故障迁移
                         await self._persist_sticky_failover(session_key)
-                    k = sticky_k if sticky_k is not None else pick_key([x for x in candidates if x.key_id not in tried])
+                    if sticky_k is not None:
+                        k = sticky_k
+                    elif failover_order is not None:
+                        k = self._next_failover_key(candidates, tried, failover_order)
+                    else:
+                        k = pick_key([x for x in candidates if x.key_id not in tried])
                 else:
-                    k = pick_key([x for x in candidates if x.key_id not in tried])
+                    if failover_order is not None:
+                        k = self._next_failover_key(candidates, tried, failover_order)
+                    else:
+                        k = pick_key([x for x in candidates if x.key_id not in tried])
                 if k is None:
                     # 优化点8：429 响应带 X-Zhongzhuan-Reason 头
                     reason = reason_for_exhaustion(candidates)
@@ -3127,6 +3222,9 @@ class ProxyHandler:
             # chat-only upstream error, the rest of this request's retry round
             # is re-issued as translated chat.completions (same keys, chat protocol).
             protocol_override: str | None = None
+            # 严格按成员顺序故障转移：failover 组返回按 ord 排的成员顺序，否则 None。
+            # 流式每轮 tried 重置，故每轮都从主成员开始尝试（符合故障转移语义）。
+            failover_order = self._failover_member_order(requested_model)
             while True:
                 tried: set[int] = set()
                 attempt = 0
@@ -3150,13 +3248,17 @@ class ProxyHandler:
                         if sticky_k is None and session_key in self._binding_failover_reasons:
                             # 判据⑥：sticky key 因健康/能力不兼容被拒 → 记录故障迁移
                             await self._persist_sticky_failover(session_key)
-                        k = (
-                            sticky_k
-                            if sticky_k is not None
-                            else pick_key([x for x in candidates if x.key_id not in tried])
-                        )
+                        if sticky_k is not None:
+                            k = sticky_k
+                        elif failover_order is not None:
+                            k = self._next_failover_key(candidates, tried, failover_order)
+                        else:
+                            k = pick_key([x for x in candidates if x.key_id not in tried])
                     else:
-                        k = pick_key([x for x in candidates if x.key_id not in tried])
+                        if failover_order is not None:
+                            k = self._next_failover_key(candidates, tried, failover_order)
+                        else:
+                            k = pick_key([x for x in candidates if x.key_id not in tried])
                     if k is None:
                         break
                     tried.add(k.key_id)
