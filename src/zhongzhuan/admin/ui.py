@@ -1,10 +1,10 @@
-"""Admin UI static resources — GitHub Dark + 侧边栏 + ECharts 看板。
+"""Admin UI static resources — 浅色主题 + 侧边栏 + ECharts 看板。
 
-设计参考：new-api (Semi Design Dark) + Portkey Dashboard。
+设计参考：one-api（清爽浅色 + 蓝主色）/ new-api（浅色 + 绿主色）。
 - 左侧固定侧边栏 240px
 - 顶部 KPI 卡片网格
 - ECharts 数据看板（请求趋势、模型分布、Token 堆叠）
-- GitHub Dark 配色
+- 浅灰底 + 白卡片 + 蓝色主色（--accent，想换 new-api 绿改这一行即可）
 """
 
 from __future__ import annotations
@@ -23,14 +23,14 @@ INDEX_HTML = """<!doctype html>
 <script src="/ui/static/echarts.min.js"></script>
 <style>
 :root{
-  --bg:#0f172a; --bg-card:#1e293b; --bg-hover:#334155; --bg-input:#0f172a;
-  --border:#334155; --border-muted:#1e293b;
-  --text:#e2e8f0; --text-muted:#94a3b8; --text-subtle:#64748b;
-  --accent:#6366f1; --accent-hover:#4f46e5;
+  --bg:#f0f2f5; --bg-card:#ffffff; --bg-hover:#f5f7fa; --bg-input:#ffffff; --bg-elevated:#f5f7fa; --bg-subtle:#f5f7fa;
+  --border:#e5e7eb; --border-muted:#eef1f4;
+  --text:#1f2d3d; --text-muted:#6b7280; --text-subtle:#9ca3af;
+  --accent:#2563eb; --accent-hover:#1d4ed8; --accent-soft:rgba(37,99,235,0.10);
   --success:#10b981; --warning:#f59e0b; --danger:#ef4444; --orange:#fb923c;
   --sidebar-w:240px;
   --radius:6px; --radius-lg:10px;
-  --shadow:0 1px 3px rgba(0,0,0,0.3);
+  --shadow:0 1px 3px rgba(15,23,42,0.06), 0 1px 2px rgba(15,23,42,0.04);
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -40,7 +40,7 @@ body{
   -webkit-font-smoothing:antialiased;
 }
 /* ---- 登录遮罩 ---- */
-.login-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:200;align-items:center;justify-content:center}
+.login-overlay{display:none;position:fixed;inset:0;background:rgba(15,23,42,0.5);z-index:200;align-items:center;justify-content:center}
 .login-overlay.show{display:flex}
 .login-box{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:32px 40px;width:360px;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,0.5)}
 .login-box .logo{font-size:24px;font-weight:700;color:var(--accent);margin-bottom:8px;letter-spacing:1px}
@@ -63,7 +63,7 @@ body{
   cursor:pointer;font-size:13px;border-left:2px solid transparent;transition:all 0.15s;
 }
 .nav-item:hover{background:var(--bg-hover);color:var(--text)}
-.nav-item.active{background:var(--bg-hover);color:var(--accent);border-left-color:var(--accent)}
+.nav-item.active{background:var(--accent-soft);color:var(--accent);border-left-color:var(--accent)}
 .nav-item .icon{width:16px;text-align:center;font-size:14px}
 .nav-item .badge{margin-left:auto;background:var(--accent);color:#fff;font-size:10px;padding:1px 6px;border-radius:10px;font-weight:600}
 .sidebar-footer{padding:12px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--text-subtle)}
@@ -102,10 +102,10 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;padding:10px 12px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:0.3px}
 td{padding:10px 12px;border-bottom:1px solid var(--border-muted)}
 tr:hover td{background:var(--bg-hover)}
-tr.group-header td{background:var(--bg-input);font-weight:600;color:var(--accent);cursor:pointer;user-select:none}
+tr.group-header td{background:var(--bg-subtle);font-weight:600;color:var(--accent);cursor:pointer;user-select:none}
 /* ---- 按钮 ---- */
 .btn{background:var(--bg-card);color:var(--text);border:1px solid var(--border);padding:6px 14px;border-radius:var(--radius);font-size:13px;cursor:pointer;font-family:inherit;transition:all 0.15s;display:inline-flex;align-items:center;gap:6px}
-.btn:hover{background:var(--bg-hover);border-color:#484f58}
+.btn:hover{background:var(--bg-hover);border-color:#d1d5db}
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 .btn.primary:hover{background:var(--accent-hover)}
 .btn.danger{background:transparent;border-color:var(--danger);color:var(--danger)}
@@ -118,7 +118,7 @@ tr.group-header td{background:var(--bg-input);font-weight:600;color:var(--accent
 /* ---- 表单 ---- */
 label{font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px;font-weight:500}
 input,select,textarea{background:var(--bg-input);border:1px solid var(--border);color:var(--text);padding:7px 10px;border-radius:var(--radius);font-size:13px;width:100%;font-family:inherit;transition:border-color 0.15s}
-input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(99,102,241,0.15)}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,0.15)}
 textarea{min-height:100px;resize:vertical;font-family:ui-monospace,Consolas,monospace}
 .form-group{margin-bottom:12px}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -505,18 +505,18 @@ async function loadOverview() {
 }
 
 function renderCharts(u) {
-  const dark = {backgroundColor:"transparent", textStyle:{color:"#94a3b8", fontFamily:"inherit"}, grid:{left:48, right:24, top:30, bottom:32}};
-  const axisLine = {lineStyle:{color:"#334155"}};
-  const axisLabel = {color:"#94a3b8", fontSize:11};
+  const dark = {backgroundColor:"transparent", textStyle:{color:"#6b7280", fontFamily:"inherit"}, grid:{left:48, right:24, top:30, bottom:32}};
+  const axisLine = {lineStyle:{color:"#e5e7eb"}};
+  const axisLabel = {color:"#6b7280", fontSize:11};
 
   // 1. 请求趋势折线
   let c1 = charts.trend || echarts.init(document.getElementById("chartTrend"));
   c1.setOption({
     ...dark,
-    tooltip:{trigger:"axis", backgroundColor:"#1e293b", borderColor:"#334155", textStyle:{color:"#e2e8f0"}},
+    tooltip:{trigger:"axis", backgroundColor:"#ffffff", borderColor:"#e5e7eb", textStyle:{color:"#1f2d3d"}},
     xAxis:{type:"category", data:(u.daily||[]).map(d=>d.date), axisLine, axisLabel},
-    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#1e293b"}}},
-    series:[{name:"请求数", type:"line", smooth:true, data:(u.daily||[]).map(d=>d.requests), itemStyle:{color:"#6366f1"}, areaStyle:{color:"rgba(99,102,241,0.15)"}}],
+    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#eef1f4"}}},
+    series:[{name:"请求数", type:"line", smooth:true, data:(u.daily||[]).map(d=>d.requests), itemStyle:{color:"#2563eb"}, areaStyle:{color:"rgba(37,99,235,0.10)"}}],
     legend:{show:false}
   });
   charts.trend = c1;
@@ -526,12 +526,12 @@ function renderCharts(u) {
   const pieData = (u.by_model||[]).slice(0, 8).map(m => ({name:m.model_name||"unknown", value:m.requests}));
   c2.setOption({
     ...dark,
-    tooltip:{trigger:"item", backgroundColor:"#1e293b", borderColor:"#334155", textStyle:{color:"#e2e8f0"}},
-    legend:{type:"scroll", orient:"vertical", right:8, top:"center", textStyle:{color:"#94a3b8", fontSize:11}},
+    tooltip:{trigger:"item", backgroundColor:"#ffffff", borderColor:"#e5e7eb", textStyle:{color:"#1f2d3d"}},
+    legend:{type:"scroll", orient:"vertical", right:8, top:"center", textStyle:{color:"#6b7280", fontSize:11}},
     series:[{
       type:"pie", radius:["40%","70%"], center:["38%","50%"],
       data:pieData, label:{show:false},
-      color:["#6366f1","#10b981","#f59e0b","#ef4444","#8b5cf6","#fb923c","#38bdf8","#22d3ee"]
+      color:["#2563eb","#10b981","#f59e0b","#ef4444","#8b5cf6","#fb923c","#38bdf8","#22d3ee"]
     }]
   });
   charts.pie = c2;
@@ -540,12 +540,12 @@ function renderCharts(u) {
   let c3 = charts.tokens || echarts.init(document.getElementById("chartTokens"));
   c3.setOption({
     ...dark,
-    tooltip:{trigger:"axis", backgroundColor:"#1e293b", borderColor:"#334155", textStyle:{color:"#e2e8f0"}},
-    legend:{data:["输入","输出"], textStyle:{color:"#94a3b8", fontSize:11}, top:0},
+    tooltip:{trigger:"axis", backgroundColor:"#ffffff", borderColor:"#e5e7eb", textStyle:{color:"#1f2d3d"}},
+    legend:{data:["输入","输出"], textStyle:{color:"#6b7280", fontSize:11}, top:0},
     xAxis:{type:"category", data:(u.daily||[]).map(d=>d.date), axisLine, axisLabel},
-    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#1e293b"}}},
+    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#eef1f4"}}},
     series:[
-      {name:"输入", type:"bar", stack:"tok", data:(u.daily||[]).map(d=>d.tokens_in), itemStyle:{color:"#6366f1"}},
+      {name:"输入", type:"bar", stack:"tok", data:(u.daily||[]).map(d=>d.tokens_in), itemStyle:{color:"#2563eb"}},
       {name:"输出", type:"bar", stack:"tok", data:(u.daily||[]).map(d=>d.tokens_out), itemStyle:{color:"#10b981"}}
     ]
   });
@@ -555,10 +555,10 @@ function renderCharts(u) {
   let c4 = charts.cost || echarts.init(document.getElementById("chartCost"));
   c4.setOption({
     ...dark,
-    tooltip:{trigger:"axis", backgroundColor:"#1e293b", borderColor:"#334155", textStyle:{color:"#e2e8f0"}, valueFormatter:v=>"¥"+Number(v).toFixed(4)},
+    tooltip:{trigger:"axis", backgroundColor:"#ffffff", borderColor:"#e5e7eb", textStyle:{color:"#1f2d3d"}, valueFormatter:v=>"¥"+Number(v).toFixed(4)},
     xAxis:{type:"category", data:(u.daily||[]).map(d=>d.date), axisLine, axisLabel},
-    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#1e293b"}}},
-    series:[{name:"成本", type:"line", smooth:true, data:(u.daily||[]).map(d=>d.cost), itemStyle:{color:"#f59e0b"}, areaStyle:{color:"rgba(210,153,34,0.2)"}}],
+    yAxis:{type:"value", axisLine, axisLabel, splitLine:{lineStyle:{color:"#eef1f4"}}},
+    series:[{name:"成本", type:"line", smooth:true, data:(u.daily||[]).map(d=>d.cost), itemStyle:{color:"#f59e0b"}, areaStyle:{color:"rgba(245,158,11,0.10)"}}],
     legend:{show:false}
   });
   charts.cost = c4;
