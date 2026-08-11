@@ -107,6 +107,8 @@ th{text-align:left;padding:12px 14px;color:var(--text-muted);font-weight:500;bor
 td{padding:12px 14px;border-bottom:1px solid var(--border-muted);vertical-align:top;line-height:1.55;word-break:break-word}
 td .tag{vertical-align:middle}
 td>strong{display:inline-block;max-width:100%;word-break:break-word}
+td:last-child{white-space:nowrap}
+td:nth-child(2){word-break:break-all}
 tr:hover td{background:var(--bg-hover)}
 tr.group-header td{background:var(--bg-subtle);font-weight:600;color:var(--accent);cursor:pointer;user-select:none;padding:14px 16px;font-size:13.5px;letter-spacing:0.3px;border-top:8px solid var(--bg);border-bottom:1px solid var(--border)}
 tr.group-header:first-child td{border-top:none}
@@ -160,7 +162,7 @@ textarea{min-height:100px;resize:vertical;font-family:ui-monospace,Consolas,mono
 .modal h3{font-size:16px;color:var(--text);margin-bottom:16px;font-weight:600}
 .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--border-muted)}
 /* ---- 标签 / 徽章 ---- */
-.tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500}
+.tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;white-space:nowrap}
 .tag.fallback{background:rgba(240,136,62,0.15);color:var(--orange)}
 .tag.custom{background:rgba(125,133,144,0.15);color:var(--text-muted)}
 .tag.ok{background:rgba(63,185,80,0.15);color:var(--success)}
@@ -291,16 +293,16 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
           </div>
           <table>
             <colgroup>
+              <col style="min-width:170px">
+              <col style="min-width:240px">
               <col style="min-width:160px">
-              <col style="min-width:210px">
-              <col style="min-width:150px">
               <col style="min-width:65px">
-              <col style="min-width:55px">
-              <col style="min-width:65px">
-              <col style="min-width:130px">
-              <col style="min-width:75px">
               <col style="min-width:60px">
-              <col style="min-width:95px">
+              <col style="min-width:70px">
+              <col style="min-width:140px">
+              <col style="min-width:85px">
+              <col style="min-width:65px">
+              <col style="min-width:105px">
             </colgroup>
             <thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>别名</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>
           <tbody id="modelTable"></tbody></table>
