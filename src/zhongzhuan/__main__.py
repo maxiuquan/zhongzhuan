@@ -19,8 +19,9 @@ from zhongzhuan.proxy import ProxyServer
 from zhongzhuan.proxy.ratelimit import KeyHealth, SlidingWindow
 from zhongzhuan.store import Store
 from zhongzhuan.store.store import create_store
-from zhongzhuan.store.keys import list_keys, get_key_cipher
-from zhongzhuan.store.models import list_models, get_model_by_id
+from zhongzhuan.store.keys import list_keys
+from zhongzhuan.store.models import list_models
+from zhongzhuan.crypto import decrypt
 from zhongzhuan.upstream import UpstreamClient
 
 
@@ -78,6 +79,11 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
     """Load keys from DB into KeyHealth objects.
 
     优化点4：启动时从 key_health 表恢复之前学到的 status/cooldown/限额。
+    批量预取（修复 N+1）：原实现对每个 key 串行执行 get_model_by_id +
+    get_key_cipher（各一次 DB 往返），key 数量大时 reload 随 key 数线性变慢
+    （~100 key 时 reload 高达 ~5s），进而阻塞后台「保存模型/key」接口。
+    这里改为一次 list_models 建字典 + 一次批量取密文本地解密，DB 往返从
+    O(keys) 降到 O(1)。
     """
     from zhongzhuan.store.key_health import load_all_health
     from zhongzhuan.proxy.client_presets import parse_custom_headers
@@ -85,14 +91,25 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
     saved_health = await load_all_health(store)
 
     key_rows = await list_keys(store)
+    # 批量预取所有 model，O(1) 查表，替代每 key 一次 get_model_by_id DB 查询
+    all_models = {m.id: m for m in await list_models(store)}
+    # 一次性取全部密文，本地 decrypt（无 DB 往返），替代每 key 一次 get_key_cipher
+    cipher_rows = await store.fetchall("SELECT id, key_cipher FROM api_keys")
+    ciphers: dict[int, str | None] = {}
+    for _cid, _c in cipher_rows:
+        try:
+            ciphers[_cid] = decrypt(_c).decode("utf-8")
+        except Exception:
+            ciphers[_cid] = None
+
     health_list: list[KeyHealth] = []
     for kr in key_rows:
         if not kr.enabled:
             continue
-        plain = await get_key_cipher(store, kr.id)
+        plain = ciphers.get(kr.id)
         if not plain:
             continue
-        model = await get_model_by_id(store, kr.model_id)
+        model = all_models.get(kr.model_id)
         rpm_limit = model.rpm_limit if model and model.rpm_limit > 0 else cfg.limits.default_rpm_per_key
         tpm_limit = model.tpm_limit if model and model.tpm_limit > 0 else cfg.limits.default_tpm_per_key
         upstream_base = (model.upstream_base if model else "").replace("`", "").replace('"', "").strip()
