@@ -273,6 +273,8 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
               <select id="modelGroupMode" onchange="modelGroupMode=this.value;localStorage.setItem('modelGroupMode',modelGroupMode);renderModelTable()" style="margin-right:8px">
                 <option value="prefix">按前缀</option>
                 <option value="tag">按上游标签</option>
+                <option value="upstream">按上游</option>
+                <option value="model">按模型</option>
                 <option value="none">不分组</option>
               </select>
               <input id="modelSearch" type="text" placeholder="搜索模型名…" oninput="renderModelTable()" style="margin-right:8px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-width:160px">
@@ -290,6 +292,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
           <div class="card-header">
             <h2>Key 列表</h2>
             <div class="actions">
+              <input id="keySearch" type="text" placeholder="搜索标签/模型/Key/上游…" oninput="loadKeys()" style="margin-right:8px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-width:180px">
               <button class="btn" onclick="testAllKeys()">测试全部</button>
               <button class="btn primary" onclick="showKeyModal()">+ 添加 Key</button>
               <button class="btn primary" onclick="showBatchImportModal()">批量导入</button>
@@ -377,6 +380,20 @@ let loading = 0;
 let charts = {};
 let testResults = {}; // key_id -> {ok, latency, error}
 
+// 可见的错误横幅：JS 运行时异常直接显示在页面顶部，便于定位
+function showFatal(msg) {
+  let el = document.getElementById("fatalBanner");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "fatalBanner";
+    el.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:999;background:#ef4444;color:#fff;padding:10px 16px;font-size:13px;font-family:monospace;white-space:pre-wrap;";
+    document.body.appendChild(el);
+  }
+  el.textContent = "⚠️ 页面错误: " + msg;
+}
+window.addEventListener("error", (e) => showFatal((e.message || "") + " @" + (e.filename || "") + ":" + (e.lineno || "")));
+window.addEventListener("unhandledrejection", (e) => showFatal("Promise: " + (e.reason && e.reason.message ? e.reason.message : e.reason)));
+
 function showLoading(show) {
   if (show) { loading++; document.body.style.cursor = "wait"; }
   else { loading = Math.max(0, loading - 1); if (loading === 0) document.body.style.cursor = ""; }
@@ -429,7 +446,11 @@ function fmtTime(ts) {
 // ---- 认证 ----
 async function checkAuth() {
   const s = await api("/api/auth/status");
-  if (!s) return;
+  if (!s) {
+    // 取不到登录状态（网络/接口异常）→ 兜底弹登录窗，避免整页空白
+    document.getElementById("loginOverlay").classList.add("show");
+    return;
+  }
   if (s.auth_enabled) {
     if (!authToken) { document.getElementById("loginOverlay").classList.add("show"); return; }
     const me = await api("/api/auth/me");
@@ -498,10 +519,19 @@ async function loadOverview() {
       <div class="kpi-card"><div class="label">成功率</div><div class="value success">${(s.success_rate*100).toFixed(1)}%</div><div class="delta">活跃 Key ${s.active_keys||0}</div><div class="icon">&#10003;</div></div>
       <div class="kpi-card"><div class="label">平均延迟</div><div class="value">${s.avg_latency_ms}ms</div><div class="delta">P50 延迟</div><div class="icon">&#8635;</div></div>
       <div class="kpi-card"><div class="label">错误数 (近1h)</div><div class="value danger">${(s.top_errors||[]).reduce((a,e)=>a+e.count,0)}</div><div class="delta">${(s.top_errors||[]).map(e=>e.status+":"+e.count).join(", ")||"无错误"}</div><div class="icon">&#9888;</div></div>`;
+  } else {
+    document.getElementById("kpiGrid").innerHTML = `<div class="kpi-card" style="grid-column:1/-1"><div class="label">实时数据</div><div class="value danger">加载失败</div><div class="delta">请按 F12 查看 Console 报错，或尝试重新登录</div></div>`;
   }
   // 用量统计（7 天）
   const u = await api("/api/stats/usage?days=7");
-  if (u) renderCharts(u);
+  if (u) {
+    try { renderCharts(u); }
+    catch (e) { console.error("renderCharts error:", e); }
+  } else {
+    document.getElementById("chartTrend").innerHTML = '<div class="empty">用量统计加载失败，请刷新重试</div>';
+    document.getElementById("chartPie").innerHTML = '';
+    document.getElementById("chartTokens").innerHTML = '';
+  }
 }
 
 function renderCharts(u) {
@@ -587,6 +617,8 @@ async function loadModels() {
   const sel = document.getElementById("modelGroupMode");
   if (sel) sel.value = modelGroupMode;
   renderModelTable();
+  // 预拉取 Key 数据，供「按模型」分组显示每个模型的 Key 数量（仅该模式才重渲染）
+  api("/api/keys").then(r => { if (r && r.data) { keys = r.data; if (modelGroupMode === "model") renderModelTable(); } });
 }
 
 // 仅重新渲染表格（分组 / 折叠 / 搜索都走这里，不重新拉接口）
@@ -594,7 +626,10 @@ function renderModelTable() {
   const custom = models.filter(m => !m.is_fallback);
   const fb = models.filter(m => m.is_fallback);
   const term = (document.getElementById("modelSearch")?.value || "").trim().toLowerCase();
-  const matchName = (m) => !term || (m.name || "").toLowerCase().includes(term);
+  const matchName = (m) => !term
+    || (m.name || "").toLowerCase().includes(term)
+    || (m.upstream_base || "").toLowerCase().includes(term)
+    || (m.upstream_model || "").toLowerCase().includes(term);
 
   let html = "";
   if (modelGroupMode === "none") {
@@ -606,7 +641,11 @@ function renderModelTable() {
       if (!matchName(m)) continue;
       const key = modelGroupMode === "tag"
         ? (m.upstream_tag || "未标记")
-        : (m.name.split(/[-\/]/)[0] || m.name);
+        : modelGroupMode === "upstream"
+          ? (m.upstream_base || "未设置上游")
+          : modelGroupMode === "model"
+            ? m.name
+            : (m.name.split(/[-\/]/)[0] || m.name);
       if (!groupsMap.has(key)) groupsMap.set(key, []);
       groupsMap.get(key).push(m);
     }
@@ -617,10 +656,18 @@ function renderModelTable() {
       const list = groupsMap.get(gkey);
       const isCollapsed = !!collapsed[gkey];
       const arrow = isCollapsed ? "\u25b6" : "\u25bc";
+      let countLabel = '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + list.length + ' 个模型</span>';
+      let extra = "";
+      if (modelGroupMode === "model") {
+        const m0 = list[0];
+        const kc = keys.filter(k => k.model_id === m0.id).length;
+        countLabel = "";
+        extra = '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + esc(m0.upstream_base || "") + '</span>' +
+          '<span style="color:var(--text-subtle);font-weight:400;margin-left:8px">' + kc + ' 个 Key</span>';
+      }
       html += '<tr class="group-header" onclick="toggleModelGroup(' + idx + ')">' +
         '<td colspan="10"><span style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
-        '<strong>' + esc(gkey) + '</strong>' +
-        '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + list.length + ' 个模型</span></td></tr>';
+        '<strong>' + esc(gkey) + '</strong>' + countLabel + extra + '</td></tr>';
       if (!isCollapsed) html += list.map(m => modelRow(m)).join("");
     });
   }
@@ -950,24 +997,28 @@ async function loadKeys() {
   }
 
   const parts = [];
+  const keyTerm = (document.getElementById("keySearch")?.value || "").trim().toLowerCase();
+  const keyModelHit = (m) => !keyTerm || (m.name||"").toLowerCase().includes(keyTerm) || (m.upstream_base||"").toLowerCase().includes(keyTerm);
   for (const [mid, g] of groupsMap) {
     const m = g.model;
     const isCollapsed = !!collapsed[mid];
     const arrow = isCollapsed ? "\\u25B6" : "\\u25BC";
+    const matched = (!keyTerm || keyModelHit(m)) ? g.keys : g.keys.filter(k => (k.label||"").toLowerCase().includes(keyTerm) || (k.key_masked||"").toLowerCase().includes(keyTerm));
+    if (keyTerm && !keyModelHit(m) && matched.length === 0) continue;
     parts.push(
       '<tr class="group-header" data-model="' + mid + '" onclick="toggleKeyGroup(' + mid + ')">' +
         '<td colspan="7">' +
           '<span class="kg-arrow" style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
           esc(m.name) +
-          '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + g.keys.length + ' 个 Key</span>' +
+          '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + matched.length + ' 个 Key</span>' +
           '<span style="float:right;color:var(--text-subtle);font-weight:400;font-size:12px">' + esc(m.upstream_base||"") + ' · ' + esc(m.upstream_model||"") +
           '<button class="btn small primary" style="margin-left:8px" onclick="event.stopPropagation();showKeyModal(' + mid + ')">+ 添加 Key</button></span>' +
         '</td></tr>');
     if (!isCollapsed) {
-      if (g.keys.length === 0) {
-        parts.push('<tr><td colspan="7" class="empty">该模型下还没有 Key</td></tr>');
+      if (matched.length === 0) {
+        parts.push('<tr><td colspan="7" class="empty">' + (keyTerm ? '该模型下没有匹配的 Key' : '该模型下还没有 Key') + '</td></tr>');
       } else {
-        for (const k of g.keys) {
+        for (const k of matched) {
           const tr = testResults[k.id];
           let connCell = '<span style="color:var(--text-subtle)">未测试</span>';
           if (tr) {
