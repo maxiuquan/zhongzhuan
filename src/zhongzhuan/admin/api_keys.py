@@ -17,8 +17,14 @@ from .notify import notify_proxy_reload
 
 
 # 标准思考等级(与代理翻译层对齐, M013)
+# 注意: ultra 是「规范档」——客户端发来的 xhigh 会被代理规范成 ultra。
+# 探针必须用「规范值」(ultra) 去探测上游, 绝不能用客户端别名 xhigh:
+# 多数中转上游不认字面 xhigh, 若探针用 xhigh 探测并误记成原生片段, 运行时就会
+# 向上游注入 {reasoning_effort: "xhigh"} → 上游拒收 → 403/400 → 故障转移溢出到
+# 备用成员(同样注入 xhigh → 也 403)。仅对真正接受 xhigh 的上游(OpenAI 直连类)
+# 在 ultra 档额外兜底探测 xhigh, 且排在规范值 ultra 之后。
 _PROBE_LEVELS = ("low", "medium", "high", "ultra")
-_NORM_STR = {"low": "low", "medium": "medium", "high": "high", "ultra": "xhigh"}
+_NORM_STR = {"low": "low", "medium": "medium", "high": "high", "ultra": "ultra"}
 _NORM_BUDGET = {"low": 1024, "medium": 2048, "high": 4096, "ultra": 8192}
 
 
@@ -26,13 +32,43 @@ def _chat_reasoning_candidates(level: str) -> list[tuple[str, dict]]:
     """Candidate reasoning-field shapes to blind-probe against a chat upstream."""
     s = _NORM_STR[level]
     b = _NORM_BUDGET[level]
-    return [
+    cands = [
         ("reasoning_effort", {"reasoning_effort": s}),
         ("reasoning_effort_obj", {"reasoning": {"effort": s}}),
         ("thinking_budget", {"thinking": {"budget_tokens": b}}),
         ("thinking_type", {"thinking": {"type": "enabled", "budget_tokens": b}}),
         ("enable_thinking", {"enable_thinking": True, "thinking_budget": b}),
     ]
+    # 顶档额外兜底探测 xhigh(仅 OpenAI 直连等少数上游接受该字面量)。
+    # 放最前: 若上游接受 xhigh 则记 xhigh; 否则回落到规范值 ultra。
+    if level == "ultra":
+        cands = [
+            ("reasoning_effort_xhigh", {"reasoning_effort": "xhigh"}),
+            ("reasoning_effort_obj_xhigh", {"reasoning": {"effort": "xhigh"}}),
+            *cands,
+        ]
+    return cands
+
+
+def _probe_body_ok(resp) -> bool:
+    """A 2xx only counts as a real success if the body isn't an error page.
+
+    Some upstreams answer a rejected ``reasoning_effort`` with HTTP 200 but an
+    embedded ``{"error": ...}`` body (or a Cloudflare HTML challenge). Treating
+    those as "accepted" would poison the recorded map with a non-working shape.
+    """
+    ct = (resp.headers.get("content-type") or "").lower()
+    if "text/html" in ct:
+        return False
+    try:
+        data = resp.json()
+    except Exception:
+        # Non-JSON 2xx (unlikely for chat) — trust the status code.
+        return True
+    if isinstance(data, dict) and "error" in data:
+        return False
+    return True
+
 
 
 def _anthropic_reasoning_candidates(level: str) -> list[tuple[str, dict]]:
@@ -57,7 +93,7 @@ async def _probe_reasoning_levels(client, url, headers, protocol, base_factory):
                 resp = await client.post(url, headers=headers, json=payload)
             except Exception:
                 continue
-            if 200 <= resp.status_code < 300:
+            if 200 <= resp.status_code < 300 and _probe_body_ok(resp):
                 return frag
         return None
 
