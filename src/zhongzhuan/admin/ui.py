@@ -109,13 +109,20 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;padding:12px 14px;color:var(--text-muted);font-weight:500;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:0.3px;white-space:nowrap}
 td{padding:12px 14px;border-bottom:1px solid var(--border-muted);vertical-align:top;line-height:1.55;word-break:break-word}
 td .tag{vertical-align:middle}
-td>strong{display:inline-block;max-width:100%;word-break:break-word}
+td>strong{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 td:last-child{white-space:nowrap}
-td:nth-child(2){word-break:break-all}
+td:nth-child(2),
+td:nth-child(3),
+td:nth-child(7){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 td:nth-child(4),
 td:nth-child(5),
 td:nth-child(6),
 td:nth-child(9){white-space:nowrap}
+/* 模型列表：固定行高 + 长文本省略 */
+#tab-models table{table-layout:fixed}
+.model-row td{height:46px;vertical-align:middle;overflow:hidden}
+.model-row td:first-child{white-space:nowrap}
+.truncate{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 tr:hover td{background:var(--bg-hover)}
 tr.group-header td{background:var(--bg-subtle);font-weight:600;color:var(--accent);cursor:pointer;user-select:none;padding:14px 16px;font-size:13.5px;letter-spacing:0.3px;border-top:8px solid var(--bg);border-bottom:1px solid var(--border)}
 tr.group-header:first-child td{border-top:none}
@@ -301,16 +308,16 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
           <div style="overflow-x:auto;margin:0 -20px;padding:0 20px">
           <table>
             <colgroup>
-              <col style="min-width:230px">
-              <col style="min-width:240px">
-              <col style="min-width:180px">
-              <col style="min-width:65px">
-              <col style="min-width:60px">
-              <col style="min-width:70px">
-              <col style="min-width:140px">
-              <col style="min-width:90px">
-              <col style="min-width:65px">
-              <col style="min-width:105px">
+              <col style="width:240px">
+              <col style="width:240px">
+              <col style="width:180px">
+              <col style="width:65px">
+              <col style="width:60px">
+              <col style="width:70px">
+              <col style="width:140px">
+              <col style="width:90px">
+              <col style="width:65px">
+              <col style="width:105px">
             </colgroup>
             <thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>别名</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>
           <tbody id="modelTable"></tbody></table>
@@ -742,13 +749,13 @@ function modelRow(m, isFb) {
   const actions = isFb
     ? '<button class="btn small" onclick="editModel(' + m.id + ')">编辑</button>'
     : '<button class="btn small" onclick="editModel(' + m.id + ')">编辑</button> <button class="btn small danger" onclick="delModel(' + m.id + ')">删除</button>';
-  return '<tr><td><strong>' + esc(m.name) + '</strong>' + presetBadge(m) + tagBadge(m) + noteIco + '</td>' +
-    '<td>' + esc(m.upstream_base) + '</td>' +
-    '<td>' + esc(m.upstream_model) + '</td>' +
+  return '<tr class="model-row"><td><strong title="' + esc(m.name) + '">' + esc(m.name) + '</strong>' + presetBadge(m) + tagBadge(m) + noteIco + '</td>' +
+    '<td><span class="truncate" title="' + esc(m.upstream_base) + '">' + esc(m.upstream_base) + '</span></td>' +
+    '<td><span class="truncate" title="' + esc(m.upstream_model) + '">' + esc(m.upstream_model) + '</span></td>' +
     '<td><code>' + (m.protocol || "openai") + '</code></td>' +
     '<td>' + (m.rpm_limit || "不限") + '</td>' +
     '<td>' + (m.tpm_limit || "不限") + '</td>' +
-    '<td>' + (m.aliases ? '<code>' + esc(m.aliases) + '</code>' : '<span style="color:var(--text-subtle)">-</span>') + '</td>' +
+    '<td>' + (m.aliases ? '<code class="truncate" title="' + esc(m.aliases) + '">' + esc(m.aliases) + '</code>' : '<span style="color:var(--text-subtle)">-</span>') + '</td>' +
     '<td>' + typeCell + '</td>' +
     '<td>' + (m.enabled ? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否') + '</td>' +
     '<td>' + actions + '</td></tr>';
