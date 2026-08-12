@@ -1076,6 +1076,40 @@ class ProxyHandler:
                 )
                 mark_empty_response(attempt_key)
                 continue
+            if _parsed is None and payload_bytes.lstrip().startswith(b"data:"):
+                # 上游把非流请求当流式回了个 SSE 空流（data: [DONE]）——多半是
+                # 不认 content 数组（如 soulecho）。同一 key 用字符串 content 重试一次。
+                _lg.warning(
+                    f"[v3] key_id={attempt_key.key_id} upstream returned SSE for "
+                    f"non-stream; retrying once with string content"
+                )
+                resp, payload_bytes = await self._run_v3_nonstream(
+                    request=request,
+                    body_obj=prep.upstream_body,
+                    final_body=json.dumps(prep.upstream_body, ensure_ascii=False).encode(),
+                    decision=decision,
+                    requested_model=ctx.requested_model or "",
+                    inbound_protocol="responses",
+                    session_key=self._session_key(request, prep.body_obj),
+                    required_caps=capability_values(prep.sanitized),
+                    stringify_content=True,
+                )
+                if getattr(resp, "status_code", 502) >= 400:
+                    if resp.status_code == 499 or (
+                        400 <= resp.status_code < 500 and resp.status_code not in (429, 403)
+                    ):
+                        break
+                    _lg.info(
+                        f"[v3] key_id={attempt_key.key_id} status={resp.status_code} "
+                        f"(stringify retry); switching key ({len(tried)}/{max_switches} tried)"
+                    )
+                    continue
+                try:
+                    _parsed = json.loads(payload_bytes.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    _parsed = None
+                if _parsed is None:
+                    continue
             break
 
         if resp is None:
@@ -1157,6 +1191,9 @@ class ProxyHandler:
 
         max_switches = min(len(candidates), _V3_STREAM_MAX_SWITCHES + 1)
         tried: set[int] = set()
+        #: 以硬性 HTTP 错误（>=400）收场的 key。空流/连接问题的 key 不在其中——
+        #: 这类上游可能只是不支持流式（非流形态可用），供末尾的非流降级重试。
+        http_failed: set[int] = set()
         committed = False
         client_gone = False
         # 最近一次「首字节前就被上游截断」的尝试（帧缓冲 + pipeline + 延迟事件
@@ -1212,6 +1249,8 @@ class ProxyHandler:
                             content_type="application/json",
                         )
                     # 其它「网络前」错误（如该 key 无可用上游）：换下一个 key。
+                    # 记入 http_failed：非流降级不应重试同一 key（同因必败）。
+                    http_failed.add(decision.key.key_id)
                     break
                 assert call is not None
                 key = call.key
@@ -1282,6 +1321,7 @@ class ProxyHandler:
                         # Retryable upstream states must not park the key: the next
                         # request gets to try it again (same rule as the non-stream path).
                         mark_success(key)
+                    http_failed.add(key.key_id)
                     _lg.info(
                         f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} body={error_body[:300]!r}"
                     )
@@ -1472,6 +1512,22 @@ class ProxyHandler:
         # 故障的表象），不如显式报错，让 SDK 的错误路径接管。
         if last_truncated is not None and last_truncated[2] is not None:
             last_truncated[2].event_log.discard()
+
+        # ---- 非流降级（缓冲式 SSE 回放）----
+        # 流式全败 ≠ 上游不可用：部分上游仅接受 chat.completions 非流（stream=true
+        # 会空流/掐断/超时，但非流形态完全可用——如 soulecho）。跳过已 HTTP
+        # 4xx/5xx 失败的 key（非流同样会失败），对剩余 key 用非流重试，成功则把
+        # 完整响应转成 Responses SSE 帧回放，客户端感知与原生流式一致。
+        fallback = await self._v3_stream_nonstream_fallback(
+            request=request,
+            ctx=ctx,
+            prep=prep,
+            candidates=candidates,
+            hard_failed=http_failed,
+        )
+        if fallback is not None:
+            return fallback
+
         # 401/403：全部 key 都被上游以「客户端 / 密钥级」理由拒绝（典型：
         # ``unsupported_client``——上游只允许特定客户端）。这类拒绝是永久性的、
         # 与具体 key 无关（重试只是浪费），把上游的真实错误体透传给客户端，
@@ -1512,6 +1568,244 @@ class ProxyHandler:
             },
             status=502,
         )
+
+    async def _v3_stream_nonstream_fallback(
+        self,
+        *,
+        request: web.Request,
+        ctx,
+        prep,
+        candidates: list[KeyHealth],
+        hard_failed: set[int],
+    ):
+        """All stream attempts produced no content: retry as non-stream.
+
+        Some upstreams only speak chat.completions and stall/drop on
+        ``stream=true`` while serving a perfectly good non-stream response
+        (soulecho/999554/blockrun all reproduced this).  We skip keys that
+        already ended with a hard HTTP error (a non-stream retry fails the same
+        way) and run the remaining keys non-stream.  On the first 200 the
+        complete response is replayed as Responses SSE frames (buffered
+        streaming) — the client sees a normal stream, minus word-by-word
+        deltas.
+
+        Returns an SSE ``web.StreamResponse`` already prepared+written, or
+        ``None`` when every non-stream attempt also failed.
+        """
+        pool = [c for c in candidates if c.key_id not in hard_failed]
+        if not pool:
+            return None
+        member_order = self._failover_member_order(ctx.requested_model or "")
+        if member_order is not None:
+            ordered: list[KeyHealth] = []
+            for mid in member_order:
+                ordered += [k for k in pool if k.model_id == mid]
+            ordered += [k for k in pool if k.model_id not in member_order]
+            pool = ordered
+        session_key = self._session_key(request, prep.body_obj)
+        required_caps = capability_values(prep.sanitized)
+        last_status = 0
+        last_body = b""
+        for k in pool:
+            # Non-stream call: _prepare_v3_upstream_call(stream=False) rebuilds
+            # the body with stream removed (translated and native branches both
+            # handle it).  Strip it here too so NATIVE passthrough never sees it.
+            body_obj = dict(prep.body_obj or {})
+            body_obj.pop("stream", None)
+            decision = SimpleNamespace(
+                key=k,
+                upstream_path="",
+                is_native=getattr(prep.decision, "is_native", False),
+            )
+            resp, payload = await self._run_v3_nonstream(
+                request=request,
+                body_obj=body_obj,
+                final_body=json.dumps(body_obj, ensure_ascii=False).encode(),
+                decision=decision,
+                requested_model=ctx.requested_model or "",
+                inbound_protocol="responses",
+                session_key=session_key,
+                required_caps=required_caps,
+            )
+            last_status = getattr(resp, "status_code", 502)
+            last_body = payload
+            if last_status != 200:
+                continue
+            try:
+                resp_obj = json.loads(payload.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                resp_obj = None
+            if not isinstance(resp_obj, dict):
+                # 上游把非流请求当流式回了个 SSE 空流（data: [DONE]）——多半是
+                # 不认 content 数组。同一 key 用字符串 content 重试一次。
+                if payload.lstrip().startswith(b"data:"):
+                    _lg.warning(
+                        f"[v3-stream] NS-fallback got SSE for non-stream (key_id={k.key_id}); "
+                        f"retrying once with string content"
+                    )
+                    resp, payload = await self._run_v3_nonstream(
+                        request=request,
+                        body_obj=body_obj,
+                        final_body=json.dumps(body_obj, ensure_ascii=False).encode(),
+                        decision=decision,
+                        requested_model=ctx.requested_model or "",
+                        inbound_protocol="responses",
+                        session_key=session_key,
+                        required_caps=required_caps,
+                        stringify_content=True,
+                    )
+                    last_status = getattr(resp, "status_code", 502)
+                    last_body = payload
+                    if last_status != 200:
+                        continue
+                    try:
+                        resp_obj = json.loads(payload.decode("utf-8"))
+                    except (ValueError, UnicodeDecodeError):
+                        resp_obj = None
+                    if not isinstance(resp_obj, dict):
+                        continue
+                else:
+                    continue
+            _lg.warning(
+                f"[v3-stream] non-stream fallback OK (key_id={k.key_id}); "
+                f"replaying {prep.response_id} as buffered SSE"
+            )
+            try:
+                await self._persist_v3_stream_terminal(
+                    prep, "completed", "", output=resp_obj.get("output") or []
+                )
+            except Exception:
+                _lg.exception("[v3-stream] non-stream fallback persist failed")
+            frames = self._nonstream_to_sse_frames(resp_obj, prep)
+            resp_out = web.StreamResponse(status=200)
+            resp_out.headers["Content-Type"] = "text/event-stream; charset=utf-8"
+            resp_out.headers["Cache-Control"] = "no-cache"
+            resp_out.headers["X-Accel-Buffering"] = "no"
+            resp_out.headers["Connection"] = "keep-alive"
+            try:
+                await resp_out.prepare(request)
+                for f in frames:
+                    await resp_out.write(f)
+                await resp_out.write_eof()
+            except (ConnectionResetError, ConnectionError, OSError):
+                pass
+            return resp_out
+        _lg.warning(
+            f"[v3-stream] non-stream fallback all failed "
+            f"(last status={last_status} body={last_body[:200]!r})"
+        )
+        return None
+
+    @staticmethod
+    def _nonstream_to_sse_frames(resp_obj: dict, prep) -> list[bytes]:
+        """Turn a complete non-stream Responses payload into Responses SSE frames.
+
+        Sequence mirrors the official protocol: created → in_progress →
+        output_item.added → content_part.added → output_text.delta(s) →
+        output_text.done → content_part.done → output_item.done →
+        response.completed (with the full object).  The response id is unified
+        to ``prep.response_id`` so a later retrieve() round-trips.
+        """
+        import uuid as _uuid
+
+        frames: list[bytes] = []
+        seq = 0
+
+        def frame(event_type: str, data: dict) -> None:
+            nonlocal seq
+            data["sequence_number"] = seq
+            seq += 1
+            frames.append(
+                ("event: {0}\ndata: {1}\n\n".format(
+                    event_type,
+                    json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                )).encode("utf-8")
+            )
+
+        rid = prep.response_id
+        created_at = resp_obj.get("created_at") or int(time.time())
+        model = resp_obj.get("model") or (prep.body_obj or {}).get("model", "")
+        base = {
+            "id": rid,
+            "object": "response",
+            "created_at": created_at,
+            "status": "in_progress",
+            "model": model,
+            "output": [],
+            "error": None,
+        }
+        frame("response.created", {"type": "response.created", "response": dict(base)})
+        frame("response.in_progress", {"type": "response.in_progress", "response": dict(base)})
+        output = resp_obj.get("output") or []
+        for oi, item in enumerate(output):
+            if not isinstance(item, dict):
+                continue
+            iid = item.get("id") or "msg_" + _uuid.uuid4().hex
+            wire = dict(item)
+            wire["id"] = iid
+            wire["status"] = "in_progress"
+            frame(
+                "response.output_item.added",
+                {"type": "response.output_item.added", "output_index": oi, "item": wire},
+            )
+            for ci, part in enumerate(item.get("content") or []):
+                if not isinstance(part, dict) or part.get("type") != "output_text":
+                    continue
+                text = part.get("text") or ""
+                frame(
+                    "response.content_part.added",
+                    {
+                        "type": "response.content_part.added",
+                        "item_id": iid,
+                        "output_index": oi,
+                        "content_index": ci,
+                        "content": {"type": "output_text", "text": "", "annotations": []},
+                    },
+                )
+                step = 120
+                for i in range(0, len(text), step):
+                    frame(
+                        "response.output_text.delta",
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": iid,
+                            "output_index": oi,
+                            "content_index": ci,
+                            "delta": text[i : i + step],
+                        },
+                    )
+                frame(
+                    "response.output_text.done",
+                    {
+                        "type": "response.output_text.done",
+                        "item_id": iid,
+                        "output_index": oi,
+                        "content_index": ci,
+                        "text": text,
+                    },
+                )
+                frame(
+                    "response.content_part.done",
+                    {
+                        "type": "response.content_part.done",
+                        "item_id": iid,
+                        "output_index": oi,
+                        "content_index": ci,
+                        "content": {"type": "output_text", "text": text, "annotations": []},
+                    },
+                )
+            done_item = dict(item)
+            done_item["id"] = iid
+            done_item["status"] = "completed"
+            frame(
+                "response.output_item.done",
+                {"type": "response.output_item.done", "output_index": oi, "item": done_item},
+            )
+        final = dict(resp_obj)
+        final["id"] = rid
+        final["status"] = "completed"
+        frame("response.completed", {"type": "response.completed", "response": final})
+        return frames
 
     def _v3_select_retry_key(self, prep, candidates: list[KeyHealth], tried: set[int], member_order: list[int] | None = None):
         """为本轮重试挑选一个尚未尝试过的候选 key。
@@ -1857,6 +2151,7 @@ class ProxyHandler:
         inbound_protocol: str,
         stream: bool,
         force_translate: bool = False,
+        stringify_content: bool = False,
     ) -> tuple["_V3UpstreamCall | None", "_V3UpstreamResult | None"]:
         """Resolve everything needed to *issue* one v3 upstream request.
 
@@ -1946,6 +2241,25 @@ class ProxyHandler:
                     translated_req["model"] = key.upstream_model
                 if _pending_frag:
                     translated_req.update(_pending_frag)
+                if stringify_content:
+                    # 部分上游只认纯字符串 content，收到内容块数组会返回空 SSE
+                    # 流（data: [DONE]）而非 JSON（如 soulecho）；另有上游对
+                    # 不带 max_tokens 的 chat 请求同样返回空 SSE。字符串化
+                    # content 并补一个保守的 max_tokens，兼容这两类上游。
+                    _msgs = translated_req.get("messages")
+                    if isinstance(_msgs, list):
+                        for _m in _msgs:
+                            if not isinstance(_m, dict):
+                                continue
+                            _c = _m.get("content")
+                            if isinstance(_c, list):
+                                _parts = [
+                                    p.get("text", "")
+                                    for p in _c
+                                    if isinstance(p, dict) and p.get("type") in ("text", "input_text") and p.get("text")
+                                ]
+                                _m["content"] = "".join(_parts)
+                    translated_req.setdefault("max_tokens", 4096)
             final_body = json.dumps(translated_req, ensure_ascii=False).encode()
             if outbound_protocol == "anthropic":
                 headers["x-api-key"] = key.api_key
@@ -2019,6 +2333,7 @@ class ProxyHandler:
         session_key: str,
         required_caps: frozenset[str],
         force_translate: bool = False,
+        stringify_content: bool = False,
     ) -> tuple[Any, bytes]:
         """Execute one non-stream create against the production upstream chain.
 
@@ -2036,6 +2351,7 @@ class ProxyHandler:
             inbound_protocol=inbound_protocol,
             stream=False,
             force_translate=force_translate,
+            stringify_content=stringify_content,
         )
         if error is not None:
             return error, b""
