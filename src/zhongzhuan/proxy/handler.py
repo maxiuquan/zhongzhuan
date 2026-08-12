@@ -2845,6 +2845,7 @@ class ProxyHandler:
                             "id": r.get("id"),
                             "name": r.get("name"),
                             "strategy": r.get("strategy"),
+                            "fallback_group": r.get("fallback_group") or "",
                             "members": [
                                 {"model_id": m["model_id"], "weight": m.get("weight", 1), "ord": m.get("ord", 0)}
                                 for m in (r.get("members") or [])

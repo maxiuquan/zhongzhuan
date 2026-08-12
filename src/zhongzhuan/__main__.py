@@ -432,6 +432,8 @@ async def run_foreground(
             ],
             # 展示开关；handler 的 _set_groups 只读 name/members，额外键无害。
             "exposed": int(g.get("exposed", 1) or 0),
+            # 兜底分组（v015）
+            "fallback_group": g.get("fallback_group") or "",
         }
         for g in await list_groups_db(store)
     ]
