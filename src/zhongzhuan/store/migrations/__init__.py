@@ -22,8 +22,9 @@ from .v011_exposure_flag import MIGRATION as M011
 from .v012_reasoning_effort_flag import MIGRATION as M012
 from .v013_reasoning_effort_map import MIGRATION as M013
 from .v014_model_tag_note import MIGRATION as M014
+from .v015_group_fallback import MIGRATION as M015
 
 #: Ordered migration registry.  Keep ascending by ``version``.
-MIGRATIONS: tuple[Migration, ...] = (M001, M003, M004, M005, M006, M007, M008, M009, M010, M011, M012, M013, M014)
+MIGRATIONS: tuple[Migration, ...] = (M001, M003, M004, M005, M006, M007, M008, M009, M010, M011, M012, M013, M014, M015)
 
 __all__ = ["MIGRATIONS", "Migration"]
