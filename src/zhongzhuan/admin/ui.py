@@ -174,6 +174,16 @@ textarea{min-height:100px;resize:vertical;font-family:ui-monospace,Consolas,mono
 .modal-overlay.show{display:flex}
 .modal{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;min-width:440px;max-width:720px;max-height:90vh;overflow-y:auto;box-shadow:0 12px 36px rgba(0,0,0,0.5)}
 .modal h3{font-size:16px;color:var(--text);margin-bottom:16px;font-weight:600}
+.modal.lg{max-width:860px;min-width:520px}
+.kp-header{margin-bottom:14px}
+.kp-header .sub{font-size:12px;color:var(--text-muted);font-weight:400;margin-top:4px}
+.kp-toolbar{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.kp-addform{background:var(--bg-elevated);border:1px solid var(--border-muted);border-radius:8px;padding:14px 16px;margin-bottom:14px}
+.kp-table{width:100%;border-collapse:collapse;font-size:13px}
+.kp-table th,.kp-table td{padding:9px 10px;border-bottom:1px solid var(--border-muted);text-align:left;vertical-align:middle}
+.kp-table th{color:var(--text-muted);font-weight:600;font-size:12px;background:var(--bg-hover)}
+.kp-table code{font-size:12px;color:var(--text);background:var(--bg-elevated);padding:2px 6px;border-radius:4px}
+.kp-table td:last-child{white-space:nowrap}
 .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--border-muted)}
 /* ---- 标签 / 徽章 ---- */
 .tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;white-space:nowrap}
@@ -409,6 +419,14 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
 <!-- 模态框 -->
 <div class="modal-overlay" id="modal" onclick="if(event.target===this)closeModal()">
   <div class="modal" id="modalContent"></div>
+</div>
+
+<!-- 模型 Key 池（仅显示单个模型） -->
+<div class="modal-overlay" id="keyPoolModal" onclick="if(event.target===this)closeKeyPool()">
+  <div class="modal lg">
+    <div class="kp-header" id="modalKeyPoolHeader"></div>
+    <div id="modalKeyPoolBody"></div>
+  </div>
 </div>
 
 <script>
@@ -748,7 +766,7 @@ function modelRow(m, isFb) {
     : '<span class="tag custom">自定义</span>';
   const actions = isFb
     ? '<button class="btn small" onclick="editModel(' + m.id + ')">编辑</button>'
-    : '<button class="btn small" onclick="editModel(' + m.id + ')">编辑</button> <button class="btn small primary" onclick="showKeyModal(' + m.id + ')">添加Key</button> <button class="btn small danger" onclick="delModel(' + m.id + ')">删除</button>';
+    : '<button class="btn small" onclick="editModel(' + m.id + ')">编辑</button> <button class="btn small" onclick="openModelKeyPool(' + m.id + ')">key池</button> <button class="btn small danger" onclick="delModel(' + m.id + ')">删除</button>';
   return '<tr class="model-row"><td><strong title="' + esc(m.name) + '">' + esc(m.name) + '</strong>' + presetBadge(m) + tagBadge(m) + noteIco + '</td>' +
     '<td><span class="truncate" title="' + esc(m.upstream_base) + '">' + esc(m.upstream_base) + '</span></td>' +
     '<td><span class="truncate" title="' + esc(m.upstream_model) + '">' + esc(m.upstream_model) + '</span></td>' +
@@ -1109,7 +1127,7 @@ function toggleKeyGroup(modelId) {
 async function delKey(id) {
   if (!confirm("确认删除此 Key?")) return;
   const r = await api("/api/keys/" + id, {method:"DELETE"});
-  if (r !== null) loadKeys();
+  if (r !== null) { loadKeys(); refreshPoolIfOpen(); }
 }
 
 async function testKey(id, reprobe=false) {
@@ -1122,6 +1140,7 @@ async function testKey(id, reprobe=false) {
   if (!r) return;
   testResults[id] = {ok: r.ok, latency: r.latency_ms, error: r.error};
   loadKeys();
+  refreshPoolIfOpen();
   // 显示详情（思考等级由系统静默自动探测, 此处不展示）
   const prefix = reprobe ? "重新探测" : "连通性测试";
   if (r.ok) {
@@ -1503,6 +1522,92 @@ async function loadLogs() {
 
 // ---- 服务控制 ----
 function closeModal() { document.getElementById("modal").classList.remove("show"); }
+
+function closeKeyPool() { document.getElementById("keyPoolModal").classList.remove("show"); poolModelId = null; }
+
+// ---- 模型专属 Key 池（仅显示单个模型） ----
+let poolModelId = null;
+let poolKeys = [];
+
+async function openModelKeyPool(modelId) {
+  poolModelId = modelId;
+  const r = await api("/api/keys");
+  poolKeys = (r?.data || []).filter(k => k.model_id === modelId);
+  renderModelKeyPool(false);
+  document.getElementById("keyPoolModal").classList.add("show");
+}
+
+function renderModelKeyPool(showAddForm) {
+  const m = models.find(x => x.id === poolModelId);
+  if (!m) return;
+  document.getElementById("modalKeyPoolHeader").innerHTML =
+    'Key 池 · <strong>' + esc(m.name) + '</strong>' +
+    '<div class="sub">' + esc(m.upstream_base || "") + ' · ' + esc(m.upstream_model || "") + ' · 共 ' + poolKeys.length + ' 个 Key</div>';
+  let html = "";
+  if (showAddForm) {
+    html +=
+      '<div class="kp-addform">' +
+        '<div class="form-row">' +
+          '<div class="form-group"><label>标签</label><input id="kp_label" placeholder="例如:主账号"></div>' +
+          '<div class="form-group"><label>优先级</label><input id="kp_priority" type="number" value="0"></div>' +
+        '</div>' +
+        '<div class="form-group"><label>Key 值</label><input id="kp_key" type="password" placeholder="sk-..."></div>' +
+        '<div class="modal-actions" style="margin-top:12px"><button class="btn" onclick="toggleKpAddForm(false)">取消</button><button class="btn primary" onclick="addKeyToPool()">保存</button></div>' +
+      '</div>';
+  } else {
+    html += '<div class="kp-toolbar"><button class="btn primary" onclick="toggleKpAddForm(true)">+ 添加 Key</button> <button class="btn" onclick="testAllKeysForModel()">测试全部</button></div>';
+  }
+  if (!showAddForm) {
+    if (poolKeys.length === 0) {
+      html += '<div class="empty" style="padding:24px 0">该模型下还没有 Key,点击「+ 添加 Key」</div>';
+    } else {
+      html += '<div style="max-height:50vh;overflow-y:auto"><table class="kp-table"><thead><tr><th>标签</th><th>Key</th><th>优先级</th><th>启用</th><th>连通性</th><th>操作</th></tr></thead><tbody>' +
+        poolKeys.map(k => {
+          const tr = testResults[k.id];
+          let conn = '<span style="color:var(--text-subtle)">未测试</span>';
+          if (tr) conn = tr.ok ? '<span class="tag ok">OK ' + tr.latency + 'ms</span>' : '<span class="tag err">失败</span>';
+          return '<tr>' +
+            '<td>' + esc(k.label) + '</td>' +
+            '<td><code>' + esc(k.key_masked) + '</code></td>' +
+            '<td>' + k.priority + '</td>' +
+            '<td>' + (k.enabled ? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否') + '</td>' +
+            '<td>' + conn + '</td>' +
+            '<td><button class="btn small" onclick="testKey(' + k.id + ')">测试</button> <button class="btn small" onclick="reprobeKey(' + k.id + ')">重探</button> <button class="btn small danger" onclick="delKey(' + k.id + ')">删除</button></td>' +
+          '</tr>';
+        }).join("") + '</tbody></table></div>';
+    }
+  }
+  document.getElementById("modalKeyPoolBody").innerHTML = html;
+}
+
+function toggleKpAddForm(show) { renderModelKeyPool(show); }
+
+async function addKeyToPool() {
+  const label = document.getElementById("kp_label").value;
+  const key_value = document.getElementById("kp_key").value;
+  const priority = parseInt(document.getElementById("kp_priority").value) || 0;
+  if (!key_value) { alert("请填写 Key 值"); return; }
+  const r = await api("/api/keys", {method:"POST", body: JSON.stringify({model_id: poolModelId, label, key_value, priority})});
+  if (r !== null) await openModelKeyPool(poolModelId);
+}
+
+async function testAllKeysForModel() {
+  const list = poolKeys.slice();
+  if (list.length === 0) { alert("没有可测试的 Key"); return; }
+  if (!confirm("将测试该模型 " + list.length + " 个 Key,可能产生少量请求费用,继续?")) return;
+  for (const k of list) {
+    const r = await api("/api/keys/" + k.id + "/test", {method:"POST"});
+    if (r) testResults[k.id] = {ok: r.ok, latency: r.latency_ms, error: r.error};
+    renderModelKeyPool(false);
+  }
+  alert("测试完成");
+}
+
+function refreshPoolIfOpen() {
+  if (document.getElementById("keyPoolModal").classList.contains("show") && poolModelId !== null) {
+    openModelKeyPool(poolModelId);
+  }
+}
 
 async function loadSvcStatus() {
   try {
