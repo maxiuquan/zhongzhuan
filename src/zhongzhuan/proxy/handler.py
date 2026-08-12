@@ -634,8 +634,31 @@ class ProxyHandler:
                 "strategy": g.get("strategy", "round_robin"),
                 "members": member_ids,
                 "member_order": [mid for _, mid in order_pairs],
+                # 兜底分组名（v015）：本组全部成员失败时调度到该分组；'' = 无兜底。
+                "fallback_group": (g.get("fallback_group") or "").strip(),
             }
         self._groups = gm
+
+    def _fallback_group_candidates(self, requested_model: str, exclude: set[int] | None = None) -> list[KeyHealth]:
+        """Candidates of the configured fallback group for ``requested_model``.
+
+        Returns the fallback group's currently-available keys (minus ``exclude``),
+        or ``[]`` when the group has no fallback configured / the target group
+        is missing or equals the source (cycle guard).
+        """
+        if not requested_model:
+            return []
+        grp = self._groups.get(requested_model)
+        if not grp:
+            return []
+        fb_name = (grp.get("fallback_group") or "").strip()
+        if not fb_name or fb_name == requested_model:
+            return []
+        fbg = self._groups.get(fb_name)
+        if not fbg or not fbg.get("members"):
+            return []
+        exclude = exclude or set()
+        return [k for k in self._resolve_candidates(fb_name) if k.key_id not in exclude]
 
     def _resolve_candidates(self, requested_model: str) -> list[KeyHealth]:
         """Pick candidate keys based on the requested model name.
@@ -1114,6 +1137,37 @@ class ProxyHandler:
 
         if resp is None:
             return web.json_response({"error": "no enabled keys"}, status=503)
+
+        # ---- 分组兜底（v015）：主组全部 key 失败 → 用配置的兜底分组重试 ----
+        if resp.status_code >= 400:
+            fb_cands = self._fallback_group_candidates(ctx.requested_model or "", exclude=tried)
+            if fb_cands:
+                _lg.warning(
+                    f"[v3] group {ctx.requested_model!r} all keys failed "
+                    f"(last status={resp.status_code}); trying fallback group ({len(fb_cands)} keys)"
+                )
+                for fk in fb_cands:
+                    fdec = SimpleNamespace(key=fk, upstream_path="", is_native=False)
+                    fr, fpayload = await self._run_v3_nonstream(
+                        request=request,
+                        body_obj=prep.upstream_body,
+                        final_body=json.dumps(prep.upstream_body, ensure_ascii=False).encode(),
+                        decision=fdec,
+                        requested_model=ctx.requested_model or "",
+                        inbound_protocol="responses",
+                        session_key=self._session_key(request, prep.body_obj),
+                        required_caps=capability_values(prep.sanitized),
+                    )
+                    if getattr(fr, "status_code", 502) == 200:
+                        try:
+                            _fr_obj = json.loads(fpayload.decode("utf-8"))
+                        except (ValueError, UnicodeDecodeError):
+                            _fr_obj = None
+                        if isinstance(_fr_obj, dict):
+                            _lg.warning(f"[v3] fallback group OK (key_id={fk.key_id})")
+                            resp, payload_bytes = fr, fpayload
+                            break
+                        # 200 但空壳（非 dict）→ 试下一个 fallback key
         if resp.status_code >= 400:
             return web.Response(
                 status=resp.status_code,
@@ -1527,6 +1581,24 @@ class ProxyHandler:
         )
         if fallback is not None:
             return fallback
+
+        # ---- 分组兜底（v015）：主组（含非流降级）全败 → 用兜底分组的候选再走一轮 ----
+        fb_cands = self._fallback_group_candidates(ctx.requested_model or "")
+        if fb_cands:
+            _lg.warning(
+                f"[v3-stream] group {ctx.requested_model!r} all candidates failed; "
+                f"trying fallback group ({len(fb_cands)} keys)"
+            )
+            fb_resp = await self._v3_stream_nonstream_fallback(
+                request=request,
+                ctx=ctx,
+                prep=prep,
+                candidates=fb_cands,
+                hard_failed=set(),
+            )
+            if fb_resp is not None:
+                _lg.warning(f"[v3-stream] fallback group OK for {ctx.requested_model!r}")
+                return fb_resp
 
         # 401/403：全部 key 都被上游以「客户端 / 密钥级」理由拒绝（典型：
         # ``unsupported_client``——上游只允许特定客户端）。这类拒绝是永久性的、
@@ -3044,6 +3116,16 @@ class ProxyHandler:
             f"model={requested_model!r} stream={body_obj.get('stream', False) if body_obj else False} "
             f"inbound={inbound_protocol}"
         )
+
+        # [TMP-DEBUG] capture subagent/spawn request bodies for investigation
+        try:
+            _t = json.dumps(body_obj, ensure_ascii=False) if isinstance(body_obj, (dict, list)) else str(body_obj or "")
+            if any(_k in _t for _k in ("spawn_agent", "collaboration", "agent_thread", "SubAgentActivity")):
+                import datetime
+                with open("/tmp/spawn_capture.log", "a", encoding="utf-8") as _f:
+                    _f.write("=== " + str(datetime.datetime.now()) + " | model=" + str(requested_model) + " | " + path + " ===\n" + _t[:6000] + "\n\n")
+        except Exception:
+            pass
 
         # Fast path: /v1/models -> return custom model names (+ group names)
         if path.rstrip("/") == "/v1/models" and method.upper() == "GET":

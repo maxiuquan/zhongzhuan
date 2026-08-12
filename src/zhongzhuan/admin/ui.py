@@ -1331,6 +1331,11 @@ function showGroupModal(group) {
     + '<div class="form-group"><label>名称 <span style="color:var(--text-subtle)">(作为下游可调用的模型名)</span></label><input id="f_gname" value="'+ (isEdit ? esc(group.name) : "") +'"></div>'
     + '<div class="form-group"><label>策略</label><select id="f_strategy"><option value="round_robin" '+(strat==="round_robin"?"selected":"")+'>轮询</option><option value="weighted" '+(strat==="weighted"?"selected":"")+'>加权</option><option value="failover" '+(strat==="failover"?"selected":"")+'>故障转移</option></select>'
     + '  <div class="form-hint">加权用权重,故障转移用顺序(小优先)</div></div>'
+    + '<div class="form-group"><label>兜底分组 <span style="color:var(--text-subtle)">(主组全部成员失败时切到该分组)</span></label>'
+    + '<select id="f_fallback_group"><option value="">不设置</option>'
+    + groups.filter(g2 => g2.name !== (isEdit ? group.name : "")).map(g2 => '<option value="'+esc(g2.name)+'" '+((isEdit && (group.fallback_group||"")===g2.name)?"selected":"")+'>'+esc(g2.name)+'</option>').join("")
+    + '</select>'
+    + '<div class="form-hint">用于跨模型兜底,如 deepseek-v4-flash 挂时切 glm5.2;兜底组也失败才会报错</div></div>'
     + '<div class="form-group"><label>成员模型 <span style="color:var(--text-subtle)">(勾选加入分组,可按模型名分组快速批量选择)</span></label>'
     + '<input id="f_gsearch" placeholder="搜索模型名 / 上游地址…" oninput="filterGroupMembers()" style="width:100%;margin-bottom:10px">'
     + '<table style="width:100%"><thead><tr><th style="width:40px">加入</th><th>模型</th><th style="width:70px">权重</th><th style="width:70px">顺序</th></tr></thead>'+groupsHtml+'</table>'
@@ -1446,6 +1451,7 @@ async function saveGroup(id) {
   const body = {
     name: document.getElementById("f_gname").value.trim(),
     strategy: document.getElementById("f_strategy").value,
+    fallback_group: document.getElementById("f_fallback_group")?.value || "",
     members,
   };
   if (!body.name) { alert("名称不能为空"); return; }

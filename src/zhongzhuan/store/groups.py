@@ -14,6 +14,8 @@ class GroupData:
     fallback_enabled: bool = True
     # 是否暴露给 Codex 模型发现（v011 新增列，默认暴露）。
     exposed: bool = True
+    # 兜底分组名（v015 新增列）：本组全部成员失败时用该分组兜底；'' = 未配置。
+    fallback_group: str = ""
     id: int | None = None
     created_at: int | None = None
 
@@ -29,15 +31,15 @@ class GroupMemberData:
 async def create_group(s: Store, g: GroupData) -> GroupData:
     now = Store.now()
     g.id = await s.execute(
-        "INSERT INTO model_groups(name, strategy, fallback_enabled, exposed, created_at) VALUES(?,?,?,?,?)",
-        (g.name, g.strategy, int(g.fallback_enabled), int(g.exposed), now),
+        "INSERT INTO model_groups(name, strategy, fallback_enabled, exposed, fallback_group, created_at) VALUES(?,?,?,?,?,?)",
+        (g.name, g.strategy, int(g.fallback_enabled), int(g.exposed), g.fallback_group or "", now),
     )
     g.created_at = now
     return g
 
 
 async def list_groups(s: Store) -> list[dict]:
-    rows = await s.fetchall("SELECT id, name, strategy, fallback_enabled, exposed, created_at FROM model_groups ORDER BY id")
+    rows = await s.fetchall("SELECT id, name, strategy, fallback_enabled, exposed, fallback_group, created_at FROM model_groups ORDER BY id")
     result = []
     for r in rows:
         members = await s.fetchall(
@@ -51,7 +53,8 @@ async def list_groups(s: Store) -> list[dict]:
                 "strategy": r[2],
                 "fallback_enabled": bool(r[3]),
                 "exposed": bool(r[4]),
-                "created_at": r[5],
+                "fallback_group": r[5] or "",
+                "created_at": r[6],
                 "members": [{"model_id": m[0], "weight": m[1], "ord": m[2]} for m in members],
             }
         )
@@ -60,7 +63,7 @@ async def list_groups(s: Store) -> list[dict]:
 
 async def get_group(s: Store, name: str) -> dict | None:
     r = await s.fetchone(
-        "SELECT id, name, strategy, fallback_enabled, exposed, created_at FROM model_groups WHERE name=?",
+        "SELECT id, name, strategy, fallback_enabled, exposed, fallback_group, created_at FROM model_groups WHERE name=?",
         (name,),
     )
     if not r:
@@ -75,15 +78,16 @@ async def get_group(s: Store, name: str) -> dict | None:
         "strategy": r[2],
         "fallback_enabled": bool(r[3]),
         "exposed": bool(r[4]),
-        "created_at": r[5],
+        "fallback_group": r[5] or "",
+        "created_at": r[6],
         "members": [{"model_id": m[0], "weight": m[1], "ord": m[2]} for m in members],
     }
 
 
 async def update_group(s: Store, group_id: int, g: GroupData) -> None:
     await s.execute(
-        "UPDATE model_groups SET name=?, strategy=?, fallback_enabled=?, exposed=? WHERE id=?",
-        (g.name, g.strategy, int(g.fallback_enabled), int(g.exposed), group_id),
+        "UPDATE model_groups SET name=?, strategy=?, fallback_enabled=?, exposed=?, fallback_group=? WHERE id=?",
+        (g.name, g.strategy, int(g.fallback_enabled), int(g.exposed), g.fallback_group or "", group_id),
     )
 
 
