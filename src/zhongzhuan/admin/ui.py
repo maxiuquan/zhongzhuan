@@ -317,7 +317,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
               <col style="width:140px">
               <col style="width:90px">
               <col style="width:65px">
-              <col style="width:105px">
+              <col style="width:178px">
             </colgroup>
             <thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>别名</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>
           <tbody id="modelTable"></tbody></table>
@@ -748,7 +748,7 @@ function modelRow(m, isFb) {
     : '<span class="tag custom">自定义</span>';
   const actions = isFb
     ? '<button class="btn small" onclick="editModel(' + m.id + ')">编辑</button>'
-    : '<button class="btn small" onclick="editModel(' + m.id + ')">编辑</button> <button class="btn small danger" onclick="delModel(' + m.id + ')">删除</button>';
+    : '<button class="btn small" onclick="editModel(' + m.id + ')">编辑</button> <button class="btn small primary" onclick="showKeyModal(' + m.id + ')">添加Key</button> <button class="btn small danger" onclick="delModel(' + m.id + ')">删除</button>';
   return '<tr class="model-row"><td><strong title="' + esc(m.name) + '">' + esc(m.name) + '</strong>' + presetBadge(m) + tagBadge(m) + noteIco + '</td>' +
     '<td><span class="truncate" title="' + esc(m.upstream_base) + '">' + esc(m.upstream_base) + '</span></td>' +
     '<td><span class="truncate" title="' + esc(m.upstream_model) + '">' + esc(m.upstream_model) + '</span></td>' +
@@ -893,7 +893,7 @@ function showModelModal(model, prefill) {
     </div>
     <div class="form-group"><label>启用</label><select id="f_enabled"><option value="1" ${isEdit && model.enabled ? "selected" : ""}>是</option><option value="0" ${isEdit && !model.enabled ? "selected" : ""}>否</option></select></div>
     <div class="form-group"><label>上游支持 reasoning_effort <span style="color:var(--text-subtle)">(上游不兼容该参数时报 400 时关闭；关闭后代理自动剥除，请求照常通过)</span></label><select id="f_supports_reasoning_effort"><option value="1" ${(!isEdit || model.supports_reasoning_effort) ? "selected" : ""}>是（默认）</option><option value="0" ${isEdit && !model.supports_reasoning_effort ? "selected" : ""}>否</option></select></div>
-    <div class="modal-actions">${isEdit ? '<button class="btn" onclick="showKeyModal(' + model.id + ')">添加 Key</button>' : ''}<button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveModel(${isEdit ? model.id : ""})">保存</button></div>`;
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveModel(${isEdit ? model.id : ""})">保存</button></div>`;
   document.getElementById("modal").classList.add("show");
 
   // 渲染自定义头初始行 + 触发条件展示
