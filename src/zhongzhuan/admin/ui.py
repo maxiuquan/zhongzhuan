@@ -777,7 +777,7 @@ function renderModelTable() {
   }
   document.getElementById("modelTable").innerHTML = html || '<tr><td colspan="9" class="empty">' + (term ? '没有匹配的模型' : '还没有模型,点击右上角添加') + '</td></tr>';
   // 名称列按全部模型中最长名称自适应宽度（超出部分由 <strong> 省略号处理）
-  fitColumn("colModelName", models.map(m => m.name), {px:13, weight:600, pad:28, extra:40, min:180, max:520});
+  fitColumn("colModelName", models.map(m => m.name), {px:13, weight:600, pad:28, extra:20, min:180, max:520});
 }
 
 // 单个模型行（isFb=true 时类型列显示「兜底」而非「自定义」，且不显示编辑/删除）
