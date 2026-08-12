@@ -1550,6 +1550,10 @@ class ProxyHandler:
             code, detail = "upstream_unavailable", f" (last terminal_reason={last_reason})"
         else:
             code, detail = "empty_upstream_response", ""
+        if last_upstream_status:
+            # 带出最后一次上游真实 HTTP 状态（如 403 = 上游 WAF/Cloudflare 封禁），
+            # 避免「empty response」误导成 relay 没转换。
+            detail += f"; last upstream status={last_upstream_status}"
         _lg.warning(
             f"[v3-stream] all {len(tried)} candidate key(s) produced no content "
             f"for response {prep.response_id}{detail}"
