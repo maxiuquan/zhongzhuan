@@ -111,15 +111,12 @@ td{padding:12px 14px;border-bottom:1px solid var(--border-muted);vertical-align:
 td .tag{vertical-align:middle}
 td>strong{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
 td:last-child{white-space:nowrap}
-td:nth-child(2),
-td:nth-child(3),
-td:nth-child(7){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-td:nth-child(4),
-td:nth-child(5),
-td:nth-child(6),
-td:nth-child(9){white-space:nowrap}
-/* 模型列表：固定行高 + 长文本省略 */
+/* 模型列表：固定行高 + 长文本省略（各单元格自带 .truncate / <strong> 截断） */
 #tab-models table{table-layout:fixed}
+/* 分组列表：固定列宽 + 成员列省略号 */
+#tab-groups table{table-layout:fixed}
+.group-row td{height:46px;vertical-align:middle;overflow:hidden}
+.group-row td:first-child{white-space:nowrap}
 .model-row td{height:46px;vertical-align:middle;overflow:hidden}
 .model-row td:first-child{white-space:nowrap}
 .truncate{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
@@ -318,18 +315,17 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
           <div style="overflow-x:auto;margin:0 -20px;padding:0 20px">
           <table>
             <colgroup>
-              <col style="width:240px">
+              <col id="colModelName" style="width:240px">
               <col style="width:240px">
               <col style="width:180px">
               <col style="width:65px">
               <col style="width:60px">
               <col style="width:70px">
-              <col style="width:140px">
               <col style="width:90px">
               <col style="width:65px">
               <col style="width:178px">
             </colgroup>
-            <thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>别名</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>
+            <thead><tr><th>名称</th><th>上游地址</th><th>上游模型</th><th>协议</th><th>RPM</th><th>TPM</th><th>类型</th><th>启用</th><th>操作</th></tr></thead>
           <tbody id="modelTable"></tbody></table>
           </div>
         </div>
@@ -359,8 +355,15 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
             <h2>分组列表</h2>
             <div class="actions"><button class="btn primary" onclick="showGroupModal()">+ 添加分组</button></div>
           </div>
-          <table><thead><tr><th>名称</th><th>策略</th><th>成员</th><th>操作</th></tr></thead>
-          <tbody id="groupTable"></tbody></table>
+          <table>
+            <colgroup>
+              <col id="colGroupName" style="width:200px">
+              <col style="width:110px">
+              <col id="colGroupMembers" style="width:300px">
+              <col style="width:160px">
+            </colgroup>
+            <thead><tr><th>名称</th><th>策略</th><th>成员</th><th>操作</th></tr></thead>
+            <tbody id="groupTable"></tbody></table>
         </div>
       </div>
 
@@ -481,6 +484,22 @@ async function api(path, opts = {}) {
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+// 文本宽度测量（用于按最长内容自适应列宽）
+const _measureCtx = document.createElement("canvas").getContext("2d");
+function measureText(t, px, weight) {
+  _measureCtx.font = (weight ? weight + " " : "") + px + 'px system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif';
+  return _measureCtx.measureText(t == null ? "" : String(t)).width;
+}
+function fitColumn(colId, texts, opts) {
+  const col = document.getElementById(colId);
+  if (!col) return;
+  let max = 0;
+  for (const t of (texts || [])) { const w = measureText(t, opts.px, opts.weight); if (w > max) max = w; }
+  let w = Math.ceil(max) + (opts.pad || 28) + (opts.extra || 0);
+  w = Math.max(opts.min || 120, Math.min(opts.max || 480, w));
+  col.style.width = w + "px";
 }
 
 function fmtNum(n) {
@@ -731,7 +750,7 @@ function renderModelTable() {
         addBtn = '<button class="btn small primary" style="margin-left:14px;flex-shrink:0" data-prefix="' + esc(gprefix) + '" data-up="' + esc(list[0].upstream_base || "") + '" onclick="event.stopPropagation();addModelToGroupBtn(this)">+ 添加模型</button>';
       }
       html += '<tr class="group-header" onclick="toggleModelGroup(' + idx + ')">' +
-        '<td colspan="10"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">' +
+        '<td colspan="9"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">' +
         '<span style="display:inline-flex;align-items:center;gap:8px;min-width:0">' +
         '<span style="display:inline-block;width:16px;color:var(--text-muted);flex-shrink:0">' + arrow + '</span>' +
         '<strong style="min-width:0">' + esc(gkey) + '</strong></span>' + meta + addBtn + '</div></td></tr>';
@@ -745,7 +764,7 @@ function renderModelTable() {
     const fbCollapsed = localStorage.getItem("fbModelsCollapsed") !== "0";
     const arrow = fbCollapsed ? "\u25b6" : "\u25bc";
     html += '<tr class="group-header" onclick="toggleFbModels()">' +
-      '<td colspan="10"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">' +
+      '<td colspan="9"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">' +
       '<span style="display:inline-flex;align-items:center;gap:8px;min-width:0">' +
       '<span style="display:inline-block;width:16px;color:var(--text-muted);flex-shrink:0">' + arrow + '</span>' +
       '<span class="tag fallback">兜底</span> <strong>内置兜底模型</strong></span>' +
@@ -756,7 +775,9 @@ function renderModelTable() {
       html += fbMatch.map(m => modelRow(m, true)).join("");
     }
   }
-  document.getElementById("modelTable").innerHTML = html || '<tr><td colspan="10" class="empty">' + (term ? '没有匹配的模型' : '还没有模型,点击右上角添加') + '</td></tr>';
+  document.getElementById("modelTable").innerHTML = html || '<tr><td colspan="9" class="empty">' + (term ? '没有匹配的模型' : '还没有模型,点击右上角添加') + '</td></tr>';
+  // 名称列按全部模型中最长名称自适应宽度（超出部分由 <strong> 省略号处理）
+  fitColumn("colModelName", models.map(m => m.name), {px:13, weight:600, pad:28, extra:130, min:180, max:520});
 }
 
 // 单个模型行（isFb=true 时类型列显示「兜底」而非「自定义」，且不显示编辑/删除）
@@ -773,7 +794,6 @@ function modelRow(m, isFb) {
     '<td><code>' + (m.protocol || "openai") + '</code></td>' +
     '<td>' + (m.rpm_limit || "不限") + '</td>' +
     '<td>' + (m.tpm_limit || "不限") + '</td>' +
-    '<td>' + (m.aliases ? '<code class="truncate" title="' + esc(m.aliases) + '">' + esc(m.aliases) + '</code>' : '<span style="color:var(--text-subtle)">-</span>') + '</td>' +
     '<td>' + typeCell + '</td>' +
     '<td>' + (m.enabled ? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否') + '</td>' +
     '<td>' + actions + '</td></tr>';
@@ -1238,9 +1258,11 @@ async function loadGroups() {
   document.getElementById("groupTable").innerHTML = groups.length === 0
     ? '<tr><td colspan="4" class="empty">还没有分组</td></tr>'
     : groups.map(g => `
-      <tr><td><strong>${esc(g.name)}</strong></td><td><code>${esc(g.strategy)}</code></td>
-      <td>${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id)) + '<span style="color:var(--text-subtle);font-size:11px">(w'+(x.weight||1)+',o'+(x.ord||0)+')</span>').join(", ") || '<span style="color:var(--text-subtle)">无</span>'}</td>
+      <tr class="group-row"><td><strong class="truncate" title="${esc(g.name)}">${esc(g.name)}</strong></td><td><code>${esc(g.strategy)}</code></td>
+      <td><span class="truncate" title="${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id)) + '(w'+(x.weight||1)+',o'+(x.ord||0)+')').join(', ')}">${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id)) + '<span style="color:var(--text-subtle);font-size:11px">(w'+(x.weight||1)+',o'+(x.ord||0)+')</span>').join(", ") || '<span style="color:var(--text-subtle)">无</span>'}</span></td>
       <td><button class="btn small" onclick="editGroup(${g.id})">编辑</button> <button class="btn small danger" onclick="delGroup(${g.id})">删除</button></td></tr>`).join("");
+  // 名称列按最长分组名自适应宽度
+  fitColumn("colGroupName", groups.map(g => g.name), {px:13, weight:600, pad:28, min:140, max:360});
 }
 
 async function delGroup(id) {
