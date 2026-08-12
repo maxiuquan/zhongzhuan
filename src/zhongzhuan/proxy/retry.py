@@ -200,7 +200,42 @@ def looks_like_cloudflare_block(status_code: int, headers: dict, body: bytes = b
     return False
 
 
-def classify_failure(k: KeyHealth, status_code: int, headers: dict) -> bool:
+_PROXY_BLOCK_BODY_MARKERS = (
+    b"please check your network settings",
+    b"error code: 1010",
+    b"error code: 1011",
+    b"error code: 1015",
+    b"error code: 1020",
+    b"cf-error-code",
+)
+
+
+def looks_like_proxy_block(status_code: int, headers: dict, body: bytes = b"") -> bool:
+    """Detect an upstream block page wrapped/rewritten by a reverse proxy.
+
+    Some relay layers (e.g. the user's `.macc.eu.cc` proxy) sit in front of
+    Cloudflare-protected upstreams and rewrite Cloudflare's 1010/1020 challenge
+    pages into a clean JSON envelope such as::
+
+        {"error": {"message": "Access denied. Please check your network settings."}}
+
+    They strip the `server: cloudflare` / `cf-ray` / HTML markers that
+    `looks_like_cloudflare_block` relies on, so the 403 would otherwise be
+    misclassified as an `auth_failure` (1h key cooldown).  That is wrong: the
+    key is fine, only the *egress IP* is banned and will recover in minutes.
+    Detect the proxy-block signature by body content and treat it as a
+    transient `server_error` (short backoff + failover to the next group
+    member), not a permanent auth failure.
+    """
+    if status_code not in (403, 503):
+        return False
+    low = (body or b"")[:8192].lower()
+    if any(m in low for m in _PROXY_BLOCK_BODY_MARKERS):
+        return True
+    return False
+
+
+def classify_failure(k: KeyHealth, status_code: int, headers: dict, body: bytes = b"") -> bool:
     """根据上游状态码分类失败并更新 key 健康状态（优化点2：消除 handler 重复逻辑）。
 
     返回 True 表示可重试（应换下一个 key），False 表示请求侧错误（应直接返回客户端）。
@@ -211,7 +246,10 @@ def classify_failure(k: KeyHealth, status_code: int, headers: dict) -> bool:
         # upstream is futile, but classifying it as a server error lets
         # failover to an alternative upstream (e.g. a non-Cloudflare 中转站)
         # kick in, and avoids poisoning the key with a 1h auth cooldown.
-        if status_code == 403 and looks_like_cloudflare_block(status_code, headers):
+        if status_code == 403 and (
+            looks_like_cloudflare_block(status_code, headers, body)
+            or looks_like_proxy_block(status_code, headers, body)
+        ):
             mark_server_error(k)
             return True
         mark_auth_failure(k)

@@ -1282,29 +1282,75 @@ function showGroupModal(group) {
   const memberMap = {};
   initMembers.forEach(m => memberMap[m.model_id] = m);
   const strat = isEdit ? group.strategy : "round_robin";
-  const memberRows = models.map(m => {
+
+  // 按模型名(去掉上游前缀)聚合: amd/deepseek-v4-flash 与 p0/deepseek-v4-flash 视为同一模型,仅上游不同
+  const gmap = new Map();
+  models.forEach(m => {
+    const key = (m.name.split('/').slice(1).join('/') || m.name);
+    if (!gmap.has(key)) gmap.set(key, []);
+    gmap.get(key).push(m);
+  });
+  const keysSorted = [...gmap.keys()].sort((a,b)=>a.localeCompare(b));
+  const defaultExpanded = new Set();
+  keysSorted.forEach(k => { if (gmap.get(k).some(m => memberMap[m.id])) defaultExpanded.add(k); });
+
+  const rowsHtml = (list) => list.map(m => {
     const sel = memberMap[m.id];
     const checked = !!sel;
     const w = sel ? sel.weight : 1;
     const o = sel ? sel.ord : 0;
     const tag = m.is_fallback ? ' <span class="tag fallback">兜底</span>' : "";
-    return `<tr>
-      <td><input type="checkbox" data-mid="${m.id}" class="gmem-chk" ${checked?"checked":""}></td>
-      <td>${esc(m.name)}${tag}</td>
-      <td><input type="number" data-mid="${m.id}" class="gmem-w" value="${w}" min="1" style="width:60px" ${checked?"":"disabled"}></td>
-      <td><input type="number" data-mid="${m.id}" class="gmem-o" value="${o}" min="0" style="width:60px" ${checked?"":"disabled"}></td>
-    </tr>`;
+    return '<tr class="gm-row" data-mname="'+(m.name||'').toLowerCase()+'" data-extra="'+((m.upstream_base||'')+' '+(m.upstream_model||'')).toLowerCase().replace(/"/g,'')+'">'
+      + '<td><input type="checkbox" data-mid="'+m.id+'" class="gmem-chk" '+(checked?"checked":"")+'></td>'
+      + '<td>'+esc(m.name)+tag+'</td>'
+      + '<td><input type="number" data-mid="'+m.id+'" class="gmem-w" value="'+w+'" min="1" style="width:60px" '+(checked?"":"disabled")+'></td>'
+      + '<td><input type="number" data-mid="'+m.id+'" class="gmem-o" value="'+o+'" min="0" style="width:60px" '+(checked?"":"disabled")+'></td>'
+      + '</tr>';
   }).join("");
-  document.getElementById("modalContent").innerHTML = `
-    <h3>${isEdit ? "编辑分组" : "添加分组"}</h3>
-    <div class="form-group"><label>名称 <span style="color:var(--text-subtle)">(作为下游可调用的模型名)</span></label><input id="f_gname" value="${isEdit ? esc(group.name) : ""}"></div>
-    <div class="form-group"><label>策略</label><select id="f_strategy"><option value="round_robin" ${strat==="round_robin"?"selected":""}>轮询</option><option value="weighted" ${strat==="weighted"?"selected":""}>加权</option><option value="failover" ${strat==="failover"?"selected":""}>故障转移</option></select>
-      <div class="form-hint">加权用权重,故障转移用顺序(小优先)</div></div>
-    <div class="form-group"><label>成员模型 <span style="color:var(--text-subtle)">(勾选加入分组)</span></label>
-      <table style="width:100%"><thead><tr><th style="width:40px">加入</th><th>模型</th><th style="width:70px">权重</th><th style="width:70px">顺序</th></tr></thead><tbody>${memberRows}</tbody></table>
-    </div>
-    <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveGroup(${isEdit ? group.id : ""})">保存</button></div>`;
+
+  const groupsHtml = keysSorted.map((gkey) => {
+    const list = gmap.get(gkey);
+    const expanded = defaultExpanded.has(gkey);
+    const upstreams = [...new Set(list.map(m => m.name.split('/')[0] || "默认"))];
+    const upStr = esc(upstreams.join(' · '));
+    return '<tbody class="gm-group" data-gkey="'+gkey.toLowerCase()+'">'
+      + '<tr class="group-header" onclick="toggleGroupMemberGroup(this)">'
+      + '<td colspan="4"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%">'
+      + '<span style="display:inline-flex;align-items:center;gap:8px;min-width:0">'
+      + '<span class="gm-arrow" style="display:inline-block;width:16px;color:var(--text-muted);flex-shrink:0">'+(expanded?"\u25bc":"\u25b6")+'</span>'
+      + '<strong style="min-width:0">'+esc(gkey)+'</strong></span>'
+      + '<span class="group-meta"><span class="pill"><strong>'+list.length+'</strong> 个上游</span>'+(upstreams.length?'<span class="pill" title="'+upStr+'">'+upStr+'</span>':'')+'</span>'
+      + '<label style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-subtle);cursor:pointer" onclick="event.stopPropagation();groupMemberSelectAll(this)"><input type="checkbox" class="gm-selall"> 全选</label>'
+      + '</div></td></tr>'
+      + rowsHtml(list)
+      + '</tbody>';
+  }).join("");
+
+  document.getElementById("modalContent").innerHTML = ''
+    + '<h3>'+ (isEdit ? "编辑分组" : "添加分组") +'</h3>'
+    + '<div class="form-group"><label>名称 <span style="color:var(--text-subtle)">(作为下游可调用的模型名)</span></label><input id="f_gname" value="'+ (isEdit ? esc(group.name) : "") +'"></div>'
+    + '<div class="form-group"><label>策略</label><select id="f_strategy"><option value="round_robin" '+(strat==="round_robin"?"selected":"")+'>轮询</option><option value="weighted" '+(strat==="weighted"?"selected":"")+'>加权</option><option value="failover" '+(strat==="failover"?"selected":"")+'>故障转移</option></select>'
+    + '  <div class="form-hint">加权用权重,故障转移用顺序(小优先)</div></div>'
+    + '<div class="form-group"><label>成员模型 <span style="color:var(--text-subtle)">(勾选加入分组,可按模型名分组快速批量选择)</span></label>'
+    + '<input id="f_gsearch" placeholder="搜索模型名 / 上游地址…" oninput="filterGroupMembers()" style="width:100%;margin-bottom:10px">'
+    + '<table style="width:100%"><thead><tr><th style="width:40px">加入</th><th>模型</th><th style="width:70px">权重</th><th style="width:70px">顺序</th></tr></thead>'+groupsHtml+'</table>'
+    + '</div>'
+    + '<div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveGroup('+ (isEdit ? group.id : "") +')">保存</button></div>';
+
   document.getElementById("modal").classList.add("show");
+
+  // 折叠:默认展开含当前成员的组,其余折叠
+  __gmCollapsed = new Set();
+  keysSorted.forEach(k => { if (!defaultExpanded.has(k)) __gmCollapsed.add(k); });
+  document.querySelectorAll('tbody.gm-group').forEach(tbody => {
+    const gkey = tbody.dataset.gkey;
+    const arrow = tbody.querySelector('.gm-arrow');
+    if (__gmCollapsed.has(gkey)) {
+      if (arrow) arrow.textContent = '\u25b6';
+      tbody.querySelectorAll('tr.gm-row').forEach(r => r.style.display = 'none');
+    }
+  });
+
   document.querySelectorAll(".gmem-chk").forEach(c => {
     c.addEventListener("change", () => {
       const mid = c.dataset.mid;
@@ -1312,10 +1358,79 @@ function showGroupModal(group) {
       const oEl = document.querySelector('.gmem-o[data-mid="'+mid+'"]');
       if (wEl) wEl.disabled = !c.checked;
       if (oEl) oEl.disabled = !c.checked;
+      const grp = c.closest('.gm-group');
+      if (grp) syncGroupSelAll(grp);
     });
+  });
+  document.querySelectorAll('.gm-group').forEach(g => syncGroupSelAll(g));
+}
+
+let __gmCollapsed = new Set();
+
+function toggleGroupMemberGroup(headerRow) {
+  const tbody = headerRow.closest('tbody.gm-group');
+  if (!tbody) return;
+  const gkey = tbody.dataset.gkey;
+  const rows = tbody.querySelectorAll('tr.gm-row');
+  const arrow = tbody.querySelector('.gm-arrow');
+  if (__gmCollapsed.has(gkey)) {
+    __gmCollapsed.delete(gkey);
+    if (arrow) arrow.textContent = '\u25bc';
+    rows.forEach(r => r.style.display = '');
+  } else {
+    __gmCollapsed.add(gkey);
+    if (arrow) arrow.textContent = '\u25b6';
+    rows.forEach(r => r.style.display = 'none');
+  }
+}
+
+function groupMemberSelectAll(labelEl) {
+  const tbody = labelEl.closest('tbody.gm-group');
+  if (!tbody) return;
+  const chk = labelEl.querySelector('.gm-selall');
+  const on = chk.checked;
+  tbody.querySelectorAll('tr.gm-row .gmem-chk').forEach(c => {
+    if (c.checked !== on) { c.checked = on; c.dispatchEvent(new Event('change')); }
   });
 }
 
+function syncGroupSelAll(tbody) {
+  const chks = tbody.querySelectorAll('tr.gm-row .gmem-chk');
+  const sel = tbody.querySelector('.gm-selall');
+  if (!sel || chks.length === 0) return;
+  const allChecked = [...chks].every(c => c.checked);
+  const someChecked = [...chks].some(c => c.checked);
+  sel.checked = allChecked;
+  sel.indeterminate = !allChecked && someChecked;
+}
+
+function filterGroupMembers() {
+  const term = (((document.getElementById('f_gsearch')||{}).value) || '').trim().toLowerCase();
+  if (!term) {
+    document.querySelectorAll('tbody.gm-group').forEach(tbody => {
+      const gkey = tbody.dataset.gkey;
+      const arrow = tbody.querySelector('.gm-arrow');
+      const collapsed = __gmCollapsed.has(gkey);
+      if (arrow) arrow.textContent = collapsed ? '\u25b6' : '\u25bc';
+      tbody.querySelectorAll('tr.gm-row').forEach(r => r.style.display = collapsed ? 'none' : '');
+      tbody.style.display = '';
+    });
+    return;
+  }
+  document.querySelectorAll('tbody.gm-group').forEach(tbody => {
+    const gkey = (tbody.dataset.gkey || '').toLowerCase();
+    let visible = 0;
+    tbody.querySelectorAll('tr.gm-row').forEach(r => {
+      const mname = (r.dataset.mname || '');
+      const extra = (r.dataset.extra || '');
+      const hit = mname.includes(term) || extra.includes(term) || gkey.includes(term);
+      r.style.display = hit ? '' : 'none';
+      if (hit) visible++;
+    });
+    const headerHit = gkey.includes(term);
+    tbody.style.display = (visible === 0 && !headerHit) ? 'none' : '';
+  });
+}
 async function saveGroup(id) {
   const checks = document.querySelectorAll(".gmem-chk");
   const members = [];

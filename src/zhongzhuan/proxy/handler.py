@@ -141,7 +141,7 @@ def _clean_upstream_failure(status_code: int, body: bytes, headers: dict | None)
     Returns ``(status, body, content_type)`` — unchanged unless it's a
     Cloudflare block, in which case ``(502, json_bytes, "application/json")``.
     """
-    if looks_like_cloudflare_block(status_code, headers or {}, body or b""):
+    if looks_like_cloudflare_block(status_code, headers or {}, body or b"") or looks_like_proxy_block(status_code, headers or {}, body or b""):
         payload = json.dumps(
             {
                 "error": {
@@ -1051,7 +1051,10 @@ class ProxyHandler:
             if resp.status_code >= 400:
                 # 499 是客户端自己走了，重试毫无意义；4xx（除 429）是请求本身
                 # 的问题，换 key 也还是同样的错。只有 429 / 5xx 值得换。
-                if resp.status_code == 499 or (400 <= resp.status_code < 500 and resp.status_code != 429):
+                # 403 可能是当前上游被 CF/代理 1010 封禁（classify_failure 已判可重试）：
+                # 换 key 试下一位成员才有意义（failover 分组的价值所在，否则分组形同虚设）。
+                # 其余 4xx（400/404/422 等）是请求本身问题，换 key 也一样，break。
+                if resp.status_code == 499 or (400 <= resp.status_code < 500 and resp.status_code not in (429, 403)):
                     break
                 _lg.info(
                     f"[v3] key_id={attempt_key.key_id} status={resp.status_code}; "
@@ -1274,7 +1277,7 @@ class ProxyHandler:
                         )
                         await self._aclose_quietly(upstream_gen)
                         continue
-                    _retryable = classify_failure(key, upstream_resp.status_code, upstream_headers)
+                    _retryable = classify_failure(key, upstream_resp.status_code, upstream_headers, error_body)
                     if _retryable:
                         # Retryable upstream states must not park the key: the next
                         # request gets to try it again (same rule as the non-stream path).
@@ -2080,7 +2083,7 @@ class ProxyHandler:
             resp_headers.pop("content-encoding", None)
 
         if resp.status_code >= 400:
-            should_retry = classify_failure(key, resp.status_code, resp_headers)
+            should_retry = classify_failure(key, resp.status_code, resp_headers, data)
             _lg.info(
                 f"[v3] key_id={key.key_id} upstream status={resp.status_code} retry={should_retry} body={data[:300]!r}"
             )
@@ -3053,7 +3056,7 @@ class ProxyHandler:
                         body = data
 
                     # 优化点2：用 classify_failure 统一处理状态码分流（消除重复）
-                    should_retry = classify_failure(k, resp.status_code, resp_headers)
+                    should_retry = classify_failure(k, resp.status_code, resp_headers, data)
 
                     _lg.info(
                         f"[{id(request):x}] key_id={k.key_id} failure status={status} "
@@ -3390,13 +3393,15 @@ class ProxyHandler:
                                 _up_headers = dict(upstream_resp.headers)
                                 # T07: 使用返回值决定是否换 key。True=可重试（换下
                                 # 一个 key）；False=请求侧错误（直接返回客户端）。
-                                _retryable = classify_failure(k, _st, _up_headers)
-                                # Drain error body for logging / circuit breaker
+                                # Drain error body first so it drives both classification
+                                # (proxy-block detection) and logging/circuit-breaking.
                                 try:
                                     err_body = await upstream_resp.aread()
                                     err_txt = err_body.decode("utf-8", errors="replace")[:300]
                                 except Exception:
+                                    err_body = b""
                                     err_txt = ""
+                                _retryable = classify_failure(k, _st, _up_headers, err_body)
                                 _lg.info(
                                     f"[{id(request):x}] streaming: key_id={k.key_id} "
                                     f"upstream status={_st} key_state={k.status} "
