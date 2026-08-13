@@ -2533,7 +2533,7 @@ class ProxyHandler:
             stringify_content=stringify_content,
         )
         if error is not None:
-            return error, b""
+            return error, b"", "", False
         assert call is not None  # narrow for type checkers: error is None
         key = call.key
         client = call.client
@@ -2553,14 +2553,14 @@ class ProxyHandler:
         except (ConnectionResetError, ConnectionError, OSError) as exc:
             transport = request.transport
             if transport is not None and transport.is_closing():
-                return _http_json(499, b"Client Closed Request"), b""
+                return _http_json(499, b"Client Closed Request"), b"", "", False
             _lg.error(f"[v3] key_id={key.key_id} connection error: {type(exc).__name__}: {exc}")
             mark_network_failure(key)
-            return _http_json(502, {"error": "upstream connection failed"}), b""
+            return _http_json(502, {"error": "upstream connection failed"}), b"", "", False
         except Exception as exc:
             _lg.error(f"[v3] key_id={key.key_id} exception: {type(exc).__name__}: {exc}")
             mark_network_failure(key)
-            return _http_json(502, {"error": "upstream request failed"}), b""
+            return _http_json(502, {"error": "upstream request failed"}), b"", "", False
 
         data = await resp.aread()
         resp_headers = dict(resp.headers)
@@ -2602,7 +2602,7 @@ class ProxyHandler:
                     f"[v3] responses passthrough returned chat-style error "
                     f"(key_id={key.key_id}); degrading single request to chat translation"
                 )
-                return await self._run_v3_nonstream(
+                _r, _p, _ob, _tr = await self._run_v3_nonstream(
                     request=request,
                     body_obj=body_obj,
                     final_body=final_body,
@@ -2613,6 +2613,7 @@ class ProxyHandler:
                     required_caps=required_caps,
                     force_translate=True,
                 )
+                return _r, _p, _ob, _tr
             # D self-heal: the upstream rejected reasoning_effort. Strip it and
             # re-issue the *same* request once (same key). The client receives
             # only the successful response. Only fires when reasoning_effort was
@@ -2629,7 +2630,7 @@ class ProxyHandler:
                     f"[v3] upstream rejected reasoning_effort (key_id={key.key_id}); "
                     f"stripping param and retrying once"
                 )
-                return await self._run_v3_nonstream(
+                _r, _p, _ob, _tr = await self._run_v3_nonstream(
                     request=request,
                     body_obj=body_obj,
                     final_body=json.dumps(body_obj, ensure_ascii=False).encode(),
@@ -2640,10 +2641,11 @@ class ProxyHandler:
                     required_caps=required_caps,
                     force_translate=force_translate,
                 )
+                return _r, _p, _ob, _tr
             result = _V3UpstreamResult(
                 resp.status_code, data, outbound_protocol, need_translation
             )
-            return result, data
+            return result, data, outbound_protocol, need_translation
 
         mark_success(key)
         learn_rate_limits(key, resp_headers, resp.status_code)
