@@ -1048,6 +1048,7 @@ class ProxyHandler:
             return error
         assert prep is not None  # narrow for type checkers: error is None
 
+        t0 = time.time()
         max_switches = min(len(candidates), _V3_STREAM_MAX_SWITCHES + 1)
         tried: set[int] = set()
         resp = None
@@ -1061,7 +1062,7 @@ class ProxyHandler:
                 break
             attempt_key = decision.key
             tried.add(attempt_key.key_id)
-            resp, payload_bytes = await self._run_v3_nonstream(
+            resp, payload_bytes, _, _ = await self._run_v3_nonstream(
                 request=request,
                 body_obj=prep.upstream_body,
                 final_body=prep.final_body,
@@ -1106,7 +1107,7 @@ class ProxyHandler:
                     f"[v3] key_id={attempt_key.key_id} upstream returned SSE for "
                     f"non-stream; retrying once with string content"
                 )
-                resp, payload_bytes = await self._run_v3_nonstream(
+                resp, payload_bytes, _, _ = await self._run_v3_nonstream(
                     request=request,
                     body_obj=prep.upstream_body,
                     final_body=json.dumps(prep.upstream_body, ensure_ascii=False).encode(),
@@ -1136,6 +1137,13 @@ class ProxyHandler:
             break
 
         if resp is None:
+            self._v3_log_request(
+                request=request,
+                model_name=ctx.requested_model or "",
+                key_id=None,
+                status=503,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
             return web.json_response({"error": "no enabled keys"}, status=503)
 
         # ---- 分组兜底（v015）：主组全部 key 失败 → 用配置的兜底分组重试 ----
@@ -1148,7 +1156,7 @@ class ProxyHandler:
                 )
                 for fk in fb_cands:
                     fdec = SimpleNamespace(key=fk, upstream_path="", is_native=False)
-                    fr, fpayload = await self._run_v3_nonstream(
+                    fr, fpayload, _, _ = await self._run_v3_nonstream(
                         request=request,
                         body_obj=prep.upstream_body,
                         final_body=json.dumps(prep.upstream_body, ensure_ascii=False).encode(),
@@ -1169,6 +1177,15 @@ class ProxyHandler:
                             break
                         # 200 但空壳（非 dict）→ 试下一个 fallback key
         if resp.status_code >= 400:
+            self._v3_log_request(
+                request=request,
+                model_name=ctx.requested_model or "",
+                key_id=attempt_key.key_id if attempt_key is not None else None,
+                status=resp.status_code,
+                latency_ms=int((time.time() - t0) * 1000),
+                outbound_protocol=getattr(resp, "outbound_protocol", ""),
+                translated=getattr(resp, "need_translation", False),
+            )
             return web.Response(
                 status=resp.status_code,
                 body=payload_bytes,
@@ -1208,6 +1225,21 @@ class ProxyHandler:
                 usage=usage,
                 output=output,
             )
+        # 落请求日志（fire-and-forget）：v3 非流成功路径此前从不写 request_logs。
+        _v3_usage = resp_obj.get("usage") if isinstance(resp_obj.get("usage"), dict) else {}
+        _v3_tin = int(_v3_usage.get("prompt_tokens") or _v3_usage.get("input_tokens") or 0)
+        _v3_tout = int(_v3_usage.get("completion_tokens") or _v3_usage.get("output_tokens") or 0)
+        self._v3_log_request(
+            request=request,
+            model_name=ctx.requested_model or "",
+            key_id=attempt_key.key_id if attempt_key is not None else None,
+            status=200,
+            latency_ms=int((time.time() - t0) * 1000),
+            tokens_in=_v3_tin,
+            tokens_out=_v3_tout,
+            outbound_protocol=getattr(resp, "outbound_protocol", ""),
+            translated=getattr(resp, "need_translation", False),
+        )
         return web.json_response(resp_obj, status=200)
 
     # ------------------------------------------------------------------
@@ -1243,6 +1275,7 @@ class ProxyHandler:
             return error
         assert prep is not None
 
+        t0 = time.time()
         max_switches = min(len(candidates), _V3_STREAM_MAX_SWITCHES + 1)
         tried: set[int] = set()
         #: 以硬性 HTTP 错误（>=400）收场的 key。空流/连接问题的 key 不在其中——
@@ -1263,6 +1296,10 @@ class ProxyHandler:
         #: 错误体必须透传上游的真实原因，而不是笼统的「空响应」。
         last_upstream_status = 0
         last_upstream_body = b""
+        # 日志用：记录最近一次尝试实际服务的 key / 协议，供全败兜底(502)处回填。
+        last_key_id = None
+        last_outbound = ""
+        last_translated = False
 
         # 整个重试过程共享同一个 200 响应对象；只有在确认首个内容帧后才会
         # ``prepare`` 并提交给客户端（在此之前换 key 对客户端透明）。
@@ -1296,6 +1333,13 @@ class ProxyHandler:
                 )
                 if call_error is not None:
                     if call_error.status_code == 429:
+                        self._v3_log_request(
+                            request=request,
+                            model_name=ctx.requested_model or "",
+                            key_id=decision.key.key_id,
+                            status=call_error.status_code,
+                            latency_ms=int((time.time() - t0) * 1000),
+                        )
                         await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
                         return web.Response(
                             status=call_error.status_code,
@@ -1309,6 +1353,10 @@ class ProxyHandler:
                 assert call is not None
                 key = call.key
                 tried.add(key.key_id)
+                # 记录最近一次实际尝试，供全败 502 兜底回填日志。
+                last_key_id = key.key_id
+                last_outbound = call.outbound_protocol
+                last_translated = call.need_translation
 
                 # A7. Open the upstream and read its response header.
                 upstream_gen = call.client.stream(
@@ -1380,6 +1428,15 @@ class ProxyHandler:
                         f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} body={error_body[:300]!r}"
                     )
                     if not _retryable:
+                        self._v3_log_request(
+                            request=request,
+                            model_name=ctx.requested_model or "",
+                            key_id=key.key_id,
+                            status=upstream_resp.status_code,
+                            latency_ms=int((time.time() - t0) * 1000),
+                            outbound_protocol=call.outbound_protocol,
+                            translated=call.need_translation,
+                        )
                         await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
                         return web.Response(
                             status=upstream_resp.status_code,
@@ -1461,6 +1518,16 @@ class ProxyHandler:
                     # 首字节都没发出去客户端就走了：这次尝试不留痕迹。
                     deferred.event_log.discard()
                 pipeline.stats.client_disconnects += 1
+                # 客户端在首字节前断开：记 499（fire-and-forget），不影响返回。
+                self._v3_log_request(
+                    request=request,
+                    model_name=ctx.requested_model or "",
+                    key_id=key.key_id,
+                    status=499,
+                    latency_ms=int((time.time() - t0) * 1000),
+                    outbound_protocol=call.outbound_protocol,
+                    translated=call.need_translation,
+                )
                 await self._persist_v3_stream_terminal(
                     prep,
                     "incomplete",
@@ -1477,6 +1544,17 @@ class ProxyHandler:
                     self._set_sticky(session_key, key.key_id, required_caps)
                     asyncio.create_task(self._persist_sticky_binding(session_key, key.key_id, required_caps))
                 status = pipeline.state if pipeline.state in ("completed", "failed", "incomplete") else "incomplete"
+                # 流式成功（已向客户端提交内容）：记 200。token 用量 v3 流
+                # 路径暂无可靠来源，记 0/0（请求数/成功率/延迟已足够驱动仪表盘）。
+                self._v3_log_request(
+                    request=request,
+                    model_name=ctx.requested_model or "",
+                    key_id=key.key_id,
+                    status=200,
+                    latency_ms=int((time.time() - t0) * 1000),
+                    outbound_protocol=call.outbound_protocol,
+                    translated=call.need_translation,
+                )
                 await self._persist_v3_stream_terminal(
                     prep,
                     status,
@@ -1631,6 +1709,16 @@ class ProxyHandler:
             f"for response {prep.response_id}{detail}"
         )
         await self._persist_v3_stream_terminal(prep, "failed", last_reason or TerminalReason.UPSTREAM_ERROR.value)
+        # 所有候选 key 首字节前全败：记 502（用最近一次尝试的 key/协议回填）。
+        self._v3_log_request(
+            request=request,
+            model_name=ctx.requested_model or "",
+            key_id=last_key_id,
+            status=502,
+            latency_ms=int((time.time() - t0) * 1000),
+            outbound_protocol=last_outbound,
+            translated=last_translated,
+        )
         return web.json_response(
             {
                 "error": {
@@ -1693,7 +1781,7 @@ class ProxyHandler:
                 upstream_path="",
                 is_native=getattr(prep.decision, "is_native", False),
             )
-            resp, payload = await self._run_v3_nonstream(
+            resp, payload, _, _ = await self._run_v3_nonstream(
                 request=request,
                 body_obj=body_obj,
                 final_body=json.dumps(body_obj, ensure_ascii=False).encode(),
@@ -1719,7 +1807,7 @@ class ProxyHandler:
                         f"[v3-stream] NS-fallback got SSE for non-stream (key_id={k.key_id}); "
                         f"retrying once with string content"
                     )
-                    resp, payload = await self._run_v3_nonstream(
+                    resp, payload, _, _ = await self._run_v3_nonstream(
                         request=request,
                         body_obj=body_obj,
                         final_body=json.dumps(body_obj, ensure_ascii=False).encode(),
@@ -1758,6 +1846,21 @@ class ProxyHandler:
             resp_out.headers["Cache-Control"] = "no-cache"
             resp_out.headers["X-Accel-Buffering"] = "no"
             resp_out.headers["Connection"] = "keep-alive"
+            # 非流降级成功：记 200（带 usage token）。fire-and-forget，不阻塞回放。
+            _fb_usage = resp_obj.get("usage") if isinstance(resp_obj.get("usage"), dict) else {}
+            _fb_tin = int(_fb_usage.get("prompt_tokens") or _fb_usage.get("input_tokens") or 0)
+            _fb_tout = int(_fb_usage.get("completion_tokens") or _fb_usage.get("output_tokens") or 0)
+            self._v3_log_request(
+                request=request,
+                model_name=ctx.requested_model or "",
+                key_id=k.key_id,
+                status=200,
+                latency_ms=int((time.time() - t0) * 1000),
+                tokens_in=_fb_tin,
+                tokens_out=_fb_tout,
+                outbound_protocol=resp.outbound_protocol,
+                translated=resp.need_translation,
+            )
             try:
                 await resp_out.prepare(request)
                 for f in frames:
@@ -2537,7 +2640,9 @@ class ProxyHandler:
                     required_caps=required_caps,
                     force_translate=force_translate,
                 )
-            result = _V3UpstreamResult(resp.status_code, data)
+            result = _V3UpstreamResult(
+                resp.status_code, data, outbound_protocol, need_translation
+            )
             return result, data
 
         mark_success(key)
@@ -2579,7 +2684,9 @@ class ProxyHandler:
             except (json.JSONDecodeError, ValueError) as exc:
                 _lg.warning(f"[v3] failed to translate response: {exc}, returning raw")
 
-        return _V3UpstreamResult(resp.status_code, data), data
+        return _V3UpstreamResult(
+            resp.status_code, data, outbound_protocol, need_translation
+        ), data
 
     def _filter_v3_candidates(
         self,
@@ -4061,6 +4168,56 @@ class ProxyHandler:
             except Exception:
                 _lg.exception("deduct_token_quota failed")
 
+    def _v3_log_request(
+        self,
+        *,
+        request: web.Request,
+        model_name: str,
+        key_id: int | None,
+        status: int,
+        latency_ms: int,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        outbound_protocol: str = "",
+        translated: bool = False,
+    ) -> None:
+        """Fire-and-forget request logging for the v3 (``/v1/responses``) path.
+
+        The v3 handlers (``_dispatch_v3_create`` / ``_dispatch_v3_create_stream``)
+        used to never write ``request_logs`` — only the legacy ``_stream_proxy``
+        did — so every Codex request was invisible to the admin UI logs and the
+        dashboard.  This helper mirrors that legacy logging but is strictly
+        non-blocking: the caller has already built + returned its response by
+        the time the scheduled task runs.  All DB errors are swallowed inside
+        :meth:`_log_and_deduct`, so a logging failure can never affect the
+        downstream request.
+        """
+        if not self.store:
+            return
+        # Capture request-bound values into locals BEFORE scheduling the task:
+        # the task runs later, by which point ``request`` may already be closed.
+        _client_ip = request.remote or ""
+        _token_id = request.get("token_id", 0)
+        _model = model_name or ""
+        _ob = outbound_protocol
+        _tr = translated
+        asyncio.create_task(
+            self._log_and_deduct(
+                self.store,
+                client_ip=_client_ip,
+                model_name=_model,
+                key_id=key_id,
+                status=status,
+                latency_ms=latency_ms,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                inbound_protocol="responses",
+                outbound_protocol=_ob,
+                translated=_tr,
+                token_id=_token_id,
+            )
+        )
+
     async def _list_models(self) -> web.Response:
         """Return the list of custom model names configured in the admin UI.
 
@@ -4216,13 +4373,25 @@ class _V3UpstreamResult:
 
     Both the early-error branch (``_http_json``) and the real ``httpx.Response``
     expose ``status_code`` + ``body`` so the caller needs no type dispatch.
+
+    ``outbound_protocol`` / ``need_translation`` are carried alongside so the
+    caller (the v3 request-logging path) can record which upstream protocol
+    actually served the request without re-deriving it.
     """
 
-    __slots__ = ("status_code", "body")
+    __slots__ = ("status_code", "body", "outbound_protocol", "need_translation")
 
-    def __init__(self, status_code: int, body: bytes) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        body: bytes,
+        outbound_protocol: str = "",
+        need_translation: bool = False,
+    ) -> None:
         self.status_code = int(status_code)
         self.body = body if isinstance(body, bytes) else str(body).encode("utf-8")
+        self.outbound_protocol = outbound_protocol
+        self.need_translation = bool(need_translation)
 
 
 def _http_json(status: int, payload: Any) -> _V3UpstreamResult:
