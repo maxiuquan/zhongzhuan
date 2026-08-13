@@ -1180,6 +1180,7 @@ class ProxyHandler:
             self._v3_log_request(
                 request=request,
                 model_name=ctx.requested_model or "",
+                member_model=attempt_key.model_name if attempt_key is not None else "",
                 key_id=attempt_key.key_id if attempt_key is not None else None,
                 status=resp.status_code,
                 latency_ms=int((time.time() - t0) * 1000),
@@ -1232,6 +1233,7 @@ class ProxyHandler:
         self._v3_log_request(
             request=request,
             model_name=ctx.requested_model or "",
+            member_model=attempt_key.model_name if attempt_key is not None else "",
             key_id=attempt_key.key_id if attempt_key is not None else None,
             status=200,
             latency_ms=int((time.time() - t0) * 1000),
@@ -1296,10 +1298,12 @@ class ProxyHandler:
         #: 错误体必须透传上游的真实原因，而不是笼统的「空响应」。
         last_upstream_status = 0
         last_upstream_body = b""
-        # 日志用：记录最近一次尝试实际服务的 key / 协议，供全败兜底(502)处回填。
+        # 日志用：记录最近一次尝试实际服务的 key / 协议 / 成员模型名，
+        # 供全败兜底(502)处回填。
         last_key_id = None
         last_outbound = ""
         last_translated = False
+        last_member_model = ""
 
         # 整个重试过程共享同一个 200 响应对象；只有在确认首个内容帧后才会
         # ``prepare`` 并提交给客户端（在此之前换 key 对客户端透明）。
@@ -1336,6 +1340,7 @@ class ProxyHandler:
                         self._v3_log_request(
                             request=request,
                             model_name=ctx.requested_model or "",
+                            member_model=decision.key.model_name,
                             key_id=decision.key.key_id,
                             status=call_error.status_code,
                             latency_ms=int((time.time() - t0) * 1000),
@@ -1357,6 +1362,7 @@ class ProxyHandler:
                 last_key_id = key.key_id
                 last_outbound = call.outbound_protocol
                 last_translated = call.need_translation
+                last_member_model = key.model_name
 
                 # A7. Open the upstream and read its response header.
                 upstream_gen = call.client.stream(
@@ -1431,6 +1437,7 @@ class ProxyHandler:
                         self._v3_log_request(
                             request=request,
                             model_name=ctx.requested_model or "",
+                            member_model=key.model_name,
                             key_id=key.key_id,
                             status=upstream_resp.status_code,
                             latency_ms=int((time.time() - t0) * 1000),
@@ -1522,6 +1529,7 @@ class ProxyHandler:
                 self._v3_log_request(
                     request=request,
                     model_name=ctx.requested_model or "",
+                    member_model=key.model_name,
                     key_id=key.key_id,
                     status=499,
                     latency_ms=int((time.time() - t0) * 1000),
@@ -1549,6 +1557,7 @@ class ProxyHandler:
                 self._v3_log_request(
                     request=request,
                     model_name=ctx.requested_model or "",
+                    member_model=key.model_name,
                     key_id=key.key_id,
                     status=200,
                     latency_ms=int((time.time() - t0) * 1000),
@@ -1715,6 +1724,7 @@ class ProxyHandler:
         self._v3_log_request(
             request=request,
             model_name=ctx.requested_model or "",
+            member_model=last_member_model,
             key_id=last_key_id,
             status=502,
             latency_ms=int((time.time() - t0) * 1000),
@@ -1856,6 +1866,7 @@ class ProxyHandler:
             self._v3_log_request(
                 request=request,
                 model_name=ctx.requested_model or "",
+                member_model=k.model_name,
                 key_id=k.key_id,
                 status=200,
                 latency_ms=int((time.time() - t0) * 1000),
@@ -3584,6 +3595,7 @@ class ProxyHandler:
                                 self.store,
                                 client_ip=request.remote or "",
                                 model_name=requested_model or "",
+                                member_model=k.model_name,
                                 key_id=k.key_id,
                                 status=resp.status_code,
                                 latency_ms=latency_ms,
@@ -3690,6 +3702,7 @@ class ProxyHandler:
                             self.store,
                             client_ip=request.remote or "",
                             model_name=requested_model or "",
+                            member_model=k.model_name,
                             key_id=k.key_id,
                             status=resp.status_code,
                             latency_ms=latency_ms,
@@ -4051,6 +4064,7 @@ class ProxyHandler:
                                         self.store,
                                         client_ip=request.remote or "",
                                         model_name=requested_model or "",
+                                        member_model=k.model_name,
                                         key_id=k.key_id,
                                         status=200,
                                         latency_ms=latency_ms,
@@ -4132,6 +4146,7 @@ class ProxyHandler:
         outbound_protocol: str = "",
         translated: bool = False,
         token_id: int = 0,
+        member_model: str = "",
     ) -> None:
         """记录请求日志 + 扣减令牌配额 + 计算成本（异步调用）。"""
         # 计算成本
@@ -4149,6 +4164,7 @@ class ProxyHandler:
                 store,
                 client_ip=client_ip,
                 model_name=model_name,
+                member_model=member_model,
                 key_id=key_id,
                 status=status,
                 latency_ms=latency_ms,
@@ -4178,6 +4194,7 @@ class ProxyHandler:
         *,
         request: web.Request,
         model_name: str,
+        member_model: str = "",
         key_id: int | None,
         status: int,
         latency_ms: int,
@@ -4204,6 +4221,12 @@ class ProxyHandler:
         _client_ip = request.remote or ""
         _token_id = request.get("token_id", 0)
         _model = model_name or ""
+        _member = member_model or ""
+        # 调用分组模型时，把实际服务的成员模型名拼到分组名后面，方便在日志里
+        # 直接定位到上游（例：juhe/glm5.2(st/glm-5.2)）。直接模型调用时分组名
+        # 等于成员名，不额外加括号。
+        if _member and _model and _member != _model:
+            _model = f"{_model}({_member})"
         _ob = outbound_protocol
         _tr = translated
         asyncio.create_task(

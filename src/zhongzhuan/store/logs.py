@@ -25,15 +25,22 @@ async def log_request(
     translated: bool = False,
     token_id: int = 0,
     cost: float = 0.0,
+    member_model: str = "",
 ) -> None:
     rid = request_id or str(uuid.uuid4())
+    # 调用分组模型时，把实际服务的成员模型名拼到分组名后，方便在后台日志 /
+    # 仪表盘直接定位上游（例：juhe/glm5.2(st/glm-5.2)）。直接模型调用时两者
+    # 相等，不额外加括号。
+    _display_model = model_name or ""
+    if member_model and _display_model and member_model != _display_model:
+        _display_model = f"{_display_model}({member_model})"
     await s.execute(
         """INSERT INTO request_logs(ts, client_ip, model_name, resolved_model_id, key_id, status, latency_ms, tokens_in, tokens_out, error, request_id, inbound_protocol, outbound_protocol, translated, token_id, cost)
            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             Store.now(),
             client_ip,
-            model_name,
+            _display_model,
             resolved_model_id,
             key_id,
             status,
