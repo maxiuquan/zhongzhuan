@@ -1462,12 +1462,17 @@ class ProxyHandler:
                             outbound_protocol=call.outbound_protocol,
                             translated=call.need_translation,
                         )
-                        await self._persist_v3_stream_terminal(prep, "failed", TerminalReason.UPSTREAM_ERROR.value)
-                        return web.Response(
-                            status=upstream_resp.status_code,
-                            body=error_body,
-                            content_type="application/json",
-                        )
+                        # 不再对单个上游的 4xx 直接判死：记下最后一次错误、退出本次
+                        # 尝试去试下一个候选 key。所有候选 + 兜底分组都失败后才真正
+                        # 回传错误，与非流路径（line ~1168 的兜底分组）的韧性一致。
+                        # 否则「某个 provider 特有的 400」（如 freetokenfaucet 上游
+                        # 返回非标准 body 被包成 UPSTREAM_PROXY_ERROR、litellm 的
+                        # Invalid request parameters）会直接杀死整个请求，而同一模型的
+                        # 其他 provider / 兜底 key 本可正常服务。
+                        last_upstream_status = upstream_resp.status_code
+                        last_upstream_body = error_body
+                        await self._aclose_quietly(upstream_gen)
+                        break
                     # 可重试（429/5xx/401/403）→ 换下一个 key（尚未提交任何字节给客户端）。
                     # 记下最后一次错误：若所有 key 都以同一理由失败，兜底要透传它。
                     last_upstream_status = upstream_resp.status_code
