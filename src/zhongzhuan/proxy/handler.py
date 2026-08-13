@@ -1656,6 +1656,7 @@ class ProxyHandler:
             prep=prep,
             candidates=candidates,
             hard_failed=http_failed,
+            t0=t0,
         )
         if fallback is not None:
             return fallback
@@ -1673,6 +1674,7 @@ class ProxyHandler:
                 prep=prep,
                 candidates=fb_cands,
                 hard_failed=set(),
+                t0=t0,
             )
             if fb_resp is not None:
                 _lg.warning(f"[v3-stream] fallback group OK for {ctx.requested_model!r}")
@@ -1741,6 +1743,7 @@ class ProxyHandler:
         prep,
         candidates: list[KeyHealth],
         hard_failed: set[int],
+        t0: float = 0.0,
     ):
         """All stream attempts produced no content: retry as non-stream.
 
