@@ -2688,7 +2688,7 @@ class ProxyHandler:
 
         return _V3UpstreamResult(
             resp.status_code, data, outbound_protocol, need_translation
-        ), data
+        ), data, outbound_protocol, need_translation
 
     def _filter_v3_candidates(
         self,
