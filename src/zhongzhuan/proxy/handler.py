@@ -133,6 +133,24 @@ def _looks_like_reasoning_effort_error(data: bytes) -> bool:
     return any(marker in text for marker in _RE_UNSUPPORTED_MARKERS)
 
 
+def _reasoning_present(body_obj) -> bool:
+    """True if the outbound body still carries a reasoning parameter.
+
+    Used by the D-self-heal: when an upstream rejects the request with a
+    generic 400 (e.g. litellm bare Invalid request parameters that does not
+    name the offending field), we still strip reasoning_effort / reasoning if
+    we sent one, because an unsupported reasoning VALUE (e.g. ultra for a model
+    that only accepts none/low/medium/high) is the most common cause of such
+    rejections for reasoning models behind non-OpenAI upstreams.
+    """
+    if not isinstance(body_obj, dict):
+        return False
+    if body_obj.get("reasoning_effort"):
+        return True
+    r = body_obj.get("reasoning")
+    return isinstance(r, dict) and bool(r.get("effort"))
+
+
 def _clean_upstream_failure(status_code: int, body: bytes, headers: dict | None):
     """If the upstream answered with a Cloudflare challenge page, do NOT forward
     the HTML interstitial to the client.  Return a clean, parseable JSON 502 so
@@ -1406,7 +1424,7 @@ class ProxyHandler:
                     if (
                         not _stripped_once
                         and upstream_resp.status_code in (400, 422)
-                        and _looks_like_reasoning_effort_error(error_body)
+                        and (_looks_like_reasoning_effort_error(error_body) or _reasoning_present(prep.upstream_body))
                         and _strip_reasoning_effort(prep.upstream_body)
                     ):
                         _block_reasoning_effort_for(key)
