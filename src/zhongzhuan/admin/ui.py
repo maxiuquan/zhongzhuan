@@ -209,6 +209,15 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
 /* ---- 响应式 ---- */
 @media (max-width:1100px){.kpi-grid{grid-template-columns:repeat(2,1fr)}.chart-grid,.chart-grid-2{grid-template-columns:1fr}}
 @media (max-width:768px){.sidebar{transform:translateX(-100%)}.main{margin-left:0}.kpi-grid{grid-template-columns:1fr}}
+/* 连锁开关：停用模型时自动从分组移除 */
+.cascade-row{display:flex;align-items:center;gap:10px;padding:8px 14px;margin-bottom:12px;background:var(--bg-subtle);border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--text)}
+.cascade-row .cascade-hint{color:var(--text-subtle);font-size:12px}
+.switch{position:relative;display:inline-block;width:38px;height:20px;flex-shrink:0}
+.switch input{opacity:0;width:0;height:0}
+.switch .slider{position:absolute;cursor:pointer;inset:0;background:var(--border);border-radius:20px;transition:.2s}
+.switch .slider:before{content:"";position:absolute;height:14px;width:14px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.switch input:checked + .slider{background:var(--accent)}
+.switch input:checked + .slider:before{transform:translateX(18px)}
 </style>
 </head>
 <body>
@@ -311,6 +320,11 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
               <input id="modelSearch" type="text" placeholder="搜索模型名…" oninput="renderModelTable()" style="margin-right:8px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-width:160px">
               <button class="btn primary" onclick="showModelModal()">+ 添加模型</button>
             </div>
+          </div>
+          <div class="cascade-row">
+            <label class="switch"><input type="checkbox" id="cascadeToggle" onchange="saveCascade()"><span class="slider"></span></label>
+            <span>停用模型时自动从分组移除</span>
+            <span class="cascade-hint" id="cascadeHint"></span>
           </div>
           <div style="overflow-x:auto;margin:0 -20px;padding:0 20px">
           <table>
@@ -577,7 +591,7 @@ function showTab(name) {
   document.getElementById("pageTitle").textContent = titles[name] || name;
   window.scrollTo(0, 0);
   if (name === "dashboard") loadOverview();
-  if (name === "models") { loadModels(); loadFallbackStatus(); }
+  if (name === "models") { loadModels(); loadFallbackStatus(); loadCascade(); }
   if (name === "keys") { loadModels(); loadKeys(); }
   if (name === "groups") loadGroups();
   if (name === "exposure") loadExposure();
@@ -868,6 +882,28 @@ async function saveFallbackConfig() {
   if (r !== null) alert("兜底配置已保存:\\n启用=" + (r.enabled?"是":"否") + "\\n降权系数=" + r.fallback_penalty);
 }
 
+// ---- 连锁开关：停用模型时自动从分组移除 ----
+async function loadCascade() {
+  const r = await api("/api/models/cascade");
+  if (!r) return;
+  const el = document.getElementById("cascadeToggle");
+  if (el) el.checked = !!r.enabled;
+  const hint = document.getElementById("cascadeHint");
+  if (hint) hint.textContent = r.enabled ? "已开启：停用模型会同时从分组移除" : "";
+}
+
+async function saveCascade() {
+  const el = document.getElementById("cascadeToggle");
+  if (!el) return;
+  const r = await api("/api/models/cascade", {method:"PUT", body: JSON.stringify({enabled: el.checked})});
+  const hint = document.getElementById("cascadeHint");
+  if (r !== null && hint) {
+    hint.textContent = r.enabled ? "已开启：停用模型会同时从分组移除" : "";
+  } else if (hint) {
+    hint.textContent = "";
+  }
+}
+
 async function delModel(id) {
   if (!confirm("确认删除此模型?绑定到此模型的 Key 也会被删除。")) return;
   const r = await api("/api/models/" + id, {method:"DELETE"});
@@ -1061,7 +1097,13 @@ async function saveModel(id) {
   let r;
   if (id) r = await api("/api/models/" + id, {method:"PUT", body: JSON.stringify(body)});
   else r = await api("/api/models", {method:"POST", body: JSON.stringify(body)});
-  if (r !== null) { closeModal(); loadModels(); }
+  if (r !== null) {
+    closeModal();
+    loadModels();
+    if (id && r.removed_from_groups > 0) {
+      alert("已停用该模型，并自动从 " + r.removed_from_groups + " 个分组中移除。");
+    }
+  }
 }
 
 // ---- Key 池 ----

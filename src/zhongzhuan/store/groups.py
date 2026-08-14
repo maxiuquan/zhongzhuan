@@ -102,3 +102,14 @@ async def set_group_members(s: Store, group_id: int, members: list[GroupMemberDa
 
 async def delete_group(s: Store, group_id: int) -> None:
     await s.execute("DELETE FROM model_groups WHERE id=?", (group_id,))
+
+
+async def remove_model_from_all_groups(s: Store, model_id: int) -> int:
+    """把指定模型从所有分组中移除（删 group_models 成员行）。
+
+    返回被移除的成员关系数量。用于「停用模型时自动从分组移除」的连锁开关。
+    """
+    row = await s.fetchone("SELECT COUNT(*) FROM group_models WHERE model_id=?", (model_id,))
+    removed = int(row[0]) if row else 0
+    await s.execute("DELETE FROM group_models WHERE model_id=?", (model_id,))
+    return removed

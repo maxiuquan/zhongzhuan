@@ -18,7 +18,23 @@ from ..store.models import (
     update_model,
     delete_model,
 )
+from ..store.groups import remove_model_from_all_groups
 from .notify import notify_proxy_reload
+
+
+# system_config 表中的 key：停用模型时是否自动从分组移除（连锁开关）
+_KEY_CASCADE = "model_disable_cascade_remove_from_group"
+
+
+async def _get_config_value(store, key: str) -> str | None:
+    row = await store.fetchone("SELECT value FROM system_config WHERE `key`=?", (key,))
+    return row[0] if row else None
+
+
+async def _set_config_value(store, key: str, value: str) -> None:
+    # 跨数据库兼容：先 DELETE 再 INSERT（SQLite 和 MySQL/TiDB 都支持）
+    await store.execute("DELETE FROM system_config WHERE `key`=?", (key,))
+    await store.execute("INSERT INTO system_config(`key`, value) VALUES(?, ?)", (key, value))
 
 
 def register_routes(app: web.Application, ctx) -> None:
@@ -44,8 +60,27 @@ def register_routes(app: web.Application, ctx) -> None:
             return web.json_response({"error": {"message": err}}, status=400)
         m = _payload_to_model(data)
         await update_model(ctx.store, model_id, m)
+        removed_from_groups = 0
+        # 连锁开关：停用模型时自动从所有分组移除
+        if not m.enabled:
+            cascade_on = (await _get_config_value(ctx.store, _KEY_CASCADE)) == "1"
+            if cascade_on:
+                removed_from_groups = await remove_model_from_all_groups(ctx.store, model_id)
         await notify_proxy_reload()
-        return web.json_response({"ok": True})
+        return web.json_response({"ok": True, "removed_from_groups": removed_from_groups})
+
+    async def cascade_get(request):
+        """GET /api/models/cascade — 返回连锁开关状态。"""
+        v = await _get_config_value(ctx.store, _KEY_CASCADE)
+        return web.json_response({"enabled": v == "1"})
+
+    async def cascade_put(request):
+        """PUT /api/models/cascade — 设置连锁开关（停用模型时自动从分组移除）。"""
+        data = await request.json()
+        enabled = bool(data.get("enabled", False))
+        await _set_config_value(ctx.store, _KEY_CASCADE, "1" if enabled else "0")
+        await notify_proxy_reload()
+        return web.json_response({"ok": True, "enabled": enabled})
 
     async def delete(request):
         model_id = int(request.match_info["id"])
@@ -64,6 +99,8 @@ def register_routes(app: web.Application, ctx) -> None:
     app.router.add_put("/api/models/{id}", update)
     app.router.add_delete("/api/models/{id}", delete)
     app.router.add_get("/api/models/client-preset-options", preset_options)
+    app.router.add_get("/api/models/cascade", cascade_get)
+    app.router.add_put("/api/models/cascade", cascade_put)
 
 
 def _payload_to_model(data: dict) -> Model:
