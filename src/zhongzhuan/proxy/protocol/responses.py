@@ -189,6 +189,34 @@ def _first_flattened_tool_name(tools: Any, ns_name: str) -> str:
     return ""
 
 
+def _coerce_tool_arguments(args):
+    """Coerce a Responses function_call arguments value into a valid Chat
+    Completions tool_call arguments JSON string.
+
+    OpenAI/Responses allow a tool call with no parameters, in which case the
+    arguments field is empty string or missing. Strict non-OpenAI upstreams
+    (e.g. freetokenfaucet / tokenrhythm mimo backends) reject arguments: ""
+    with HTTP 400 (Invalid request parameters, 2026-08-13), while OpenAI/
+    vercel tolerate it. Default empty/missing/non-JSON arguments to "{}" so the
+    request stays well-formed for every provider.
+    """
+    if args is None:
+        return "{}"
+    if not isinstance(args, str):
+        try:
+            return json.dumps(args, ensure_ascii=False)
+        except Exception:
+            return "{}"
+    s = args.strip()
+    if s == "":
+        return "{}"
+    try:
+        json.loads(s)
+    except Exception:
+        return "{}"
+    return s
+
+
 def convert_responses_request_to_chatcompletions(body: dict) -> dict:
     """Convert an OpenAI Responses API request body to Chat Completions format."""
     if not isinstance(body, dict) or not body.get("input"):
@@ -254,7 +282,7 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
                 {
                     "id": item.get("call_id"),
                     "type": BLOCK_FUNCTION,
-                    "function": {"name": call_name, "arguments": item.get("arguments")},
+                    "function": {"name": call_name, "arguments": _coerce_tool_arguments(item.get("arguments"))},
                 }
             )
 
