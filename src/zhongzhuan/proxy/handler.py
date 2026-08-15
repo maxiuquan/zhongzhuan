@@ -3101,6 +3101,12 @@ class ProxyHandler:
         outbound_protocol = call.outbound_protocol
         need_translation = call.need_translation
 
+        # TEMP-DEBUG (URL 修复验证，2026-08-15)：打印主流程实际发出的上游 URL。
+        _lg.info(
+            f"[v3-debug] key_id={getattr(key, 'key_id', '?')} base={getattr(client, 'base_url', '?')} "
+            f"path={upstream_path!r} resolve={getattr(client, '_resolve_url', lambda p: p)(upstream_path)}"
+        )
+
         try:
             resp = await client.request(
                 request.method,
