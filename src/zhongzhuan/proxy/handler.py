@@ -91,6 +91,18 @@ def _ma_safe_json(text: Any) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+#: 免费档额度耗尽的典型措辞（aihubmix 等上游），子代理 rollout 命中时视为失败、
+#: 继续 failover（2026-08-15 实测：aihubmix xiaomi-mimo-v2.5-pro-free 返回
+#: "only try 10 times ... console.aihubmix.com/topup"）。
+_MA_QUOTA_MARKERS = ("topup", "abuse of free", "free resources", "recharged", "free quota")
+
+
+def _ma_quota_error(text: str) -> bool:
+    """子代理产出是否为额度/滥用类报错文案（是则视为失败）。"""
+    low = (text or "").lower()
+    return any(marker in low for marker in _MA_QUOTA_MARKERS)
+
+
 def _ma_flatten_tools(tools: Any) -> list | None:
     """把 ``tools`` 里的 hosted ``tool_search`` 与 ``multi_agent_v1`` namespace
     摊平成上游模型可调用的普通 function（FR-1 / C.4 #3，APIAADBPW-REQ-MA-001）。
@@ -1307,10 +1319,15 @@ class ProxyHandler:
         子代理的『输入』即父代理下发的 instruction（spawn_agent 描述要求单一、
         自包含的指令）；上游返回后抽取其 message 文本作为子代理产出回传父代理。
 
-        同一家族 key 间 **failover**：先按 model basename 匹配（分组模型的 key 的
-        model_name 是成员/provider slug，如 zz-slomerex/mimo-v2.5-pro），任一 key
-        空产出/失败就试下一个（2026-08-15 实测：首个匹配的 aihubmix 免费 key 额度
-        耗尽、恒空产出）。全部失败返回 ""（失败隔离，不波及父代理会话）。
+        key 选择与 **failover**：
+        * 先按 model basename 匹配（分组模型的 key 的 model_name 是成员/provider
+          slug，如 aihubmix/mimo-v2.5-pro）；非 free 档 key 排前（aihubmix 的
+          ``xiaomi-mimo-v2.5-pro-free`` 免费档额度耗尽，2026-08-15 实测）；
+        * 额度报错（``topup`` / ``abuse`` / ``free resources`` 等）视为失败，
+          继续试下一个 key；
+        * basename 池试完仍无产出，回落到「全量可用 key」池再试（父请求实际
+          服务的 key 的 model_name 可能不匹配 basename）。
+        全部失败返回 ""（失败隔离，不波及父代理会话）。
         """
         if not instruction:
             return ""
@@ -1318,8 +1335,15 @@ class ProxyHandler:
         def _usable(k) -> bool:
             return bool(getattr(k, "upstream_base", "") and getattr(k, "upstream_model", ""))
 
+        def _nonfree(k) -> bool:
+            return "free" not in str(getattr(k, "upstream_model", "") or "").lower()
+
+        def _sort_key(k):
+            # 非 free 优先；同档内保持原顺序。
+            return (0 if _nonfree(k) else 1)
+
         target_base = model.rsplit("/", 1)[-1] if model else ""
-        keys = [
+        base_pool = [
             k
             for k in (self._keys or [])
             if _usable(k)
@@ -1328,29 +1352,34 @@ class ProxyHandler:
                 or (target_base and (k.model_name.endswith("/" + target_base) or k.model_name == target_base))
             )
         ]
-        if not keys:
-            keys = [k for k in (self._keys or []) if _usable(k)]
-            _lg.warning(
-                f"multi_agent sub-agent: no key matching model={model!r} (basename={target_base!r}); "
-                f"using all usable keys as failover pool ({len(keys)})"
-            )
-        if not keys:
+        all_pool = [k for k in (self._keys or []) if _usable(k)]
+        seen: set[int] = set()
+        pool: list[Any] = []
+        for k in sorted(base_pool, key=_sort_key) + sorted(all_pool, key=_sort_key):
+            kid = getattr(k, "key_id", id(k))
+            if kid in seen:
+                continue
+            seen.add(kid)
+            pool.append(k)
+        if not pool:
             _lg.warning("multi_agent sub-agent: no key with upstream_base/upstream_model available")
             return ""
         _lg.info(
             "multi_agent sub-agent pool for model=" + repr(model) + ": "
             + ", ".join(
-                f"{getattr(k, 'key_id', '?')}:{getattr(k, 'model_name', '')}" for k in keys[:8]
+                f"{getattr(k, 'key_id', '?')}:{getattr(k, 'model_name', '')}"
+                + ("" if _nonfree(k) else "(free)")
+                for k in pool[:12]
             )
         )
-        for key in keys:
+        for key in pool:
             text = await self._run_sub_agent_one(key, instruction, session_id)
             if text:
                 return text
         return ""
 
     async def _run_sub_agent_one(self, key: Any, instruction: str, session_id: str) -> str:
-        """单个 key 的子代理上游调用（空产出/异常返回 ""，由调用方 failover）。"""
+        """单个 key 的子代理上游调用（空产出/额度报错返回 ""，由调用方 failover）。"""
         base = str(getattr(key, "upstream_base", "") or "").rstrip("/")
         native_model = str(getattr(key, "upstream_model", "") or "")
         path = str(getattr(key, "upstream_path_override", "") or "")
@@ -1391,6 +1420,12 @@ class ProxyHandler:
         _lg.info(
             f"multi_agent sub-agent done url={url} model={native_model} status_code={getattr(resp, 'status', '?')} out_len={len(text)}"
         )
+        if _ma_quota_error(text):
+            _lg.warning(
+                f"multi_agent sub-agent quota-limited url={url} model={native_model}; "
+                f"treating as failure and moving to next key: {text[:120]!r}"
+            )
+            return ""
         if not text:
             _lg.warning(
                 f"multi_agent sub-agent empty output url={url} model={native_model} "
