@@ -138,20 +138,19 @@ def _build_upstream_url(
     if override.startswith("http://") or override.startswith("https://"):
         return override
     if override:
-        path = override if override.startswith("/") else "/" + override
-        # Same dedup as UpstreamClient.request: strip the base path prefix.
-        base_path = urlparse(base).path.rstrip("/")
-        if base_path and path.startswith(base_path):
-            path = path[len(base_path) :] or "/"
-        return base + path
-    if protocol == "anthropic":
-        path = "/v1/messages"
+        path = override.lstrip("/")
+    elif protocol == "anthropic":
+        path = "v1/messages"
     else:
-        path = "/v1/chat/completions"
+        path = "v1/chat/completions"
+    # 与 UpstreamClient._resolve_url 同款去重：base 尾段（如 /v1）与 path 首段相同
+    # 时剥掉 path 首段，避免 /v1/v1/ 双重前缀（2026-08-15 实测 p0/deepseek 的
+    # base 含 /api/agents/v1 多段前缀，旧逻辑两处都拼错 URL）。
     base_path = urlparse(base).path.rstrip("/")
-    if base_path and path.startswith(base_path):
-        path = path[len(base_path) :] or "/"
-    return base + path
+    base_last = base_path.rsplit("/", 1)[-1] if base_path else ""
+    if base_last and path.startswith(base_last + "/"):
+        path = path[len(base_last):].lstrip("/")
+    return base + "/" + path if path else base
 
 
 def _build_fingerprint_headers(client_preset: str, custom_headers: str) -> list[tuple[str, str]]:

@@ -116,20 +116,34 @@ class UpstreamClient:
         if self._client is None:
             await self.start()
         assert self._client is not None
-        # If base_url has a path prefix (e.g., "/v1"), strip it from the
-        # request path so that httpx's base_url merging produces the correct URL.
-        # Example: base_url="https://api.example.com/v1", path="/v1/chat/completions"
-        #   -> strip "/v1" -> "/chat/completions"
-        #   -> httpx produces: https://api.example.com/v1/chat/completions
-        if self._base_path and path.startswith(self._base_path):
-            path = path[len(self._base_path) :] or "/"
+        url = self._resolve_url(path)
         return await self._client.request(
             method,
-            path,
+            url,
             headers=headers,
             content=content,
             params=params,
         )
+
+    def _resolve_url(self, path: str) -> str:
+        """把请求路径解析为**绝对 URL**（显式拼接，不依赖 httpx base_url 合并）。
+
+        httpx 的 ``base_url`` 合并对以 ``/`` 开头的 path 做**绝对路径替换**（整段
+        覆盖 base 的 path），对 base 含多段前缀的 key 会丢前缀：
+        ``base='https://host/api/agents/v1'`` + ``path='/v1/responses'`` ->
+        ``https://host/v1/responses``（2026-08-15 实测 p0/deepseek-v4-flash 因此
+        打到错误路径、被上游 Cloudflare 404/403 拦截）。相对 path 则是**直接拼接**
+        （``.../api/agents/v1`` + ``v1/responses`` -> ``.../api/agents/v1/responses``）。
+
+        修复：path 转相对 + base 尾段与 path 首段去重（``.../v1`` 与 ``/v1/...``
+        不再重复成 ``/v1/v1/``），显式拼出绝对 URL 交给 httpx。
+        """
+        base_r = self.base_url.rstrip("/")
+        path_l = (path or "").lstrip("/")
+        base_last = self._base_path.rsplit("/", 1)[-1] if self._base_path else ""
+        if base_last and path_l.startswith(base_last + "/"):
+            path_l = path_l[len(base_last):].lstrip("/")
+        return base_r + "/" + path_l if path_l else base_r
 
     async def stream(
         self,
@@ -143,7 +157,6 @@ class UpstreamClient:
         if self._client is None:
             await self.start()
         assert self._client is not None
-        if self._base_path and path.startswith(self._base_path):
-            path = path[len(self._base_path) :] or "/"
-        async with self._client.stream(method, path, headers=headers, content=content, params=params) as resp:
+        url = self._resolve_url(path)
+        async with self._client.stream(method, url, headers=headers, content=content, params=params) as resp:
             yield resp
