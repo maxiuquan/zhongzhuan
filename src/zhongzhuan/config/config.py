@@ -154,6 +154,12 @@ class MultiAgentConfig:
     job_max_runtime_seconds: int = 1800
     #: 暴露给 Codex 客户端的 minimal_client_version（FR-6，建议 0.144.0 起实测）。
     minimal_client_version: str = "0.144.0"
+    #: tool_search 结果回传形态（FR-2.1 / 需求文档附录 C.10.3，先 A 后 B 实测）：
+    #: ``"client"``（默认，方案 A）——仅回 ``tool_search_call(execution="client")``，
+    #:   由 Codex 对本地 models.json 的 multi_agent_v1 namespace 做 BM25 暴露子工具；
+    #: ``"server"``（方案 B）——外加 ``function_call_output(output={tools:[namespace]})``
+    #:   兜底，把中继已知的 namespace 作为搜索结果喂回。
+    tool_search_mode: str = "client"
 
 
 @dataclass
@@ -363,6 +369,7 @@ def _schema_to_config(s: StrictConfig) -> Config:
             max_threads=int(s.multi_agent.max_threads),
             job_max_runtime_seconds=int(s.multi_agent.job_max_runtime_seconds),
             minimal_client_version=str(s.multi_agent.minimal_client_version),
+            tool_search_mode=str(s.multi_agent.tool_search_mode),
         ),
     )
 

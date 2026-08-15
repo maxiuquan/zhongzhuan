@@ -29,8 +29,13 @@ hosted_tools:
 # max_threads: 同一会话内并发子代理上限（NFR-6）。
 # job_max_runtime_seconds: 单子代理任务硬上限（NFR-1，铁律 5 客户端 1800s）。
 # minimal_client_version: 向 Codex 声明的客户端最低版本（FR-5 / NFR）。
+# tool_search_mode: tool_search 结果回传形态（FR-2.1 / 附录 C.10.3，先 A 后 B）：
+#   client（默认）= 仅回 tool_search_call(execution="client")，Codex 本地 BM25 命中
+#   models.json 的 multi_agent_v1 namespace；server = 外加 function_call_output
+#   把中继已知的 namespace 喂回（若 client 方案下 Codex 未暴露 spawn_agent 再切）。
 multi_agent:
   enabled: false
   max_threads: 4
   job_max_runtime_seconds: 1800
   minimal_client_version: "0.144.0"
+  tool_search_mode: "client"

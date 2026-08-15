@@ -53,6 +53,7 @@ from ..responses_v3.multi_agent import (
     MULTI_AGENT_TOOLS,
     TOOL_SEARCH_NAME,
     build_function_call_output,
+    build_tool_search_call,
     build_tool_search_function_call_output,
 )
 from ..store.response_store import ResponseStore
@@ -238,6 +239,7 @@ class ResponsePipeline:
         config: PipelineConfig | None = None,
         multi_agent: Any | None = None,
         tool_search_enabled: bool = False,
+        tool_search_mode: str = "client",
     ) -> None:
         self.response_id = response_id
         self.workspace_id = workspace_id
@@ -253,6 +255,9 @@ class ResponsePipeline:
         self._multi_agent = multi_agent
         #: 是否合成 ``tool_search_output``（FR-1 / FR-2）。关闭时 tool_search 透传。
         self._tool_search_enabled = bool(tool_search_enabled)
+        #: tool_search 结果回传形态（FR-2.1 / 附录 C.10.3）："client"（方案 A，仅
+        #: tool_search_call）| "server"（方案 B，外加 function_call_output 兜底）。
+        self._tool_search_mode = tool_search_mode if tool_search_mode in ("client", "server") else "client"
         #: 特殊调用（tool_search / multi_agent_v1）的累积状态，key 为 call_id。
         #: 这些调用不进入 ``_tools``（不产生普通 function_call item），由本模块
         #: 自行合成 tool_search_output / function_call_output。
@@ -667,32 +672,35 @@ class ResponsePipeline:
         name = sc["name"] or ""
         frames: list[bytes] = []
         if kind == "tool_search" and self._tool_search_enabled:
-            parsed = _parse_args(sc["args"])
-            # FR-2 v1.3 / 需求文档附录 C.7：26.803 不认顶级 tool_search_output，
-            # 必须回显 function_call(name=tool_search) + function_call_output。
-            # 1) 回显上游发起的 function_call（不带 namespace——tool_search 是顶层工具）。
-            fc_idx = self._next_output_index()
-            fc_item = {
-                "id": make_function_call_item_id(call_id),
-                "type": "function_call",
-                "status": "completed",
-                "call_id": call_id,
-                "name": TOOL_SEARCH_NAME,
-                "arguments": sc["args"] or "{}",
-            }
-            frames.extend(await self._emit_special_item(fc_idx, fc_item))
-            self._synthesized_items.append((fc_idx, fc_item))
-            # 2) function_call_output(output=JSON-string({tools:[namespace]}))。
-            out_idx = self._next_output_index()
-            item = build_tool_search_function_call_output(
-                output_index=out_idx,
+            # FR-2.1 / 附录 C.10.3：26.803 的 ToolSearchHandler 只接
+            # ToolPayload::ToolSearch（tool_search_call 形态），function_call
+            # 形态会触发 "tool_search handler received unsupported payload"。
+            # 必须把上游的 tool_search function_call 改写为 tool_search_call。
+            # 1) tool_search_call(execution="client") —— 方案 A/B 共有的核心改写。
+            tsc_idx = self._next_output_index()
+            tsc_item = build_tool_search_call(
+                output_index=tsc_idx,
                 call_id=call_id,
+                arguments=sc["args"] or "{}",
                 response_id=self.response_id,
-                query=parsed.get("query") if isinstance(parsed, dict) else None,
-                limit=parsed.get("limit") if isinstance(parsed, dict) else None,
+                execution="client",
             )
-            frames.extend(await self._emit_special_item(out_idx, item))
-            self._synthesized_items.append((out_idx, item))
+            frames.extend(await self._emit_special_item(tsc_idx, tsc_item))
+            self._synthesized_items.append((tsc_idx, tsc_item))
+            # 2) 方案 B（server-side 兜底）：外加 function_call_output 把中继已知的
+            #    namespace 喂回（client 方案下 Codex 未暴露 spawn_agent 时切换）。
+            if self._tool_search_mode == "server":
+                parsed = _parse_args(sc["args"])
+                fco_idx = self._next_output_index()
+                fco_item = build_tool_search_function_call_output(
+                    output_index=fco_idx,
+                    call_id=call_id,
+                    response_id=self.response_id,
+                    query=parsed.get("query") if isinstance(parsed, dict) else None,
+                    limit=parsed.get("limit") if isinstance(parsed, dict) else None,
+                )
+                frames.extend(await self._emit_special_item(fco_idx, fco_item))
+                self._synthesized_items.append((fco_idx, fco_item))
         elif kind == "multi_agent" and self._multi_agent is not None:
             # 1) 回显父代理发起的 function_call（带 namespace），让客户端看到调用。
             fc_item = {

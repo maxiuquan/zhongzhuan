@@ -58,6 +58,22 @@ def test_tool_search_output_shape():
     assert "### When to delegate vs. do the subtask yourself" in desc
 
 
+def test_build_tool_search_call_shape():
+    # FR-2.1 / C.10.3：tool_search_call(execution="client") 形态。
+    from zhongzhuan.responses_v3.multi_agent import build_tool_search_call
+
+    item = build_tool_search_call(
+        output_index=0, call_id="call_t1", arguments='{"query":"x","limit":5}',
+        response_id="r1", execution="client",
+    )
+    assert item["type"] == "tool_search_call"
+    assert item["execution"] == "client"
+    assert item["name"] == TOOL_SEARCH_NAME
+    assert item["call_id"] == "call_t1"
+    assert item["arguments"] == '{"query":"x","limit":5}'
+    assert item["status"] == "completed"
+
+
 def test_function_call_output_shape():
     item = build_function_call_output(
         output_index=0, call_id="c1", response_id="r1", output="hello"
@@ -191,8 +207,9 @@ async def _collect(pipe: ResponsePipeline, chunks: list[dict]) -> list[dict]:
 
 
 async def test_pipeline_tool_search_synthesized():
-    # FR-2 v1.3 / C.7：26.803 需要 function_call(name=tool_search) +
-    # function_call_output(call_id, output=JSON-string({tools:[namespace]})) 两项。
+    # FR-2.1 / 附录 C.10.3（方案 A，默认）：tool_search 改写为
+    # tool_search_call(execution="client")；不返回 function_call(name=tool_search)、
+    # 不返回顶级 tool_search_output。
     pipe = ResponsePipeline("resp_ts", multi_agent=None, tool_search_enabled=True)
     frames = await _collect(pipe, [
         {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME,
@@ -200,19 +217,37 @@ async def test_pipeline_tool_search_synthesized():
         {"type": "tool_call_done", "call_id": "t1", "arguments": '{"query": "x"}'},
     ])
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
-    # 1) 回显 function_call(name=tool_search)。
-    fc = next((it for it in items if it["type"] == "function_call"
-               and it.get("name") == TOOL_SEARCH_NAME), None)
-    assert fc is not None, "expected function_call(name=tool_search)"
-    assert fc["call_id"] == "t1"
-    # 2) function_call_output，output 是 JSON 字符串、内含 multi_agent_v1 namespace。
+    # 1) tool_search_call(execution="client") 存在（FR-2.1 PASS 判据）。
+    tsc = next((it for it in items if it["type"] == "tool_search_call"), None)
+    assert tsc is not None, "expected tool_search_call"
+    assert tsc["execution"] == "client"
+    assert tsc["name"] == TOOL_SEARCH_NAME
+    assert tsc["call_id"] == "t1"
+    # 2) 不再以 function_call(name=tool_search) 作为返回形态；无顶级 tool_search_output。
+    fc = [it for it in items if it["type"] == "function_call" and it.get("name") == TOOL_SEARCH_NAME]
+    assert fc == []
+    assert all(it["type"] != "tool_search_output" for it in items)
+    # 3) 方案 A 不回 function_call_output。
+    assert all(it["type"] != "function_call_output" for it in items)
+
+
+async def test_pipeline_tool_search_server_mode():
+    # FR-2.1 方案 B：tool_search_call + function_call_output 兜底。
+    pipe = ResponsePipeline("resp_tsb", multi_agent=None, tool_search_enabled=True,
+                            tool_search_mode="server")
+    frames = await _collect(pipe, [
+        {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME,
+         "arguments": '{"query": "x"}'},
+        {"type": "tool_call_done", "call_id": "t1", "arguments": '{"query": "x"}'},
+    ])
+    items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
+    tsc = next((it for it in items if it["type"] == "tool_search_call"), None)
+    assert tsc is not None and tsc["execution"] == "client"
     fco = next((it for it in items if it["type"] == "function_call_output"
                 and it.get("call_id") == "t1"), None)
-    assert fco is not None, "expected function_call_output for tool_search"
+    assert fco is not None, "expected function_call_output in server mode"
     payload = json.loads(fco["output"])
     assert payload["tools"][0]["name"] == MULTI_AGENT_NAMESPACE
-    # 不再返回顶级 tool_search_output（26.803 不认）。
-    assert all(it["type"] != "tool_search_output" for it in items)
 
 
 async def test_pipeline_tool_search_disabled_passthrough():
@@ -309,8 +344,9 @@ def test_pipeline_output_items_include_synthesized():
     items = asyncio.run(_run())
     types = [it["type"] for it in items]
     assert "tool_search_output" not in types  # 26.803 不认顶级形态（C.7）
-    assert "function_call" in types
-    assert "function_call_output" in types
+    assert "tool_search_call" in types        # FR-2.1：tool_search 改写形态
+    assert "function_call" in types           # spawn 回显
+    assert "function_call_output" in types    # spawn 的 fco
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ from ..responses_v3.multi_agent import (
     MULTI_AGENT_NAMESPACE,
     MULTI_AGENT_TOOLS,
     TOOL_SEARCH_NAME,
+    build_tool_search_call,
     build_tool_search_function_call_output,
 )
 from ..responses_v3.request_sanitizer import RequestSanitizer, capability_values
@@ -1262,6 +1263,16 @@ class ProxyHandler:
         except Exception:
             return False
 
+    def _multi_agent_tool_search_mode(self) -> str:
+        """tool_search 结果回传形态（FR-2.1 / 附录 C.10.3）：client | server。"""
+        try:
+            from ..config import default_config
+
+            mode = str(default_config().multi_agent.tool_search_mode or "client")
+        except Exception:
+            mode = "client"
+        return mode if mode in ("client", "server") else "client"
+
     def _multi_agent_active(self) -> bool:
         """V1 多代理是否激活：两个开关（hosted_tools.tool_search_enabled 与
         multi_agent.enabled）必须同时为真，避免「只开其一」的半残状态。"""
@@ -1462,21 +1473,32 @@ class ProxyHandler:
             ns = str(item.get("namespace") or "")
             call_id = str(item.get("call_id") or "")
             if tool_search_enabled and itype == "function_call" and name == TOOL_SEARCH_NAME:
-                parsed = _ma_safe_json(item.get("arguments"))
-                # FR-2 v1.3 / 需求文档附录 C.7：26.803 不认顶级 tool_search_output，
-                # 保留原 function_call(name=tool_search) 并在其后追加
-                # function_call_output(call_id, output=JSON-string({tools:[namespace]}))。
-                new_output.append(item)
-                idx += 1
-                fco = build_tool_search_function_call_output(
+                # FR-2.1 / 附录 C.10.3：26.803 的 ToolSearchHandler 只接
+                # ToolPayload::ToolSearch（tool_search_call 形态）；function_call
+                # 形态触发 "tool_search handler received unsupported payload"。
+                # 把该 item 改写为 tool_search_call(execution="client")（方案 A）。
+                tsc = build_tool_search_call(
                     output_index=idx,
                     call_id=call_id,
+                    arguments=str(item.get("arguments") or "{}"),
                     response_id=str(resp_obj.get("id") or ""),
-                    query=parsed.get("query") if isinstance(parsed, dict) else None,
-                    limit=parsed.get("limit") if isinstance(parsed, dict) else None,
+                    execution="client",
                 )
-                new_output.append(fco)
+                new_output.append(tsc)
                 idx += 1
+                # 方案 B（server-side 兜底）：外加 function_call_output 把中继已知的
+                # namespace 喂回（client 方案下 Codex 未暴露 spawn_agent 时切换）。
+                if self._multi_agent_tool_search_mode() == "server":
+                    parsed = _ma_safe_json(item.get("arguments"))
+                    fco = build_tool_search_function_call_output(
+                        output_index=idx,
+                        call_id=call_id,
+                        response_id=str(resp_obj.get("id") or ""),
+                        query=parsed.get("query") if isinstance(parsed, dict) else None,
+                        limit=parsed.get("limit") if isinstance(parsed, dict) else None,
+                    )
+                    new_output.append(fco)
+                    idx += 1
                 continue
             if orchestrator is not None and itype == "function_call" and (
                 ns == MULTI_AGENT_NAMESPACE or name in MULTI_AGENT_TOOLS
@@ -1984,6 +2006,7 @@ class ProxyHandler:
                 store=deferred,
                 multi_agent=orchestrator,
                 tool_search_enabled=ma_active,
+                tool_search_mode=self._multi_agent_tool_search_mode(),
             )
             cancelled = asyncio.Event()
             _pc = self._v3_pipeline_config()  # AC-7.4

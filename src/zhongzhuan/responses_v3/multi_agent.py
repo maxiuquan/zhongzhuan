@@ -207,6 +207,39 @@ def build_tool_search_function_call_output(
     return item
 
 
+def build_tool_search_call(
+    *,
+    output_index: int,
+    call_id: str,
+    arguments: str,
+    response_id: str = "",
+    execution: str = "client",
+) -> dict[str, Any]:
+    """合成 **Codex 26.803 client-side tool_search 调用**形态（FR-2.1 / 文档附录 C.10.3）。
+
+    26.803 的 ``ToolSearchHandler::handle_call`` 严格只接 ``ToolPayload::ToolSearch``
+    变体；上游 emit 的 ``function_call(name=tool_search)`` 会被 ``build_tool_call``
+    转成 ``ToolPayload::Function`` 而触发 ``tool_search handler received unsupported
+    payload``。中继必须把该 item 改写为 ``tool_search_call(execution="client")``，
+    Codex 才会转成 ``ToolPayload::ToolSearch`` 并被 handler 接收（走 client-side BM25
+    命中本地 ``models.json`` 声明的 ``multi_agent_v1`` namespace）。
+
+    方案 A（``execution="client"`` 仅此一项）让 Codex 自行 BM25；方案 B（配合
+    :func:`build_tool_search_function_call_output` 回 fco）把中继已知的 namespace
+    作为搜索结果喂回（文档 C.10.3「先 A 后 B」）。
+    """
+    item_id = "tsc_{0}_{1}".format(response_id or "resp", output_index)
+    return {
+        "id": item_id,
+        "type": "tool_search_call",
+        "call_id": call_id,
+        "execution": execution,
+        "name": TOOL_SEARCH_NAME,
+        "arguments": arguments or "{}",
+        "status": "completed",
+    }
+
+
 def build_function_call_output(
     *,
     output_index: int,
@@ -488,6 +521,7 @@ __all__ = [
     "build_multi_agent_namespace_container",
     "build_tool_search_output",
     "build_tool_search_function_call_output",
+    "build_tool_search_call",
     "build_function_call_output",
     "AgentState",
     "MultiAgentOrchestrator",
