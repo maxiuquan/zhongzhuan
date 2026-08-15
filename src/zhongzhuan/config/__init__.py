@@ -12,6 +12,7 @@ from .config import (
     log_effective_config,
     log_timeout_policy,
     save_config,
+    set_current_config,
     validate_production_ready,
 )
 from .paths import exe_dir, resolve_data_dir, is_admin
@@ -36,6 +37,7 @@ __all__ = [
     "default_config",
     "load_config",
     "save_config",
+    "set_current_config",
     "log_timeout_policy",
     "log_effective_config",
     "effective_config_snapshot",

@@ -333,3 +333,137 @@ def test_codex_model_info_no_multi_agent_when_disabled(monkeypatch):
 
     info = ProxyServer._build_codex_model_info("oc-test")
     assert "multi_agent_version" not in info
+
+
+# ---------------------------------------------------------------------------
+# 运行时配置注入（2026-08-15 修复：default_config 原先只返回全新默认值，导致
+# 生产环境 ma_active 恒 False、响应侧合成全死——T2b 实证）
+# ---------------------------------------------------------------------------
+
+
+def test_set_current_config_injects_runtime_config(monkeypatch):
+    from zhongzhuan.config import default_config
+    from zhongzhuan.config.config import Config, set_current_config
+
+    try:
+        set_current_config(None)
+        # 未注入：返回全新默认值（多代理关闭）。
+        assert default_config().multi_agent.enabled is False
+        # 注入：default_config 返回同一实例，字段真实生效。
+        cfg = Config()
+        cfg.multi_agent.enabled = True
+        set_current_config(cfg)
+        assert default_config() is cfg
+        assert default_config().multi_agent.enabled is True
+    finally:
+        set_current_config(None)
+
+
+# ---------------------------------------------------------------------------
+# capability router emulated 接线（2026-08-15 修复：_capability_router 原先不传
+# emulated，默认集不含 TOOL_SEARCH——T2a 线上仍 400）
+# ---------------------------------------------------------------------------
+
+
+def test_capability_router_wires_emulated_tool_search(monkeypatch):
+    import zhongzhuan.config as pconfig
+    from zhongzhuan.proxy.handler import ProxyHandler
+    from zhongzhuan.proxy.protocol.responses_models import Capability
+
+    ma = type("MA", (), {"enabled": True, "max_threads": 4,
+                         "job_max_runtime_seconds": 1800,
+                         "minimal_client_version": "0.144.0"})()
+    ht = type("HT", (), {"tool_search_enabled": True, "mcp_enabled": False})()
+
+    class FakeCfg:
+        multi_agent = ma
+        hosted_tools = ht
+
+    monkeypatch.setattr(pconfig, "default_config", lambda: FakeCfg())
+
+    handler = ProxyHandler.__new__(ProxyHandler)
+    router = handler._capability_router([])
+    assert Capability.TOOL_SEARCH in router.emulated_capabilities
+
+
+def test_capability_router_default_emulated_without_flag(monkeypatch):
+    import zhongzhuan.config as pconfig
+    from zhongzhuan.proxy.handler import ProxyHandler
+    from zhongzhuan.proxy.protocol.responses_models import Capability
+
+    ma = type("MA", (), {"enabled": False})()
+    ht = type("HT", (), {"tool_search_enabled": False, "mcp_enabled": False})()
+
+    class FakeCfg:
+        multi_agent = ma
+        hosted_tools = ht
+
+    monkeypatch.setattr(pconfig, "default_config", lambda: FakeCfg())
+
+    handler = ProxyHandler.__new__(ProxyHandler)
+    router = handler._capability_router([])
+    assert Capability.TOOL_SEARCH not in router.emulated_capabilities
+
+
+# ---------------------------------------------------------------------------
+# 请求侧归一化（2026-08-15 修复：hosted tool_search 与 multi_agent_v1 namespace
+# 摊平成上游模型可调用的普通 function——T3 实证原样下发时模型看不到 spawn_agent）
+# ---------------------------------------------------------------------------
+
+
+def test_ma_flatten_tools_hosted_tool_search_and_namespace():
+    from zhongzhuan.proxy.handler import _ma_flatten_tools
+
+    tools = [
+        {"type": "tool_search"},
+        {
+            "type": "namespace",
+            "name": "multi_agent_v1",
+            "tools": [
+                {"type": "function", "name": "spawn_agent", "description": "Spawn",
+                 "parameters": {"type": "object", "properties": {}}},
+                {"type": "function", "name": "wait_agent", "description": "Wait"},
+            ],
+        },
+        {"type": "function", "name": "plain_fn", "description": "keep"},
+    ]
+    out = _ma_flatten_tools(tools)
+    assert out is not None
+    assert [t["name"] for t in out] == ["tool_search", "spawn_agent", "wait_agent", "plain_fn"]
+    assert all(t["type"] == "function" for t in out)
+    # hosted tool_search 变成可调用的 function 形态（FR-1 不依赖上游原生支持）。
+    assert out[0]["name"] == "tool_search"
+    assert "parameters" in out[0]
+
+
+def test_ma_flatten_tools_noop_on_plain_request():
+    from zhongzhuan.proxy.handler import _ma_flatten_tools
+
+    tools = [{"type": "function", "name": "web_search_probe", "description": "x"}]
+    assert _ma_flatten_tools(tools) is None  # 无关请求零改动
+
+
+def test_ma_normalize_upstream_body_including_additional_tools():
+    from zhongzhuan.proxy.handler import _ma_normalize_upstream_body
+
+    body = {
+        "tools": [{"type": "tool_search"}],
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "multi_agent_v1",
+                        "tools": [{"type": "function", "name": "close_agent"}],
+                    }
+                ],
+            }
+        ],
+    }
+    _ma_normalize_upstream_body(body)
+    assert body["tools"][0]["type"] == "function"
+    assert body["tools"][0]["name"] == "tool_search"
+    assert body["input"][0]["tools"][0]["type"] == "function"
+    assert body["input"][0]["tools"][0]["name"] == "close_agent"

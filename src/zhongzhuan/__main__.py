@@ -13,7 +13,7 @@ from pathlib import Path
 import yaml
 
 from zhongzhuan import __version__
-from zhongzhuan.config import default_config, load_config, resolve_data_dir
+from zhongzhuan.config import default_config, load_config, resolve_data_dir, set_current_config
 from zhongzhuan.observability import setup_logging
 from zhongzhuan.proxy import ProxyServer
 from zhongzhuan.proxy.ratelimit import KeyHealth, SlidingWindow
@@ -276,6 +276,9 @@ async def run_foreground(
     from loguru import logger
 
     cfg = load_config(cfg_path)
+    # 记录进程级「当前生效配置」：运行时组件（capability router emulated 集、
+    # V1 多代理开关、codex 模型能力声明等）经 default_config() 读到真实配置。
+    set_current_config(cfg)
     if port_override is not None:
         cfg.server.proxy.port = port_override
 

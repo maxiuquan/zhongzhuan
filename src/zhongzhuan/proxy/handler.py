@@ -66,6 +66,87 @@ def _ma_safe_json(text: Any) -> dict:
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
+
+def _ma_flatten_tools(tools: Any) -> list | None:
+    """把 ``tools`` 里的 hosted ``tool_search`` 与 ``multi_agent_v1`` namespace
+    摊平成上游模型可调用的普通 function（FR-1 / C.4 #3，APIAADBPW-REQ-MA-001）。
+
+    * ``{type:"tool_search"}`` -> ``{type:"function", name:"tool_search", ...}``
+      —— juhe 等上游不认 hosted 工具类型，模型根本不会调用它（T2b 实证：function
+      形态模型才会 call）。
+    * ``{type:"namespace", name:"multi_agent_v1", tools:[...]}`` -> 5 个子工具
+      以**纯子工具名**（``spawn_agent`` 等）摊平为普通 function —— 上游没有
+      namespace 概念（T3 实证：原样下发时模型自称无 spawn_agent）；纯名与
+      pipeline 的 ``_special_kind``（``name in MULTI_AGENT_TOOLS``）直接对接。
+
+    Returns:
+        有改动时返回新数组；无改动（或非 list）返回 ``None``（调用方据此决定
+        是否覆盖原字段，保持无关请求零改动）。
+    """
+    if not isinstance(tools, list):
+        return None
+    out: list[Any] = []
+    changed = False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            out.append(tool)
+            continue
+        ttype = str(tool.get("type") or "")
+        if ttype == TOOL_SEARCH_NAME:
+            out.append(
+                {
+                    "type": "function",
+                    "name": TOOL_SEARCH_NAME,
+                    "description": "Search for tools to dynamically load into this conversation.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Search query."},
+                            "limit": {"type": "integer", "description": "Maximum number of tools to return."},
+                        },
+                        "additionalProperties": False,
+                    },
+                }
+            )
+            changed = True
+            continue
+        if ttype == "namespace" and tool.get("name") == MULTI_AGENT_NAMESPACE:
+            for sub in tool.get("tools") or []:
+                if not isinstance(sub, dict) or str(sub.get("type") or "") != "function":
+                    continue
+                flat: dict[str, Any] = {
+                    "type": "function",
+                    "name": str(sub.get("name") or ""),
+                    "description": str(sub.get("description") or ""),
+                }
+                params = sub.get("parameters")
+                if isinstance(params, dict):
+                    flat["parameters"] = params
+                if flat["name"]:
+                    out.append(flat)
+                    changed = True
+            continue
+        out.append(tool)
+    return out if changed else None
+
+
+def _ma_normalize_upstream_body(body: dict[str, Any]) -> None:
+    """原地归一化上游请求体：``tools`` 与 ``input`` 里 ``additional_tools`` 的
+    ``tools`` 都做 V1 多代理摊平（FR-1 / C.4 #3）。"""
+    tools = _ma_flatten_tools(body.get("tools"))
+    if tools is not None:
+        body["tools"] = tools
+    inp = body.get("input")
+    if isinstance(inp, list):
+        for item in inp:
+            if (
+                isinstance(item, dict)
+                and str(item.get("type") or "") == "additional_tools"
+            ):
+                item_tools = _ma_flatten_tools(item.get("tools"))
+                if item_tools is not None:
+                    item["tools"] = item_tools
+
 #: V3 流式路径在把首个字节发给客户端之前，最多可切换的上游 key 次数
 #: （即最多尝试 ``_V3_STREAM_MAX_SWITCHES + 1`` 个 key）。用于「空响应自动换 key」。
 #:
@@ -891,8 +972,21 @@ class ProxyHandler:
         return f"token:{token_id}" if token_id > 0 else ""
 
     def _capability_router(self, candidates: list[KeyHealth]) -> CapabilityRouter:
-        """One router per create, over the *filtered* candidate pool."""
-        return CapabilityRouter(StaticRouteRegistry(candidates))
+        """One router per create, over the *filtered* candidate pool.
+
+        V1 多代理（APIAADBPW-REQ-MA-001 / FR-6 / AC-1）：把配置驱动的本地可
+        模拟能力集（``hosted_tool_emulated_capabilities``，含开启后的
+        ``tool_search``）注入 router，否则 router 只用默认集、``{type:
+        "tool_search"}`` 仍会 400 ``no route can serve capability``（2026-08-15
+        线上 T2a 实证 + 代码核对）。
+        """
+        from ..config import default_config
+        from ..responses_v3.hosted_tools import hosted_tool_emulated_capabilities
+
+        return CapabilityRouter(
+            StaticRouteRegistry(candidates),
+            emulated=hosted_tool_emulated_capabilities(default_config()),
+        )
 
     def _v3_response_store(self):
         rs = self._response_store()
@@ -998,6 +1092,13 @@ class ProxyHandler:
         upstream_body = dict(body_obj)
         if resolution is not None:
             upstream_body["input"] = build_upstream_input(resolution, body_obj.get("input"))
+
+        # A3b. V1 多代理（APIAADBPW-REQ-MA-001 / FR-1 / C.4 #3）：把 hosted
+        # tool_search 与 multi_agent_v1 namespace 归一化为上游模型可调用的普通
+        # function（仅激活时生效，不碰普通流量）。否则 juhe 等上游模型根本看不到
+        # 这些工具——T3 实证：原样下发 namespace 时模型自称「没有 spawn_agent」。
+        if self._multi_agent_active():
+            _ma_normalize_upstream_body(upstream_body)
 
         # A4. Capability route over the *filtered* candidate pool.  A hosted
         # tool with no executor is a standard 400; a declared-but-down route is
@@ -1108,6 +1209,16 @@ class ProxyHandler:
             return bool(default_config().hosted_tools.tool_search_enabled)
         except Exception:
             return False
+
+    def _multi_agent_active(self) -> bool:
+        """V1 多代理是否激活：两个开关（hosted_tools.tool_search_enabled 与
+        multi_agent.enabled）必须同时为真，避免「只开其一」的半残状态。"""
+        ma_cfg = self._multi_agent_config()
+        return bool(
+            ma_cfg
+            and getattr(ma_cfg, "enabled", False)
+            and self._multi_agent_tool_search_enabled()
+        )
 
     def _multi_agent_runner(self):
         """构建子代理执行器（惰性单例）：向上游真实发起一次非流式 /v1/responses。
@@ -1273,9 +1384,7 @@ class ProxyHandler:
         # 两个开关必须同时为真才算激活（避免半残状态）。
         session_key = self._session_key(request, prep.body_obj)
         parent_model = ctx.requested_model or ""
-        ma_cfg = self._multi_agent_config()
-        ts_enabled = self._multi_agent_tool_search_enabled()
-        ma_active = bool(ma_cfg and getattr(ma_cfg, "enabled", False) and ts_enabled)
+        ma_active = self._multi_agent_active()
         orchestrator = None
         if ma_active:
             orchestrator = await self._get_or_create_orchestrator(session_key, parent_model)
@@ -1523,9 +1632,7 @@ class ProxyHandler:
         # function_call，兼容旧行为）。两个开关必须同时为真才算激活（避免半残状态）。
         session_key = self._session_key(request, prep.body_obj)
         parent_model = ctx.requested_model or ""
-        ma_cfg = self._multi_agent_config()
-        ts_enabled = self._multi_agent_tool_search_enabled()
-        ma_active = bool(ma_cfg and getattr(ma_cfg, "enabled", False) and ts_enabled)
+        ma_active = self._multi_agent_active()
         orchestrator = None
         if ma_active:
             orchestrator = await self._get_or_create_orchestrator(session_key, parent_model)

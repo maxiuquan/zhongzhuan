@@ -259,8 +259,22 @@ class Config:
     config_sources: ClassVar[dict[str, str]] = {}
 
 
+#: 进程级「当前生效配置」。服务运行期由 ``set_current_config`` 注入
+#: ``load_config`` 的真实实例；未注入时 ``default_config`` 返回全默认值。
+#: 运行时组件（capability router 的 emulated 集、V1 多代理开关等）必须经它
+#: 读到 config.yaml 里的实际值，而不是每次都拿到全新的默认值（2026-08-15
+#: 排查确认：多代理功能在生产全死的根因就是 ``default_config`` 只返回默认）。
+_CURRENT_CONFIG: Config | None = None
+
+
+def set_current_config(cfg: Config | None) -> None:
+    """注入 / 清除进程级当前配置（``run_foreground`` 在 ``load_config`` 后调用）。"""
+    global _CURRENT_CONFIG
+    _CURRENT_CONFIG = cfg
+
+
 def default_config() -> Config:
-    return Config()
+    return _CURRENT_CONFIG if _CURRENT_CONFIG is not None else Config()
 
 
 # ---------------------------------------------------------------------------
