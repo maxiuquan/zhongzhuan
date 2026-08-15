@@ -1317,11 +1317,16 @@ class ProxyHandler:
                     job_max_runtime_seconds=getattr(cfg, "job_max_runtime_seconds", 1800) if cfg else 1800,
                     runner=self._multi_agent_runner(),
                     default_model=parent_model,
+                    default_session=session_key,
                 )
                 self._multi_agent_sessions[session_key] = orch
-            elif parent_model:
+            else:
                 # 同一会话复用编排器；父模型可能跨轮变化，逐步更新默认值。
-                orch.set_default_model(parent_model)
+                if parent_model:
+                    orch.set_default_model(parent_model)
+                # FR-8 / NFR-2：子代理 session_id 空时继承父请求会话（Codex 原生
+                # spawn 不传 session_id，铁证见需求文档附录 C.12.2）。
+                orch.set_default_session(session_key)
             return orch
 
     async def _run_sub_agent(self, instruction: str, model: str, session_id: str) -> str:

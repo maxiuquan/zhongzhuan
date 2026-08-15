@@ -121,6 +121,65 @@ async def _fake_runner(instruction: str, model: str, session_id: str) -> str:
     return "RESULT:" + instruction
 
 
+async def test_orchestrator_spawn_role_tag_routes_model():
+    # FR-8 / 附录 C.12.4（方案 A.1）：[role] 前缀确定子代理模型并剥除前缀。
+    from zhongzhuan.responses_v3.multi_agent import ROLE_MODEL_MAP
+
+    orch = MultiAgentOrchestrator(runner=_fake_runner, default_model="juhe/mimo-v2.5-pro")
+    spawn = await orch.handle(
+        MULTI_AGENT_NAMESPACE, "spawn_agent", "c1",
+        json.dumps({"instruction": "[explorer] research the files", "model": ""}),
+        output_index=0,
+    )
+    agent_id = json.loads(spawn["output"])["agent_id"]
+    st = orch._agents[agent_id]
+    assert st.model == ROLE_MODEL_MAP["explorer"]  # 角色标记路由到 deepseek
+    assert st.instruction == "research the files"  # 前缀已剥除
+
+
+async def test_orchestrator_spawn_role_tag_explicit_model_wins():
+    # 角色标记优先于 default_model；显式 model 字段保留（MCP 桥接路径）。
+    from zhongzhuan.responses_v3.multi_agent import ROLE_MODEL_MAP
+
+    orch = MultiAgentOrchestrator(runner=_fake_runner, default_model="juhe/mimo-v2.5-pro")
+    # 无角色标记 + 显式 model → 用显式 model。
+    spawn = await orch.handle(
+        MULTI_AGENT_NAMESPACE, "spawn_agent", "c1",
+        json.dumps({"instruction": "do it", "model": "juhe/glm5.2"}),
+        output_index=0,
+    )
+    agent_id = json.loads(spawn["output"])["agent_id"]
+    assert orch._agents[agent_id].model == "juhe/glm5.2"
+    # 无角色标记 + 无 model → 父模型 default。
+    spawn2 = await orch.handle(
+        MULTI_AGENT_NAMESPACE, "spawn_agent", "c2",
+        json.dumps({"instruction": "do it again"}),
+        output_index=0,
+    )
+    agent_id2 = json.loads(spawn2["output"])["agent_id"]
+    assert orch._agents[agent_id2].model == "juhe/mimo-v2.5-pro"
+
+
+async def test_orchestrator_spawn_session_fallback():
+    # FR-8 / NFR-2：session_id 空时继承父请求会话（Codex 原生 spawn 不传 session_id）。
+    orch = MultiAgentOrchestrator(runner=_fake_runner, default_model="m1", default_session="tok:7")
+    spawn = await orch.handle(
+        MULTI_AGENT_NAMESPACE, "spawn_agent", "c1",
+        json.dumps({"instruction": "do X"}),
+        output_index=0,
+    )
+    agent_id = json.loads(spawn["output"])["agent_id"]
+    assert orch._agents[agent_id].session_id == "tok:7"
+    # 显式 session_id 仍优先。
+    spawn2 = await orch.handle(
+        MULTI_AGENT_NAMESPACE, "spawn_agent", "c2",
+        json.dumps({"instruction": "do Y", "session_id": "tok:9"}),
+        output_index=0,
+    )
+    agent_id2 = json.loads(spawn2["output"])["agent_id"]
+    assert orch._agents[agent_id2].session_id == "tok:9"
+
+
 async def test_orchestrator_spawn_wait_close():
     orch = MultiAgentOrchestrator(runner=_fake_runner, default_model="m1")
     # spawn

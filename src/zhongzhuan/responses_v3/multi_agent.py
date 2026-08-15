@@ -64,6 +64,23 @@ DEFAULT_MAX_THREADS: int = 4
 #: 单子代理任务硬上限（NFR-1，铁律 5 客户端 1800s）。
 DEFAULT_JOB_MAX_RUNTIME_SECONDS: int = 1800
 
+#: 专家团角色 → 模型 slug 映射（FR-8 / 需求文档附录 C.12.4 / 方案 A.1）。
+#: Codex 26.803 原生 ``spawn_agent`` **不转发 per-child ``model`` 参数**（子代理一律
+#: 继承父模型，铁证：20/20 次 thread_spawn model 全为 mimo），导致专家团角色路由
+#: 在原生路径下断路。中继改为按 spawn instruction 的**角色标记前缀**（``[explorer]
+#: <任务>``）确定子代理模型，剥除前缀后再下发。
+#: ⚠️ slug 以 ``codex-cn-expert-kit/experts/roles.toml``（事实来源）与 relay
+#: ``/v1/models`` 实际暴露为准（2026-08-15 实测核对）：``deepseek-v4-flash``（非
+#: fash）、``glm-5.2``（连字符）、``qwen3.7-flash``（docwriter 是 Qwen 系，非
+#: glm-4.7-flash——需求文档 C.12.4 附录的映射过时）。
+ROLE_MODEL_MAP: dict[str, str] = {
+    "explorer": "juhe/deepseek-v4-flash",
+    "tester": "juhe/deepseek-v4-flash",
+    "implementer": "juhe/glm-5.2",
+    "docwriter": "juhe/qwen3.7-flash",
+    "scrubber": "juhe/agnes-2.5-flash",
+}
+
 
 # ---------------------------------------------------------------------------
 # 2. tool_search_output 合成
@@ -310,6 +327,7 @@ class MultiAgentOrchestrator:
         job_max_runtime_seconds: int = DEFAULT_JOB_MAX_RUNTIME_SECONDS,
         runner: SubAgentRunner | None = None,
         default_model: str = "",
+        default_session: str = "",
         logger: logging.Logger | None = None,
         namespace: str = MULTI_AGENT_NAMESPACE,
     ) -> None:
@@ -317,6 +335,9 @@ class MultiAgentOrchestrator:
         self._job_timeout = int(job_max_runtime_seconds)
         self._runner = runner
         self._default_model = default_model
+        #: 子代理 session_id 回退值（FR-8 / 附录 C.12.4 A.1「修 NFR-2」）：Codex
+        #: 26.803 原生 spawn_agent 不传 session_id，空则继承父请求的会话 key。
+        self._default_session = default_session
         self._log = logger or _loguru
         self._namespace = namespace
         self._agents: dict[str, AgentState] = {}
@@ -327,6 +348,11 @@ class MultiAgentOrchestrator:
     def set_default_model(self, model: str) -> None:
         """设置子代理默认继承的父模型（spawn_agent 未显式 override 时使用）。"""
         self._default_model = model or self._default_model
+
+    def set_default_session(self, session: str) -> None:
+        """设置子代理 session_id 回退值（原生 V1 不传 session_id 时继承父会话）。"""
+        if session:
+            self._default_session = session
 
     # -- 入口 ----------------------------------------------------------------
 
@@ -375,8 +401,24 @@ class MultiAgentOrchestrator:
 
     async def _spawn(self, call_id: str, args: dict[str, Any], output_index: int = 0) -> dict[str, Any]:
         instruction = str(args.get("instruction") or "")
-        model = str(args.get("model") or self._default_model or "")
-        session_id = str(args.get("session_id") or "")
+        # FR-8 / 附录 C.12.4（方案 A.1）：Codex 26.803 原生 spawn_agent 不转发
+        # per-child `model` 参数（子代理一律继承父模型）。用角色标记前缀确定
+        # 子代理模型，剥除前缀后再下发 instruction。优先级：角色标记 > 显式
+        # model 字段（MCP 桥接等路径会填）> 父模型 default。
+        model = ""
+        for tag, mdl in ROLE_MODEL_MAP.items():
+            prefix = f"[{tag}]"
+            if instruction.startswith(prefix):
+                args["instruction"] = instruction[len(prefix):].lstrip()
+                instruction = args["instruction"]
+                model = mdl
+                break
+        if not model:
+            model = str(args.get("model") or "")
+        if not model:
+            model = str(self._default_model or "")
+        # session_id 回退：原生 V1 不传 session_id，空则继承父请求会话（NFR-2）。
+        session_id = str(args.get("session_id") or self._default_session or "")
         async with self._lock:
             active = sum(1 for a in self._agents.values() if a.status in ("spawned", "running"))
             if active >= self._max_threads:
