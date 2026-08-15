@@ -1802,18 +1802,31 @@ function renderModelKeyPool(showAddForm) {
     if (poolKeys.length === 0) {
       html += '<div class="empty" style="padding:24px 0">该模型下还没有 Key,点击「+ 添加 Key」</div>';
     } else {
-      html += '<div style="max-height:50vh;overflow-y:auto"><table class="kp-table"><thead><tr><th>标签</th><th>Key</th><th>优先级</th><th>启用</th><th>连通性</th><th>操作</th></tr></thead><tbody>' +
+      html += '<div style="max-height:50vh;overflow-y:auto"><table class="kp-table"><thead><tr><th>标签</th><th>Key</th><th>优先级</th><th>启用</th><th>连通性</th><th>健康</th><th>操作</th></tr></thead><tbody>' +
         poolKeys.map(k => {
           const tr = testResults[k.id];
           let conn = '<span style="color:var(--text-subtle)">未测试</span>';
           if (tr) conn = tr.ok ? '<span class="tag ok">OK ' + tr.latency + 'ms</span>' : '<span class="tag err">失败</span>';
+          // 健康状态（与主 Key 池一致：失效/冷却 + 原因 + 确认恢复）
+          const h = k.health || {};
+          let healthCell = '<span style="color:var(--text-subtle)">正常</span>';
+          if (h.status === "invalid") {
+            healthCell = '<span class="tag err" title="永久失效：' + esc(h.failure_class || "permanent") + '">失效</span>';
+          } else if (h.status && h.status !== "healthy") {
+            const rem = h.cooldown_remaining != null ? Math.ceil(h.cooldown_remaining) + "s" : "";
+            healthCell = '<span class="tag warn" title="冷却中：' + esc(h.failure_class || "") + '">冷却' + (rem ? " " + rem : "") + '</span>';
+          }
+          const canReactivate = h.status === "invalid" || (h.status && h.status !== "healthy");
           return '<tr>' +
             '<td>' + esc(k.label) + '</td>' +
             '<td><code>' + esc(k.key_masked) + '</code></td>' +
             '<td>' + k.priority + '</td>' +
             '<td>' + (k.enabled ? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否') + '</td>' +
             '<td>' + conn + '</td>' +
-            '<td><button class="btn small" onclick="testKey(' + k.id + ')">测试</button> <button class="btn small" onclick="reprobeKey(' + k.id + ')">重探</button> <button class="btn small danger" onclick="delKey(' + k.id + ')">删除</button></td>' +
+            '<td>' + healthCell + '</td>' +
+            '<td><button class="btn small" onclick="testKey(' + k.id + ')">测试</button> <button class="btn small" onclick="reprobeKey(' + k.id + ')">重探</button>' +
+              (canReactivate ? ' <button class="btn small" onclick="reactivateKey(' + k.id + ')">确认恢复</button>' : '') +
+              ' <button class="btn small danger" onclick="delKey(' + k.id + ')">删除</button></td>' +
           '</tr>';
         }).join("") + '</tbody></table></div>';
     }
