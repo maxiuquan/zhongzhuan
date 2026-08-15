@@ -1893,6 +1893,10 @@ class ProxyHandler:
         # V1 多代理（APIAADBPW-REQ-MA-001 / FR-2 / FR-3）：非流路径拦截上游返回的
         # tool_search / multi_agent_v1 namespace 调用，就地合成 / 执行并回写 output。
         if ma_active:
+            _lg.info(
+                f"[v3-ma] postprocess enter ma_active=True orch={orchestrator is not None} "
+                f"spawn_exec={self._spawn_execution_mode()} output_types={[i.get('type') for i in resp_obj.get('output', []) if isinstance(i, dict)]}"
+            )
             try:
                 await self._postprocess_multi_agent_json(
                     resp_obj, orchestrator, ma_active,
@@ -1900,6 +1904,11 @@ class ProxyHandler:
                 )
             except Exception as exc:  # noqa: BLE001 - 后处理失败绝不能污染上游成功响应
                 _lg.exception("multi_agent non-stream postprocess failed: %s", exc)
+            _lg.info(
+                f"[v3-ma] postprocess done output_types={[i.get('type') for i in resp_obj.get('output', []) if isinstance(i, dict)]}"
+            )
+        else:
+            _lg.info(f"[v3-ma] postprocess SKIPPED ma_active=False")
 
         resp_obj["id"] = prep.response_id
         # The translated body is a plain Chat->Responses conversion; it
