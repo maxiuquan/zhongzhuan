@@ -53,7 +53,7 @@ from ..responses_v3.multi_agent import (
     MULTI_AGENT_TOOLS,
     TOOL_SEARCH_NAME,
     build_function_call_output,
-    build_tool_search_output,
+    build_tool_search_function_call_output,
 )
 from ..store.response_store import ResponseStore
 
@@ -668,17 +668,31 @@ class ResponsePipeline:
         frames: list[bytes] = []
         if kind == "tool_search" and self._tool_search_enabled:
             parsed = _parse_args(sc["args"])
-            # 单一 output_index 同时用于 item id 与 SSE 帧/存储，避免 id 与位置错位。
-            idx = self._next_output_index()
-            item = build_tool_search_output(
-                output_index=idx,
+            # FR-2 v1.3 / 需求文档附录 C.7：26.803 不认顶级 tool_search_output，
+            # 必须回显 function_call(name=tool_search) + function_call_output。
+            # 1) 回显上游发起的 function_call（不带 namespace——tool_search 是顶层工具）。
+            fc_idx = self._next_output_index()
+            fc_item = {
+                "id": make_function_call_item_id(call_id),
+                "type": "function_call",
+                "status": "completed",
+                "call_id": call_id,
+                "name": TOOL_SEARCH_NAME,
+                "arguments": sc["args"] or "{}",
+            }
+            frames.extend(await self._emit_special_item(fc_idx, fc_item))
+            self._synthesized_items.append((fc_idx, fc_item))
+            # 2) function_call_output(output=JSON-string({tools:[namespace]}))。
+            out_idx = self._next_output_index()
+            item = build_tool_search_function_call_output(
+                output_index=out_idx,
                 call_id=call_id,
                 response_id=self.response_id,
                 query=parsed.get("query") if isinstance(parsed, dict) else None,
                 limit=parsed.get("limit") if isinstance(parsed, dict) else None,
             )
-            frames.extend(await self._emit_special_item(idx, item))
-            self._synthesized_items.append((idx, item))
+            frames.extend(await self._emit_special_item(out_idx, item))
+            self._synthesized_items.append((out_idx, item))
         elif kind == "multi_agent" and self._multi_agent is not None:
             # 1) 回显父代理发起的 function_call（带 namespace），让客户端看到调用。
             fc_item = {

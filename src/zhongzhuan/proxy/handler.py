@@ -28,7 +28,7 @@ from ..responses_v3.multi_agent import (
     MULTI_AGENT_NAMESPACE,
     MULTI_AGENT_TOOLS,
     TOOL_SEARCH_NAME,
-    build_tool_search_output,
+    build_tool_search_function_call_output,
 )
 from ..responses_v3.request_sanitizer import RequestSanitizer, capability_values
 from ..responses_v3.upstream_chunk_adapter import UpstreamSSEChunkAdapter
@@ -1463,14 +1463,19 @@ class ProxyHandler:
             call_id = str(item.get("call_id") or "")
             if tool_search_enabled and itype == "function_call" and name == TOOL_SEARCH_NAME:
                 parsed = _ma_safe_json(item.get("arguments"))
-                tso = build_tool_search_output(
+                # FR-2 v1.3 / 需求文档附录 C.7：26.803 不认顶级 tool_search_output，
+                # 保留原 function_call(name=tool_search) 并在其后追加
+                # function_call_output(call_id, output=JSON-string({tools:[namespace]}))。
+                new_output.append(item)
+                idx += 1
+                fco = build_tool_search_function_call_output(
                     output_index=idx,
                     call_id=call_id,
                     response_id=str(resp_obj.get("id") or ""),
                     query=parsed.get("query") if isinstance(parsed, dict) else None,
                     limit=parsed.get("limit") if isinstance(parsed, dict) else None,
                 )
-                new_output.append(tso)
+                new_output.append(fco)
                 idx += 1
                 continue
             if orchestrator is not None and itype == "function_call" and (

@@ -68,6 +68,34 @@ def test_function_call_output_shape():
     assert item["output"] == "hello"
 
 
+def test_build_tool_search_function_call_output_shape():
+    # C.7.5 验收（FR-2 v1.3 / 26.803 形态）：function_call_output.output 是
+    # JSON 字符串，tools[0].name == multi_agent_v1，5 子工具 defer_loading 全 true。
+    from zhongzhuan.responses_v3.multi_agent import build_tool_search_function_call_output
+
+    item = build_tool_search_function_call_output(
+        output_index=1, call_id="call_t1", response_id="resp_9", query="find", limit=5
+    )
+    assert item["type"] == "function_call_output"
+    assert item["status"] == "completed"
+    assert item["call_id"] == "call_t1"
+    # output 是 JSON 字符串（不是对象）。
+    assert isinstance(item["output"], str)
+    payload = json.loads(item["output"])
+    tools = payload["tools"]
+    assert len(tools) == 1
+    ns = tools[0]
+    assert ns["type"] == "namespace"
+    assert ns["name"] == MULTI_AGENT_NAMESPACE
+    sub = ns["tools"]
+    assert [t["name"] for t in sub] == list(MULTI_AGENT_TOOLS)
+    for t in sub:
+        assert t.get("defer_loading") is True  # 必须存在且为 true，不是 null/缺省
+    spawn = next(t for t in sub if t["name"] == "spawn_agent")
+    assert "### Designing delegated subtasks" in spawn["description"]
+    assert "### When to delegate vs. do the subtask yourself" in spawn["description"]
+
+
 # ---------------------------------------------------------------------------
 # 2. MultiAgentOrchestrator 状态机（FR-3 / FR-4 / NFR-6）
 # ---------------------------------------------------------------------------
@@ -163,6 +191,8 @@ async def _collect(pipe: ResponsePipeline, chunks: list[dict]) -> list[dict]:
 
 
 async def test_pipeline_tool_search_synthesized():
+    # FR-2 v1.3 / C.7：26.803 需要 function_call(name=tool_search) +
+    # function_call_output(call_id, output=JSON-string({tools:[namespace]})) 两项。
     pipe = ResponsePipeline("resp_ts", multi_agent=None, tool_search_enabled=True)
     frames = await _collect(pipe, [
         {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME,
@@ -170,12 +200,19 @@ async def test_pipeline_tool_search_synthesized():
         {"type": "tool_call_done", "call_id": "t1", "arguments": '{"query": "x"}'},
     ])
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
-    tso = next((it for it in items if it["type"] == "tool_search_output"), None)
-    assert tso is not None, "expected tool_search_output item"
-    assert tso["output"]["tools"][0]["name"] == MULTI_AGENT_NAMESPACE
-    # 绝不出现顶层 function_call（tool_search 不应作为 function 返回）。
-    fc = [it for it in items if it["type"] == "function_call" and it.get("name") == TOOL_SEARCH_NAME]
-    assert fc == []
+    # 1) 回显 function_call(name=tool_search)。
+    fc = next((it for it in items if it["type"] == "function_call"
+               and it.get("name") == TOOL_SEARCH_NAME), None)
+    assert fc is not None, "expected function_call(name=tool_search)"
+    assert fc["call_id"] == "t1"
+    # 2) function_call_output，output 是 JSON 字符串、内含 multi_agent_v1 namespace。
+    fco = next((it for it in items if it["type"] == "function_call_output"
+                and it.get("call_id") == "t1"), None)
+    assert fco is not None, "expected function_call_output for tool_search"
+    payload = json.loads(fco["output"])
+    assert payload["tools"][0]["name"] == MULTI_AGENT_NAMESPACE
+    # 不再返回顶级 tool_search_output（26.803 不认）。
+    assert all(it["type"] != "tool_search_output" for it in items)
 
 
 async def test_pipeline_tool_search_disabled_passthrough():
@@ -188,6 +225,7 @@ async def test_pipeline_tool_search_disabled_passthrough():
     ])
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
     assert all(it["type"] != "tool_search_output" for it in items)
+    assert all(it["type"] != "function_call_output" for it in items)
     fc = [it for it in items if it["type"] == "function_call" and it.get("name") == TOOL_SEARCH_NAME]
     assert fc != []  # 透传为普通 function_call
 
@@ -270,7 +308,8 @@ def test_pipeline_output_items_include_synthesized():
 
     items = asyncio.run(_run())
     types = [it["type"] for it in items]
-    assert "tool_search_output" in types
+    assert "tool_search_output" not in types  # 26.803 不认顶级形态（C.7）
+    assert "function_call" in types
     assert "function_call_output" in types
 
 

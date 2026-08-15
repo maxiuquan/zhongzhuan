@@ -119,6 +119,19 @@ def build_multi_agent_namespace_tools() -> list[dict[str, Any]]:
     return tools
 
 
+def build_multi_agent_namespace_container() -> dict[str, Any]:
+    """``multi_agent_v1`` namespace 容器（``output.tools[0]`` 的标准形态，FR-2.1）。
+
+    返回 ``{"type":"namespace","name":"multi_agent_v1","tools":[5 个 deferred 子工具]}``，
+    5 子工具全 ``defer_loading:true``、``spawn_agent.description`` 含两段 ``###`` 文案。
+    """
+    return {
+        "type": "namespace",
+        "name": MULTI_AGENT_NAMESPACE,
+        "tools": build_multi_agent_namespace_tools(),
+    }
+
+
 def build_tool_search_output(
     *,
     output_index: int,
@@ -127,11 +140,46 @@ def build_tool_search_output(
     query: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    """合成一个 ``tool_search_output`` Responses 输出项（FR-2）。
+    """合成一个顶级 ``tool_search_output`` 项（**更新版 Codex >= 27.x 形态**，FR-2）。
+
+    ⚠️ 26.803 桌面端**不认**顶级 ``tool_search_output``（``ResponseItem`` 无此变体，
+    ``failed to parse ResponseItem`` 直接丢弃，见需求文档附录 C.7 / v1.3）。26.803
+    必须走 :func:`build_tool_search_function_call_output` 的 function_call_output
+    形态。本函数保留用于支持更新版客户端的双形态共存（文档 §C.7.4 可选优化）。
 
     形状严格对齐 codex-rs 客户端断言（需求文档 §4.2）：``output.tools`` 里只有
     一条 ``type:"namespace"`` 容器，其 ``name`` 为 ``multi_agent_v1``，``tools``
     为 5 个 deferred 子工具；**绝不**以顶层 ``function`` 返回任何子工具。
+    """
+    item_id = "tso_{0}_{1}".format(response_id or "resp", output_index)
+    return {
+        "id": item_id,
+        "type": "tool_search_output",
+        "status": "completed",
+        "call_id": call_id,
+        "output": {"tools": [build_multi_agent_namespace_container()]},
+        # 透传记录，便于排障（NFR-4）。
+        "query": query,
+        "limit": limit,
+    }
+
+
+def build_tool_search_function_call_output(
+    *,
+    output_index: int,
+    call_id: str,
+    response_id: str = "",
+    query: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """合成 **Codex 26.803 期望**的 tool_search 结果：``function_call_output`` 项
+    （FR-2 v1.3 / 需求文档附录 C.7）。
+
+    26.803 的 ``ResponseItem`` enum 没有 ``ToolSearchOutput`` 变体，顶级
+    ``tool_search_output`` 会被解析失败并丢弃。正确形态是：
+    ``function_call(name=tool_search, call_id, arguments={query,limit})`` + 本函数
+    合成的 ``function_call_output(call_id, output=JSON-string)``，其中 ``output``
+    为 JSON 字符串、内含 ``{"tools":[multi_agent_v1 namespace 容器]}``（FR-2.1）。
 
     Args:
         output_index: 该 item 在响应 ``output`` 数组中的下标。
@@ -139,26 +187,24 @@ def build_tool_search_output(
         response_id: 响应 id，仅用于生成稳定的 item id。
         query / limit: 透传上游 ``tool_search`` 调用参数（仅作记录，不影响合成）。
     """
-    item_id = "tso_{0}_{1}".format(response_id or "resp", output_index)
-    namespace_tools = build_multi_agent_namespace_tools()
-    return {
+    item_id = "fco_{0}_{1}".format(response_id or "resp", output_index)
+    output_json = json.dumps(
+        {"tools": [build_multi_agent_namespace_container()]},
+        ensure_ascii=False,
+    )
+    item: dict[str, Any] = {
         "id": item_id,
-        "type": "tool_search_output",
+        "type": "function_call_output",
         "status": "completed",
         "call_id": call_id,
-        "output": {
-            "tools": [
-                {
-                    "type": "namespace",
-                    "name": MULTI_AGENT_NAMESPACE,
-                    "tools": namespace_tools,
-                }
-            ],
-        },
-        # 透传记录，便于排障（NFR-4）。
-        "query": query,
-        "limit": limit,
+        "output": output_json,
     }
+    # 透传记录，便于排障（NFR-4）。
+    if query is not None:
+        item["query"] = query
+    if limit is not None:
+        item["limit"] = limit
+    return item
 
 
 def build_function_call_output(
@@ -439,7 +485,9 @@ __all__ = [
     "DEFAULT_MAX_THREADS",
     "DEFAULT_JOB_MAX_RUNTIME_SECONDS",
     "build_multi_agent_namespace_tools",
+    "build_multi_agent_namespace_container",
     "build_tool_search_output",
+    "build_tool_search_function_call_output",
     "build_function_call_output",
     "AgentState",
     "MultiAgentOrchestrator",
