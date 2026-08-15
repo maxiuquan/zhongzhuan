@@ -1644,67 +1644,64 @@ class ProxyHandler:
                 fc_item = dict(item)
                 fc_item["status"] = "completed"
                 fc_item["namespace"] = MULTI_AGENT_NAMESPACE
-                fc_item.pop("arguments", None)
                 if self._spawn_execution_mode() == "server":
                     # 方案 B（server 代执行兜底，FR-9）：执行并内联 fco。
                     # 注意：内联 fco 会让 Codex 客户端报 "unexpected tool output
                     # from stream"（23:08 真冒烟铁证）——该路径仅作为无法走通
                     # client 透传时的兜底，且 FR-10 保证 fco 含子代理产物。
+                    fc_item.pop("arguments", None)
                     result = await orchestrator.handle(
                         MULTI_AGENT_NAMESPACE, name, call_id, item.get("arguments") or "{}",
                         output_index=idx,
                     )
                     new_output.append(result)
                     idx += 1
-                elif name == "spawn_agent":
-                    # 方案 A（client 透传，默认）+ FR-12（v3.0）空参补丁：
-                    # mimo 团长稳定发 spawn_agent({})，本地 handler 拒执行。
-                    # 透传前拦截：空参则从父会话上下文合成自包含 message +
-                    # 角色路由注入 model（防递归后缀）；非空原样透传。
-                    from ..responses_v3.args_patch import patch_spawn_agent_arguments
+                else:
+                    # 方案 A（client 透传，默认）：**保留 arguments 原样透传**——
+                    # 客户端本地 SpawnAgentHandler 需要 arguments 才能执行。
+                    # FR-12（v3.0）空参补丁：mimo 团长曾稳定发 spawn_agent({})，
+                    # 本地 handler 拒执行；空参则从父会话上下文合成自包含
+                    # message + 角色路由注入 model（防递归后缀）；非空原样透传
+                    # （FR-12d 回归保护）。
+                    if name == "spawn_agent":
+                        from ..responses_v3.args_patch import patch_spawn_agent_arguments
 
-                    _lg.info(
-                        f"[args-patch] spawn_agent detected call_id={call_id} "
-                        f"raw_args={str(item.get('arguments'))[:80]!r} "
-                        f"last_user_len={len(last_user_text)}"
-                    )
-
-                    leader_text = ""
-                    for prev in new_output:
-                        if isinstance(prev, dict) and prev.get("type") == "message":
-                            parts = []
-                            for c in (prev.get("content") or []):
-                                if isinstance(c, dict) and c.get("type") in ("output_text", "text") and c.get("text"):
-                                    parts.append(str(c["text"]))
-                            if parts:
-                                leader_text += " ".join(parts)
-                    patched = patch_spawn_agent_arguments(
-                        item.get("arguments") or "{}", last_user_text, leader_text,
-                    )
-                    if patched is not None:
-                        if patched != _ma_safe_json(item.get("arguments")):
-                            _lg.info(
-                                f"[args-patch] empty-args patched call_id={call_id} "
-                                f"model={patched.get('model') or 'inherit'}"
-                            )
-                            fc_item["arguments"] = json.dumps(patched, ensure_ascii=False)
-                    else:
-                        # FR-12c：上下文不足 → 拒绝重试（错误 fco 告知模型）。
-                        _lg.info(f"[args-patch] empty-args rejected call_id={call_id} (no context)")
-                        new_output.append(
-                            {
-                                "id": "fc_{0}_err".format(call_id),
-                                "type": "function_call_output",
-                                "call_id": call_id,
-                                "output": json.dumps(
-                                    {
-                                        "error": "spawn_agent requires a non-empty message; "
-                                                 "retry with an explicit instruction",
-                                    }
-                                ),
-                            }
+                        leader_text = ""
+                        for prev in new_output:
+                            if isinstance(prev, dict) and prev.get("type") == "message":
+                                parts = []
+                                for c in (prev.get("content") or []):
+                                    if isinstance(c, dict) and c.get("type") in ("output_text", "text") and c.get("text"):
+                                        parts.append(str(c["text"]))
+                                if parts:
+                                    leader_text += " ".join(parts)
+                        patched = patch_spawn_agent_arguments(
+                            item.get("arguments") or "{}", last_user_text, leader_text,
                         )
-                        idx += 1
+                        if patched is not None:
+                            if patched != _ma_safe_json(item.get("arguments")):
+                                _lg.info(
+                                    f"[args-patch] empty-args patched call_id={call_id} "
+                                    f"model={patched.get('model') or 'inherit'}"
+                                )
+                                fc_item["arguments"] = json.dumps(patched, ensure_ascii=False)
+                        else:
+                            # FR-12c：上下文不足 → 拒绝重试（错误 fco 告知模型）。
+                            _lg.info(f"[args-patch] empty-args rejected call_id={call_id} (no context)")
+                            new_output.append(
+                                {
+                                    "id": "fc_{0}_err".format(call_id),
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": json.dumps(
+                                        {
+                                            "error": "spawn_agent requires a non-empty message; "
+                                                     "retry with an explicit instruction",
+                                        }
+                                    ),
+                                }
+                            )
+                            idx += 1
                 new_output.append(fc_item)
                 idx += 1
                 continue
@@ -1899,10 +1896,6 @@ class ProxyHandler:
         # V1 多代理（APIAADBPW-REQ-MA-001 / FR-2 / FR-3）：非流路径拦截上游返回的
         # tool_search / multi_agent_v1 namespace 调用，就地合成 / 执行并回写 output。
         if ma_active:
-            _lg.info(
-                f"[v3-ma] postprocess enter ma_active=True orch={orchestrator is not None} "
-                f"spawn_exec={self._spawn_execution_mode()} output_types={[i.get('type') for i in resp_obj.get('output', []) if isinstance(i, dict)]}"
-            )
             try:
                 await self._postprocess_multi_agent_json(
                     resp_obj, orchestrator, ma_active,
@@ -1910,11 +1903,6 @@ class ProxyHandler:
                 )
             except Exception as exc:  # noqa: BLE001 - 后处理失败绝不能污染上游成功响应
                 _lg.exception("multi_agent non-stream postprocess failed: %s", exc)
-            _lg.info(
-                f"[v3-ma] postprocess done output_types={[i.get('type') for i in resp_obj.get('output', []) if isinstance(i, dict)]}"
-            )
-        else:
-            _lg.info(f"[v3-ma] postprocess SKIPPED ma_active=False")
 
         resp_obj["id"] = prep.response_id
         # The translated body is a plain Chat->Responses conversion; it

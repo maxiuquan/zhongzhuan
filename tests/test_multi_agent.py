@@ -740,3 +740,43 @@ async def test_pipeline_client_empty_args_no_context_rejected():
     fco = next((it for it in items if it["type"] == "function_call_output"), None)
     assert fco is not None
     assert "non-empty message" in fco["output"]
+
+
+async def test_nonstream_postprocess_client_preserves_args_and_patches():
+    """非流后处理（client 透传）：非空参保留 arguments 原样；空参补丁合成。"""
+    from zhongzhuan.proxy.handler import ProxyHandler  # noqa: F401 - 仅验证可导入
+    from zhongzhuan.responses_v3.multi_agent import MultiAgentOrchestrator
+
+    orch = MultiAgentOrchestrator(runner=_fake_runner)
+
+    # 用真实 handler 的方法（构造最小实例，覆盖 _spawn_execution_mode）
+    import zhongzhuan.proxy.handler as H
+    import types
+
+    async def run(resp_obj, user_text):
+        handler = H.ProxyHandler.__new__(H.ProxyHandler)
+        handler._spawn_execution_mode = types.MethodType(lambda self: "client", handler)
+        await handler._postprocess_multi_agent_json(resp_obj, orch, True, last_user_text=user_text)
+        return resp_obj
+
+    # 1) 非空参 → arguments 保留 + 无 fco
+    r1 = await run({"output": [
+        {"id": "fc_a", "type": "function_call", "call_id": "c1", "name": "spawn_agent",
+         "namespace": "multi_agent_v1", "arguments": '{"message": "read AGENTS.md"}'}
+    ]}, "user task")
+    out1 = r1["output"]
+    fc1 = out1[0]
+    assert fc1["arguments"] == '{"message": "read AGENTS.md"}'  # 保留原样（FR-12d）
+    assert all(i["type"] != "function_call_output" for i in out1)
+
+    # 2) 空参 + 上下文 → 合成补参 + 无 fco
+    r2 = await run({"output": [
+        {"id": "fc_b", "type": "function_call", "call_id": "c2", "name": "spawn_agent",
+         "namespace": "multi_agent_v1", "arguments": "{}"}
+    ]}, "read the three config files")
+    out2 = r2["output"]
+    fc2 = out2[0]
+    args2 = json.loads(fc2["arguments"])
+    assert args2["message"].startswith("read the three config files")
+    assert "不要再次调用 spawn_agent" in args2["message"]
+    assert all(i["type"] != "function_call_output" for i in out2)
