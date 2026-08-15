@@ -40,18 +40,30 @@ _INSTRUCTION_ROLES = ("system", "developer")
 
 
 def _ma_extract_text(data: Any) -> str:
-    """从上游 /v1/responses 响应中抽取 message 文本（供子代理 rollout 回传）。"""
+    """从上游 /v1/responses 响应中抽取 message 文本（供子代理 rollout 回传）。
+
+    兼容三种 content 形态：``output_text`` item、普通 ``text``/``input_text``
+    item、以及 content 直接是字符串（部分上游非标准）。
+    """
     if not isinstance(data, dict):
         return ""
     output = data.get("output") or []
     parts: list[str] = []
     for item in output:
-        if isinstance(item, dict) and item.get("type") == "message":
-            for c in (item.get("content") or []):
-                if isinstance(c, dict) and c.get("type") == "output_text":
-                    text = c.get("text") or ""
-                    if text:
-                        parts.append(text)
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            if content.strip():
+                parts.append(content)
+            continue
+        for c in content or []:
+            if not isinstance(c, dict):
+                continue
+            ctype = c.get("type")
+            text = c.get("text") if ctype in ("output_text", "text", "input_text") else None
+            if text and str(text).strip():
+                parts.append(str(text))
     return "\n".join(parts)
 
 
@@ -1336,7 +1348,7 @@ class ProxyHandler:
         )
         payload = {
             "model": native_model,
-            "input": [{"role": "user", "content": instruction}],
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": instruction}]}],
             "stream": False,
             "store": False,
         }
@@ -1361,6 +1373,11 @@ class ProxyHandler:
         _lg.info(
             f"multi_agent sub-agent done url={url} status_code={getattr(resp, 'status', '?')} out_len={len(text)}"
         )
+        if not text:
+            _lg.warning(
+                f"multi_agent sub-agent empty output url={url} model={native_model} "
+                f"body={json.dumps(data, ensure_ascii=False)[:500]}"
+            )
         return text
 
     async def _postprocess_multi_agent_json(
