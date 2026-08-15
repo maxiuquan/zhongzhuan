@@ -133,6 +133,19 @@ def hosted_tool_emulated_capabilities(cfg: Any | None = None) -> frozenset[Capab
     hosted = getattr(cfg, "hosted_tools", None)
     if hosted is not None and getattr(hosted, "mcp_enabled", False):
         caps.add(Capability.REMOTE_MCP)
+    # FR-6 / APIAADBPW-REQ-MA-001：``tool_search`` 与 ``multi_agent`` 是一体能力，
+    # 必须两个开关同时为真才视为可服务——避免「只开其一」的半残状态（暴露了
+    # namespace 却无法执行，或能执行却没暴露）。两者皆开时，中继自行合成
+    # ``tool_search_output`` 并就地执行 ``multi_agent_v1`` 调用，路由器不再 400
+    # ``no route can serve capability: tool_search``。
+    ma = getattr(cfg, "multi_agent", None)
+    if (
+        hosted is not None
+        and getattr(hosted, "tool_search_enabled", False)
+        and ma is not None
+        and getattr(ma, "enabled", False)
+    ):
+        caps.add(Capability.TOOL_SEARCH)
     return frozenset(caps)
 
 

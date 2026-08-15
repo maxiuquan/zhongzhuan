@@ -23,6 +23,13 @@ from ..responses_v3.background import BackgroundWorker
 from ..responses_v3.capability import CapabilityRouter, StaticRouteRegistry
 from ..responses_v3.chain import build_upstream_input, chain_error_response
 from ..responses_v3.pipeline import PipelineConfig, ResponsePipeline
+from ..responses_v3.multi_agent import (
+    MultiAgentOrchestrator,
+    MULTI_AGENT_NAMESPACE,
+    MULTI_AGENT_TOOLS,
+    TOOL_SEARCH_NAME,
+    build_tool_search_output,
+)
 from ..responses_v3.request_sanitizer import RequestSanitizer, capability_values
 from ..responses_v3.upstream_chunk_adapter import UpstreamSSEChunkAdapter
 
@@ -30,6 +37,34 @@ from ..responses_v3.upstream_chunk_adapter import UpstreamSSEChunkAdapter
 #: ``developer`` 角色（官方 Codex CLI 的 "You are Codex" 即在此），我们只认
 #: ``system`` 会漏掉，导致该标识原样透传上游而 403（2026-08-06 实测）。
 _INSTRUCTION_ROLES = ("system", "developer")
+
+
+def _ma_extract_text(data: Any) -> str:
+    """从上游 /v1/responses 响应中抽取 message 文本（供子代理 rollout 回传）。"""
+    if not isinstance(data, dict):
+        return ""
+    output = data.get("output") or []
+    parts: list[str] = []
+    for item in output:
+        if isinstance(item, dict) and item.get("type") == "message":
+            for c in (item.get("content") or []):
+                if isinstance(c, dict) and c.get("type") == "output_text":
+                    text = c.get("text") or ""
+                    if text:
+                        parts.append(text)
+    return "\n".join(parts)
+
+
+def _ma_safe_json(text: Any) -> dict:
+    """安全解析 arguments JSON；失败返回空 dict（绝不抛错）。"""
+    text = (text or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 #: V3 流式路径在把首个字节发给客户端之前，最多可切换的上游 key 次数
 #: （即最多尝试 ``_V3_STREAM_MAX_SWITCHES + 1`` 个 key）。用于「空响应自动换 key」。
@@ -605,6 +640,13 @@ class ProxyHandler:
         self._v3_worker: BackgroundWorker | None = None
         #: AC-7.4: lazily built once from ``responses_bridge.timeout.*``.
         self._v3_pipeline_cfg: PipelineConfig | None = None
+        #: V1 多代理（APIAADBPW-REQ-MA-001 / FR-3 / FR-4）：按会话持久化的编排器
+        #: 注册表。spawn 在某一轮、wait 在后续轮，因此编排器状态必须跨请求保留；
+        #: 以 session_key 为键，与 sticky 绑定同一粒度。
+        self._multi_agent_sessions: dict[str, MultiAgentOrchestrator] = {}
+        self._ma_lock = asyncio.Lock()
+        #: 子代理执行器（调用上游 /v1/responses 真正跑 rollout），惰性构建一次。
+        self._ma_runner: Any | None = None
         # R-P1-35: let ``POST /v1/responses/{id}/cancel`` reach the worker that
         # is actually running the job.  A *provider* is handed over instead of
         # the worker itself because the worker above is built lazily on first
@@ -1048,6 +1090,167 @@ class ProxyHandler:
         except Exception:
             _lg.exception(f"[v3] input/chain persist failed for {prep.response_id}")
 
+    # -- V1 多代理编排器（APIAADBPW-REQ-MA-001 / FR-3 / FR-4）-------------------
+
+    def _multi_agent_config(self):
+        """返回当前生效的 multi_agent 配置；未初始化或异常时返回 None。"""
+        try:
+            from ..config import default_config
+
+            return default_config().multi_agent
+        except Exception:
+            return None
+
+    def _multi_agent_tool_search_enabled(self) -> bool:
+        try:
+            from ..config import default_config
+
+            return bool(default_config().hosted_tools.tool_search_enabled)
+        except Exception:
+            return False
+
+    def _multi_agent_runner(self):
+        """构建子代理执行器（惰性单例）：向上游真实发起一次非流式 /v1/responses。
+
+        复用被选中 key 的 ``upstream_base`` + ``upstream_model``（已是上游原生
+        模型名），无需在 runner 内再做 slug→native 翻译；子代理继承父模型的上游
+        模型，符合 spawn_agent 描述里『inherits the parent's model』。
+        """
+        if self._ma_runner is not None:
+            return self._ma_runner
+
+        handler_self = self
+
+        async def _run(instruction: str, model: str, session_id: str) -> str:
+            return await handler_self._run_sub_agent(instruction, model, session_id)
+
+        self._ma_runner = _run
+        return _run
+
+    async def _get_or_create_orchestrator(self, session_key: str, parent_model: str):
+        """按会话取得（或惰性创建）多代理编排器（状态跨请求保留，支撑 spawn→wait）。
+
+        session_key 与 sticky 绑定同一粒度；同一会话复用同一编排器实例，父模型
+        跨轮变化时会逐步更新默认值。``max_threads`` / ``job_max_runtime_seconds``
+        来自统一配置。
+        """
+        async with self._ma_lock:
+            orch = self._multi_agent_sessions.get(session_key)
+            if orch is None:
+                cfg = self._multi_agent_config()
+                orch = MultiAgentOrchestrator(
+                    max_threads=getattr(cfg, "max_threads", 4) if cfg else 4,
+                    job_max_runtime_seconds=getattr(cfg, "job_max_runtime_seconds", 1800) if cfg else 1800,
+                    runner=self._multi_agent_runner(),
+                    default_model=parent_model,
+                )
+                self._multi_agent_sessions[session_key] = orch
+            elif parent_model:
+                # 同一会话复用编排器；父模型可能跨轮变化，逐步更新默认值。
+                orch.set_default_model(parent_model)
+            return orch
+
+    async def _run_sub_agent(self, instruction: str, model: str, session_id: str) -> str:
+        """真正执行一个子代理 rollout：向上游 /v1/responses 发一次非流式请求。
+
+        子代理的『输入』即父代理下发的 instruction（spawn_agent 描述要求单一、
+        自包含的指令）；上游返回后抽取其 message 文本作为子代理产出回传父代理。
+        失败/超时隔离：异常只影响该子代理，不波及父代理会话。
+        """
+        if not instruction:
+            return ""
+        key = self._keys[0] if self._keys else None
+        if key is None:
+            return ""
+        base = getattr(key, "upstream_base", "") or ""
+        native_model = getattr(key, "upstream_model", "") or ""
+        if not base or not native_model:
+            return ""
+        url = base.rstrip("/") + "/v1/responses"
+        payload = {
+            "model": native_model,
+            "input": [{"role": "user", "content": instruction}],
+            "stream": False,
+            "store": False,
+        }
+        headers = {
+            "Authorization": "Bearer {0}".format(getattr(key, "api_key", "") or ""),
+            "Content-Type": "application/json",
+        }
+        timeout = getattr(self._timeouts, "total_seconds", 300) if self._timeouts is not None else 300
+        try:
+            import aiohttp as _aio
+
+            async with _aio.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, headers=headers,
+                    timeout=_aio.ClientTimeout(total=float(timeout)),
+                ) as resp:
+                    data = await resp.json()
+        except Exception as exc:  # noqa: BLE001 - 子代理失败隔离
+            _lg.warning("multi_agent sub-agent upstream call failed: %s", exc)
+            return ""
+        return _ma_extract_text(data)
+
+    async def _postprocess_multi_agent_json(
+        self, resp_obj: dict, orchestrator: Any | None, tool_search_enabled: bool
+    ) -> None:
+        """非流路径的 V1 多代理后处理（FR-2 / FR-3）。
+
+        遍历上游返回的 ``output``：
+        * ``tool_search`` function_call → 合成 ``tool_search_output`` 替换（暴露
+          ``multi_agent_v1`` namespace，绝不顶层 function 返回）。
+        * ``multi_agent_v1`` namespace（或名字落在 ``MULTI_AGENT_TOOLS``）的
+          function_call → 同步执行编排器，替换为回显 function_call + 其
+          ``function_call_output``。
+        仅在输出为 responses 形状（含 ``output`` 数组）时生效；其余形状原样透传。
+        """
+        if not isinstance(resp_obj, dict):
+            return
+        output = resp_obj.get("output")
+        if not isinstance(output, list):
+            return
+        new_output: list[dict] = []
+        idx = len(output)  # 合成项从现有下标之后递增，避免与上游下标碰撞。
+        for item in output:
+            if not isinstance(item, dict):
+                new_output.append(item)
+                continue
+            itype = item.get("type")
+            name = str(item.get("name") or "")
+            ns = str(item.get("namespace") or "")
+            call_id = str(item.get("call_id") or "")
+            if tool_search_enabled and itype == "function_call" and name == TOOL_SEARCH_NAME:
+                parsed = _ma_safe_json(item.get("arguments"))
+                tso = build_tool_search_output(
+                    output_index=idx,
+                    call_id=call_id,
+                    response_id=str(resp_obj.get("id") or ""),
+                    query=parsed.get("query") if isinstance(parsed, dict) else None,
+                    limit=parsed.get("limit") if isinstance(parsed, dict) else None,
+                )
+                new_output.append(tso)
+                idx += 1
+                continue
+            if orchestrator is not None and itype == "function_call" and (
+                ns == MULTI_AGENT_NAMESPACE or name in MULTI_AGENT_TOOLS
+            ):
+                result = await orchestrator.handle(
+                    MULTI_AGENT_NAMESPACE, name, call_id, item.get("arguments") or "{}",
+                    output_index=idx + 1,
+                )
+                fc_item = dict(item)
+                fc_item["status"] = "completed"
+                fc_item["namespace"] = MULTI_AGENT_NAMESPACE
+                fc_item.pop("arguments", None)
+                new_output.append(fc_item)
+                idx += 1
+                new_output.append(result)
+                idx += 1
+                continue
+            new_output.append(item)
+        resp_obj["output"] = new_output
+
     async def _dispatch_v3_create(
         self,
         request: web.Request,
@@ -1064,6 +1267,18 @@ class ProxyHandler:
         prep, error = await self._prepare_v3_create(request, ctx, candidates)
         if error is not None:
             return error
+
+        # V1 多代理（APIAADBPW-REQ-MA-001 / FR-3 / FR-4）：非流路径同样按会话取出
+        # 编排器，供下方对上游返回的 ``output`` 做 namespaced 调用拦截与执行。
+        # 两个开关必须同时为真才算激活（避免半残状态）。
+        session_key = self._session_key(request, prep.body_obj)
+        parent_model = ctx.requested_model or ""
+        ma_cfg = self._multi_agent_config()
+        ts_enabled = self._multi_agent_tool_search_enabled()
+        ma_active = bool(ma_cfg and getattr(ma_cfg, "enabled", False) and ts_enabled)
+        orchestrator = None
+        if ma_active:
+            orchestrator = await self._get_or_create_orchestrator(session_key, parent_model)
         assert prep is not None  # narrow for type checkers: error is None
 
         t0 = time.time()
@@ -1223,6 +1438,14 @@ class ProxyHandler:
             # response object (R-P0-32: never invent success shape).
             return web.Response(status=200, body=payload_bytes, content_type="application/json")
 
+        # V1 多代理（APIAADBPW-REQ-MA-001 / FR-2 / FR-3）：非流路径拦截上游返回的
+        # tool_search / multi_agent_v1 namespace 调用，就地合成 / 执行并回写 output。
+        if ma_active:
+            try:
+                await self._postprocess_multi_agent_json(resp_obj, orchestrator, ma_active)
+            except Exception as exc:  # noqa: BLE001 - 后处理失败绝不能污染上游成功响应
+                _lg.exception("multi_agent non-stream postprocess failed: %s", exc)
+
         resp_obj["id"] = prep.response_id
         # The translated body is a plain Chat->Responses conversion; it
         # carries no chain/background state.  Echo the official fields
@@ -1294,6 +1517,18 @@ class ProxyHandler:
         if error is not None:
             return error
         assert prep is not None
+
+        # V1 多代理（APIAADBPW-REQ-MA-001 / FR-3 / FR-4）：按会话取出编排器并注入
+        # 流式管线；未激活时 orchestrator 为 None（namespaced 调用透传为普通
+        # function_call，兼容旧行为）。两个开关必须同时为真才算激活（避免半残状态）。
+        session_key = self._session_key(request, prep.body_obj)
+        parent_model = ctx.requested_model or ""
+        ma_cfg = self._multi_agent_config()
+        ts_enabled = self._multi_agent_tool_search_enabled()
+        ma_active = bool(ma_cfg and getattr(ma_cfg, "enabled", False) and ts_enabled)
+        orchestrator = None
+        if ma_active:
+            orchestrator = await self._get_or_create_orchestrator(session_key, parent_model)
 
         t0 = time.time()
         max_switches = min(len(candidates), _V3_STREAM_MAX_SWITCHES + 1)
@@ -1505,6 +1740,8 @@ class ProxyHandler:
                 prep.response_id,
                 workspace_id=prep.workspace_id,
                 store=deferred,
+                multi_agent=orchestrator,
+                tool_search_enabled=ma_active,
             )
             cancelled = asyncio.Event()
             _pc = self._v3_pipeline_config()  # AC-7.4

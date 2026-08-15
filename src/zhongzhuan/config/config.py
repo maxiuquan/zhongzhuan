@@ -126,10 +126,34 @@ class HostedToolsConfig:
     请求——默认打开等于给每个租户默认开出网通道。因此默认关闭：请求携带
     ``mcp`` tool 时返回 400 ``unsupported_tool``；管理员显式打开后，同样的
     请求才会真正走到 T27 的 :class:`~zhongzhuan.responses_v3.mcp_client.McpClient`。
+
+    ``tool_search_enabled`` 同理是 opt-in：开启后中继自行合成
+    ``tool_search_output`` 并把 ``multi_agent_v1`` namespace 暴露给客户端
+    （APIAADBPW-REQ-MA-001 / FR-1 / FR-2）。
     """
 
     #: 是否启用 Remote MCP 执行器（默认关闭，见模块头裁决记录）。
     mcp_enabled: bool = False
+    #: 是否启用 hosted ``tool_search`` 执行器（中继合成 multi_agent_v1 namespace）。
+    tool_search_enabled: bool = False
+
+
+@dataclass
+class MultiAgentConfig:
+    """V1 多代理编排配置（APIAADBPW-REQ-MA-001 / FR-3 / FR-4 / NFR）。
+
+    仅当 ``hosted_tools.tool_search_enabled`` 为真时才生效：该开关是整条
+    V1 多代理能力的总闸（安全默认关闭，不开出网 / 不暴露 namespace）。
+    """
+
+    #: 是否启用 multi_agent_v1 namespace 编排（总闸，默认关闭）。
+    enabled: bool = False
+    #: 同一会话内并行子代理上限（NFR-6）。
+    max_threads: int = 4
+    #: 单子代理 rollout 硬上限秒数（NFR-1，默认 1800 对齐客户端 1800s 上限）。
+    job_max_runtime_seconds: int = 1800
+    #: 暴露给 Codex 客户端的 minimal_client_version（FR-6，建议 0.144.0 起实测）。
+    minimal_client_version: str = "0.144.0"
 
 
 @dataclass
@@ -221,6 +245,7 @@ class Config:
     auth: AuthConfig = field(default_factory=AuthConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     responses_bridge: ResponsesBridgeConfig = field(default_factory=ResponsesBridgeConfig)
+    multi_agent: MultiAgentConfig = field(default_factory=MultiAgentConfig)
     # Six-layer upstream timeout policy (T01).  Built by ``load_config`` from
     # the top level ``timeouts:`` YAML section + ZHONGZHUAN_TIMEOUT_* env vars.
     timeouts: TimeoutPolicy = field(default_factory=TimeoutPolicy)
@@ -285,7 +310,10 @@ def _schema_to_config(s: StrictConfig) -> Config:
             model_prefix=s.fallback.model_prefix,
             fallback_penalty=s.fallback.fallback_penalty,
         ),
-        hosted_tools=HostedToolsConfig(mcp_enabled=s.hosted_tools.mcp_enabled),
+        hosted_tools=HostedToolsConfig(
+            mcp_enabled=s.hosted_tools.mcp_enabled,
+            tool_search_enabled=s.hosted_tools.tool_search_enabled,
+        ),
         cors=CorsConfig(allow_origins=list(s.cors.allow_origins)),
         auth=AuthConfig(
             admin_enabled=s.auth.admin_enabled,
@@ -315,6 +343,12 @@ def _schema_to_config(s: StrictConfig) -> Config:
                 total_seconds=float(s.responses_bridge.timeout.total_seconds),
                 connect_seconds=float(s.responses_bridge.timeout.connect_seconds),
             ),
+        ),
+        multi_agent=MultiAgentConfig(
+            enabled=s.multi_agent.enabled,
+            max_threads=int(s.multi_agent.max_threads),
+            job_max_runtime_seconds=int(s.multi_agent.job_max_runtime_seconds),
+            minimal_client_version=str(s.multi_agent.minimal_client_version),
         ),
     )
 

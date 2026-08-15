@@ -11,3 +11,26 @@ limits:
 storage:
   db_path: data.db
   log_dir: logs
+
+# ---------------------------------------------------------------------------
+# Hosted tool 能力面（APIAADBPW-REQ-MA-001 / FR-1 / FR-2 / FR-6）
+# ---------------------------------------------------------------------------
+# tool_search_enabled: 开启后中继自行合成 ``tool_search_output``，把
+# ``multi_agent_v1`` namespace 暴露给客户端（Codex 26.x V1 多代理协议）。
+# 默认关闭（安全默认：不经显式配置，谁也不该给每会话默认开出多代理编排）。
+hosted_tools:
+  tool_search_enabled: false
+
+# ---------------------------------------------------------------------------
+# V1 多代理编排（APIAADBPW-REQ-MA-001 / FR-3 / FR-4 / NFR）
+# ---------------------------------------------------------------------------
+# enabled: 总闸。仅当为真且 hosted_tools.tool_search_enabled 为真时，中继才
+#   拦截 ``multi_agent_v1`` namespace 调用并就地执行子代理生命周期。
+# max_threads: 同一会话内并发子代理上限（NFR-6）。
+# job_max_runtime_seconds: 单子代理任务硬上限（NFR-1，铁律 5 客户端 1800s）。
+# minimal_client_version: 向 Codex 声明的客户端最低版本（FR-5 / NFR）。
+multi_agent:
+  enabled: false
+  max_threads: 4
+  job_max_runtime_seconds: 1800
+  minimal_client_version: "0.144.0"

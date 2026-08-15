@@ -206,6 +206,22 @@ class HostedToolsSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mcp_enabled: bool = False
+    tool_search_enabled: bool = False
+
+
+class MultiAgentSchema(BaseModel):
+    """V1 多代理编排配置（APIAADBPW-REQ-MA-001 / FR-3 / FR-4 / NFR）。
+
+    仅当 ``hosted_tools.tool_search_enabled`` 为真时才真正生效；本段是
+    multi_agent_v1 namespace 编排的细化参数。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    max_threads: Int = Field(4, ge=1, le=64)
+    job_max_runtime_seconds: Int = Field(1800, ge=1, le=1800)
+    minimal_client_version: str = "0.144.0"
 
 
 class CorsSchema(BaseModel):
@@ -336,6 +352,7 @@ class StrictConfig(BaseModel):
     windows_service: WinSvcSchema = Field(default_factory=WinSvcSchema)
     fallback: FallbackSchema = Field(default_factory=FallbackSchema)  # type: ignore[arg-type]
     hosted_tools: HostedToolsSchema = Field(default_factory=HostedToolsSchema)
+    multi_agent: MultiAgentSchema = Field(default_factory=MultiAgentSchema)
     cors: CorsSchema = Field(default_factory=CorsSchema)
     auth: AuthSchema = Field(default_factory=AuthSchema)  # type: ignore[arg-type]
     security: SecuritySchema = Field(default_factory=SecuritySchema)  # type: ignore[arg-type]

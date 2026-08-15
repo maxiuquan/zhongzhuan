@@ -48,6 +48,13 @@ from ..proxy.protocol.responses_models import (
     make_message_item_id,
 )
 from ..proxy.protocol.tool_accumulator import ToolCallAccumulator, ToolCallCollection, split_namespace_name
+from ..responses_v3.multi_agent import (
+    MULTI_AGENT_NAMESPACE,
+    MULTI_AGENT_TOOLS,
+    TOOL_SEARCH_NAME,
+    build_function_call_output,
+    build_tool_search_output,
+)
 from ..store.response_store import ResponseStore
 
 
@@ -63,6 +70,18 @@ def sse_frame(event_type: str, data: dict[str, Any]) -> bytes:
 
 #: Historical private alias kept for existing call sites inside this module.
 _sse = sse_frame
+
+
+def _parse_args(text: str) -> Any:
+    """安全解析特殊调用的 arguments JSON；失败返回空 dict（绝不抛错）。"""
+    text = (text or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +236,8 @@ class ResponsePipeline:
         workspace_id: str = "",
         store: ResponseStore | None = None,
         config: PipelineConfig | None = None,
+        multi_agent: Any | None = None,
+        tool_search_enabled: bool = False,
     ) -> None:
         self.response_id = response_id
         self.workspace_id = workspace_id
@@ -227,6 +248,18 @@ class ResponsePipeline:
         self.state: str = "init"
         self.stats = PipelineStats()
         self._tools = ToolCallCollection(response_id=response_id)
+        #: V1 多代理编排器（APIAADBPW-REQ-MA-001 / FR-3 / FR-4）。为 ``None`` 时
+        #: namespaced 调用透传为普通 function_call（兼容未启用场景）。
+        self._multi_agent = multi_agent
+        #: 是否合成 ``tool_search_output``（FR-1 / FR-2）。关闭时 tool_search 透传。
+        self._tool_search_enabled = bool(tool_search_enabled)
+        #: 特殊调用（tool_search / multi_agent_v1）的累积状态，key 为 call_id。
+        #: 这些调用不进入 ``_tools``（不产生普通 function_call item），由本模块
+        #: 自行合成 tool_search_output / function_call_output。
+        self._special_calls: dict[str, dict[str, Any]] = {}
+        #: 已合成的 tool_search_output / function_call_output item，供
+        #: ``output_items()`` 重建 retrieve() 用的 output 数组（与已发帧一致）。
+        self._synthesized_items: list[dict[str, Any]] = []
         self._open_message: dict[str, Any] | None = None
         #: The assistant message as it was streamed, kept so the terminal row
         #: can be persisted with a real ``output`` array (a retrieve() after a
@@ -282,6 +315,12 @@ class ResponsePipeline:
               "arguments"}``                              tool call
             ``{"type": "finish"}``                        graceful upstream end
         Bytes chunks pass through untouched (native passthrough).
+
+        V1 多代理（APIAADBPW-REQ-MA-001）：当上游回包出现 ``tool_search`` 调用或
+        带 ``multi_agent_v1`` namespace 的子工具调用时，不把它们当普通
+        function_call 透传给客户端，而是（a）合成 ``tool_search_output`` 暴露
+        namespace（FR-2），或（b）``await`` 编排器执行后回传 ``function_call_output``
+        （FR-3）。本方法因此为 ``async``，以便在 namespaced 调用处``await`` 编排器。
         """
         frames: list[bytes] = []
         if isinstance(chunk, bytes):
@@ -289,6 +328,12 @@ class ResponsePipeline:
         if not isinstance(chunk, dict):
             return frames
         kind = str(chunk.get("type") or "")
+
+        # -- V1 多代理：特殊调用的收尾（FR-2 / FR-3）--
+        if kind == "tool_call_done":
+            special = await self._finalize_special_call(chunk)
+            if special is not None:
+                return special
 
         if kind in ("reasoning", "reasoning_summary_text.delta"):
             delta = str(chunk.get("delta", chunk.get("text", "")) or "")
@@ -406,6 +451,19 @@ class ResponsePipeline:
             call_id = str(chunk.get("call_id") or "")
             name = str(chunk.get("name") or "")
             fragment = str(chunk.get("arguments") or "")
+            chunk_ns = str(chunk.get("namespace") or "")
+            # V1 多代理（FR-1 / FR-3）：tool_search / multi_agent_v1 子工具不进入
+            # 普通 function_call 累积器，改为累积进 ``_special_calls``，收尾时合成
+            # tool_search_output / function_call_output。
+            skind = self._special_kind(name, chunk_ns)
+            if skind is not None:
+                kind, norm_name = skind
+                sc = self._special_calls.setdefault(
+                    call_id, {"name": norm_name, "kind": kind, "args": ""}
+                )
+                sc["name"] = sc["name"] or norm_name
+                sc["args"] += fragment
+                return frames
             acc = self._tools.ensure(
                 output_index=self._output_index,
                 call_id=call_id,
@@ -543,6 +601,130 @@ class ResponsePipeline:
             self._saw_provider_finish = True
 
         return frames
+
+    # -- V1 多代理：特殊调用 -------------------------------------------------
+
+    def _special_kind(self, name: str, ns: str) -> tuple[str, str] | None:
+        """判定一个 function_call 是否为 V1 多代理特殊调用。
+
+        Returns:
+            ``(kind, normalized_name)`` —— ``kind`` 为 ``"tool_search"`` 或
+            ``"multi_agent"``，``normalized_name`` 为去除 namespace 前缀后的纯
+            工具名；非特殊调用返回 ``None``。
+
+        判定依据（与上游两种风格兼容）：
+        * ``tool_search``：仅当 ``tool_search_enabled`` 且工具名就是 ``tool_search``。
+        * ``multi_agent_v1``：``namespace`` 命中、或（摊平风格）名字落在
+          ``MULTI_AGENT_TOOLS`` 集合内，且编排器已注入。名字先用
+          :func:`split_namespace_name` 归一化（剥离 ``mcp__ns__-`` / ``ns-``）。
+        """
+        if self._tool_search_enabled and name == TOOL_SEARCH_NAME:
+            return ("tool_search", name)
+        if self._multi_agent is None:
+            return None
+        norm_ns, norm_name = split_namespace_name(name)
+        if norm_ns:
+            ns = norm_ns
+        if norm_name:
+            name = norm_name
+        if ns == MULTI_AGENT_NAMESPACE or name in MULTI_AGENT_TOOLS:
+            return ("multi_agent", name)
+        return None
+
+    async def _finalize_special_call(self, chunk: dict[str, Any]) -> list[bytes] | None:
+        """收尾一个特殊调用，合成并返回其 SSE 帧（FR-2 / FR-3）。
+
+        仅当 ``chunk`` 为 ``tool_call_done`` 且 ``call_id`` 落在 ``_special_calls``
+        中才处理；否则返回 ``None``（让普通分派继续）。``tool_call_done`` 携带最终
+        完整参数，优先覆盖累积片段。
+
+        行为：
+        * ``tool_search`` —— 合成 ``tool_search_output`` 项（暴露 ``multi_agent_v1``
+          namespace），**绝不**发出顶层 ``function_call``。
+        * ``multi_agent_v1`` —— 先回显父代理发起的 ``function_call`` 项，再 ``await``
+          编排器执行并回传 ``function_call_output`` 项。
+        两种情形都记录进 ``_synthesized_items``，供 ``output_items()`` 重建。
+        """
+        if str(chunk.get("type") or "") != "tool_call_done":
+            return None
+        call_id = str(chunk.get("call_id") or "")
+        sc = self._special_calls.get(call_id)
+        if sc is None:
+            return None
+        # tool_call_done 携带最终完整 arguments，优先采用。
+        done_args = str(chunk.get("arguments") or "")
+        if done_args:
+            sc["args"] = done_args
+        kind = sc["kind"]
+        name = sc["name"] or ""
+        frames: list[bytes] = []
+        if kind == "tool_search" and self._tool_search_enabled:
+            parsed = _parse_args(sc["args"])
+            # 单一 output_index 同时用于 item id 与 SSE 帧/存储，避免 id 与位置错位。
+            idx = self._next_output_index()
+            item = build_tool_search_output(
+                output_index=idx,
+                call_id=call_id,
+                response_id=self.response_id,
+                query=parsed.get("query") if isinstance(parsed, dict) else None,
+                limit=parsed.get("limit") if isinstance(parsed, dict) else None,
+            )
+            frames.extend(await self._emit_special_item(idx, item))
+            self._synthesized_items.append((idx, item))
+        elif kind == "multi_agent" and self._multi_agent is not None:
+            # 1) 回显父代理发起的 function_call（带 namespace），让客户端看到调用。
+            fc_item = {
+                "id": make_function_call_item_id(call_id),
+                "type": "function_call",
+                "status": "completed",
+                "call_id": call_id,
+                "name": name,
+                "arguments": sc["args"],
+                "namespace": MULTI_AGENT_NAMESPACE,
+            }
+            fc_idx = self._next_output_index()
+            frames.extend(await self._emit_special_item(fc_idx, fc_item))
+            self._synthesized_items.append((fc_idx, fc_item))
+            # 2) 执行子代理生命周期并回传 function_call_output。
+            out_idx = self._next_output_index()
+            result = await self._multi_agent.handle(
+                MULTI_AGENT_NAMESPACE, name, call_id, sc["args"], output_index=out_idx,
+            )
+            frames.extend(await self._emit_special_item(out_idx, result))
+            self._synthesized_items.append((out_idx, result))
+        else:
+            # 防御：未启用却进入特殊收尾（正常不会发生，_special_kind 已把关）。
+            return None
+        self._special_calls.pop(call_id, None)
+        return frames
+
+    async def _emit_special_item(self, output_index: int, item: dict[str, Any]) -> list[bytes]:
+        """为一个合成 item 发 ``added`` + ``done`` 两帧（FR-2 / FR-3）。"""
+        frames: list[bytes] = [
+            await self._emit(
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": item,
+                },
+            ),
+            await self._emit(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": item,
+                },
+            ),
+        ]
+        return frames
+
+    def _next_output_index(self) -> int:
+        """分配下一个 output_index 并自增计数器（与 _output_index 共享同一条序列）。"""
+        idx = self._output_index
+        self._output_index = idx + 1
+        return idx
 
     async def _close_reasoning(self, *, incomplete: bool = False) -> list[bytes]:
         """Close an open reasoning item (summary_text family), if any."""
@@ -818,6 +1000,10 @@ class ResponsePipeline:
                     },
                 )
             )
+        # V1 多代理合成项（tool_search_output / function_call_output 等），按
+        # output_index 与上面两种项统一排序，保证 retrieve() 看到与流式一致的顺序。
+        for out_index, item in self._synthesized_items:
+            items.append((int(out_index), item))
         items.sort(key=lambda pair: pair[0])
         return [item for _index, item in items]
 

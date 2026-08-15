@@ -513,9 +513,14 @@ class ProxyServer:
         no reasoning advertised (upstreams may not support it), parallel tool
         calls on (needed for the MCP sub-agent bridge), and
         ``use_responses_lite: false`` so Codex stays on the legacy request path.
+
+        V1 多代理（APIAADBPW-REQ-MA-001 / FR-5 / NFR）：当统一配置开启
+        ``multi_agent.enabled`` 时，额外声明 ``multi_agent_version``、
+        ``supports_search_tool``、``minimal_client_version``，让 Codex 桌面端
+        知道本中继支持原生子代理协议，从而走通 spawn/wait 而非退化为单兵模式。
         """
         display = slug[len("oc-"):] if slug.startswith("oc-") else slug
-        return {
+        info = {
             "slug": slug,
             "display_name": display,
             "description": None,
@@ -536,6 +541,22 @@ class ProxyServer:
             "experimental_supported_tools": [],
             "use_responses_lite": False,
         }
+        # FR-5 / NFR：声明 V1 多代理能力（仅在两个开关同时开启时添加，保持默认
+        # 关闭安全；两开关必须同时为真，避免半残状态——客户端被告知支持 search
+        # 但服务端实际不开出 namespace）。
+        try:
+            from ..config import default_config
+
+            cfg = default_config()
+            ma_cfg = cfg.multi_agent
+            ts_enabled = getattr(cfg.hosted_tools, "tool_search_enabled", False)
+            if getattr(ma_cfg, "enabled", False) and ts_enabled:
+                info["multi_agent_version"] = "v1"
+                info["supports_search_tool"] = True
+                info["minimal_client_version"] = str(getattr(ma_cfg, "minimal_client_version", "0.144.0"))
+        except Exception:
+            pass
+        return info
 
 
 def _make_gzip_middleware(min_size: int = 1024):
