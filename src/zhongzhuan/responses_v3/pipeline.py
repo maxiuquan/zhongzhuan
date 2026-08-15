@@ -39,6 +39,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterable, Awaitable, Callable
 
+from loguru import logger
+
 from ..proxy.protocol.responses_errors import to_incomplete_details
 from ..proxy.protocol.responses_models import (
     SSE_HEARTBEAT_FRAME,
@@ -241,6 +243,7 @@ class ResponsePipeline:
         tool_search_enabled: bool = False,
         tool_search_mode: str = "client",
         spawn_execution: str = "client",
+        last_user_text: str = "",
     ) -> None:
         self.response_id = response_id
         self.workspace_id = workspace_id
@@ -259,6 +262,8 @@ class ResponsePipeline:
         #: spawn_agent 执行归属（FR-9 / v2.0）：``"client"`` 透传（方案 A，默认）/
         #: ``"server"`` 中继代执行（方案 B 兜底）。
         self._spawn_execution = spawn_execution or "client"
+        #: 父会话最近一条 user 文本（FR-12 / v3.0 空参补丁的上下文来源）。
+        self._last_user_text = last_user_text or ""
         #: tool_search 结果回传形态（FR-2.1 / 附录 C.10.3）："client"（方案 A，仅
         #: tool_search_call）| "server"（方案 B，外加 function_call_output 兜底）。
         self._tool_search_mode = tool_search_mode if tool_search_mode in ("client", "server") else "client"
@@ -707,18 +712,60 @@ class ResponsePipeline:
                 self._synthesized_items.append((fco_idx, fco_item))
         elif kind == "multi_agent" and self._multi_agent is not None:
             # 1) 回显父代理发起的 function_call（带 namespace），让客户端看到调用。
+            # FR-12（v3.0）空参补丁：mimo 团长稳定发 spawn_agent({})，本地 handler
+            # 拒执行。**emit 之前**先做补丁（emit 会序列化 item，事后改 dict 无效）。
+            patched_args: Any = sc["args"]
+            reject_fco: dict[str, Any] | None = None
+            if (
+                self._spawn_execution != "server"
+                and name == "spawn_agent"
+                and self._multi_agent is not None
+            ):
+                from .args_patch import patch_spawn_agent_arguments
+
+                leader_text = "".join(self._message_text or [])
+                patched = patch_spawn_agent_arguments(
+                    sc["args"], self._last_user_text, leader_text,
+                )
+                if patched is not None:
+                    # 仅当真的补了参（与原始解析结果不同）才改写并记日志
+                    orig = _parse_args(sc["args"])
+                    if patched != orig:
+                        logger.info(
+                            "[args-patch] empty-args patched call_id={} model={}",
+                            call_id, patched.get("model") or "inherit",
+                        )
+                        patched_args = json.dumps(patched, ensure_ascii=False)
+                else:
+                    # FR-12c：上下文不足以合成 → 拒绝重试（错误 fco 告知模型）。
+                    logger.info("[args-patch] empty-args rejected call_id={} (no context)", call_id)
+                    reject_fco = {
+                        "id": make_function_call_item_id(call_id) + "-err",
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(
+                            {
+                                "error": "spawn_agent requires a non-empty message; "
+                                         "retry with an explicit instruction",
+                            }
+                        ),
+                    }
             fc_item = {
                 "id": make_function_call_item_id(call_id),
                 "type": "function_call",
                 "status": "completed",
                 "call_id": call_id,
                 "name": name,
-                "arguments": sc["args"],
+                "arguments": patched_args,
                 "namespace": MULTI_AGENT_NAMESPACE,
             }
             fc_idx = self._next_output_index()
             frames.extend(await self._emit_special_item(fc_idx, fc_item))
             self._synthesized_items.append((fc_idx, fc_item))
+            if reject_fco is not None:
+                out_idx = self._next_output_index()
+                frames.extend(await self._emit_special_item(out_idx, reject_fco))
+                self._synthesized_items.append((out_idx, reject_fco))
             if self._spawn_execution == "server":
                 # 2) 方案 B（server 代执行兜底，FR-9 兜底路径）：中继执行子代理
                 #    生命周期并回传 function_call_output（FR-10 保证含子代理产物）。
@@ -728,13 +775,6 @@ class ResponsePipeline:
                 )
                 frames.extend(await self._emit_special_item(out_idx, result))
                 self._synthesized_items.append((out_idx, result))
-            else:
-                # 方案 A（client 透传，FR-9 推荐）：**不执行、不内联 fco**——把
-                # function_call 原样透传给 Codex 客户端，由本地 SpawnAgentHandler
-                # 执行；子代理推理走普通 /v1/responses 路由；客户端回贴 fco 后
-                # 下一轮透传上游续写（标准两轮契约）。内联 fco 会让客户端报
-                # ``unexpected tool output from stream``（23:08 真冒烟铁证）。
-                pass
         else:
             # 防御：未启用却进入特殊收尾（正常不会发生，_special_kind 已把关）。
             return None

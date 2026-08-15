@@ -92,6 +92,16 @@ def _ma_safe_json(text: Any) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _ma_last_user_text(body_obj: dict) -> str:
+    """提取父会话最近一条 user 文本（FR-12 空参补丁的上下文来源）。"""
+    try:
+        from .responses_v3.args_patch import extract_last_user_text
+
+        return extract_last_user_text(body_obj.get("input") if isinstance(body_obj, dict) else None)
+    except Exception:
+        return ""
+
+
 #: 免费档额度耗尽的典型措辞（aihubmix 等上游），子代理 rollout 命中时视为失败、
 #: 继续 failover（2026-08-15 实测：aihubmix xiaomi-mimo-v2.5-pro-free 返回
 #: "only try 10 times ... console.aihubmix.com/topup"）。
@@ -1572,7 +1582,8 @@ class ProxyHandler:
         return text
 
     async def _postprocess_multi_agent_json(
-        self, resp_obj: dict, orchestrator: Any | None, tool_search_enabled: bool
+        self, resp_obj: dict, orchestrator: Any | None, tool_search_enabled: bool,
+        last_user_text: str = "",
     ) -> None:
         """非流路径的 V1 多代理后处理（FR-2 / FR-3）。
 
@@ -1634,8 +1645,6 @@ class ProxyHandler:
                 fc_item["status"] = "completed"
                 fc_item["namespace"] = MULTI_AGENT_NAMESPACE
                 fc_item.pop("arguments", None)
-                new_output.append(fc_item)
-                idx += 1
                 if self._spawn_execution_mode() == "server":
                     # 方案 B（server 代执行兜底，FR-9）：执行并内联 fco。
                     # 注意：内联 fco 会让 Codex 客户端报 "unexpected tool output
@@ -1647,9 +1656,51 @@ class ProxyHandler:
                     )
                     new_output.append(result)
                     idx += 1
-                # 方案 A（client 透传，默认）：不执行、不内联 fco——原样透传
-                # function_call，客户端本地 SpawnAgentHandler 执行后回贴 fco，
-                # 下一轮透传上游续写（标准两轮契约）。
+                elif name == "spawn_agent":
+                    # 方案 A（client 透传，默认）+ FR-12（v3.0）空参补丁：
+                    # mimo 团长稳定发 spawn_agent({})，本地 handler 拒执行。
+                    # 透传前拦截：空参则从父会话上下文合成自包含 message +
+                    # 角色路由注入 model（防递归后缀）；非空原样透传。
+                    from .responses_v3.args_patch import patch_spawn_agent_arguments
+
+                    leader_text = ""
+                    for prev in new_output:
+                        if isinstance(prev, dict) and prev.get("type") == "message":
+                            parts = []
+                            for c in (prev.get("content") or []):
+                                if isinstance(c, dict) and c.get("type") in ("output_text", "text") and c.get("text"):
+                                    parts.append(str(c["text"]))
+                            if parts:
+                                leader_text += " ".join(parts)
+                    patched = patch_spawn_agent_arguments(
+                        item.get("arguments") or "{}", last_user_text, leader_text,
+                    )
+                    if patched is not None:
+                        if patched != _ma_safe_json(item.get("arguments")):
+                            _lg.info(
+                                f"[args-patch] empty-args patched call_id={call_id} "
+                                f"model={patched.get('model') or 'inherit'}"
+                            )
+                            fc_item["arguments"] = json.dumps(patched, ensure_ascii=False)
+                    else:
+                        # FR-12c：上下文不足 → 拒绝重试（错误 fco 告知模型）。
+                        _lg.info(f"[args-patch] empty-args rejected call_id={call_id} (no context)")
+                        new_output.append(
+                            {
+                                "id": "fc_{0}_err".format(call_id),
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": json.dumps(
+                                    {
+                                        "error": "spawn_agent requires a non-empty message; "
+                                                 "retry with an explicit instruction",
+                                    }
+                                ),
+                            }
+                        )
+                        idx += 1
+                new_output.append(fc_item)
+                idx += 1
                 continue
             new_output.append(item)
         resp_obj["output"] = new_output
@@ -1843,7 +1894,10 @@ class ProxyHandler:
         # tool_search / multi_agent_v1 namespace 调用，就地合成 / 执行并回写 output。
         if ma_active:
             try:
-                await self._postprocess_multi_agent_json(resp_obj, orchestrator, ma_active)
+                await self._postprocess_multi_agent_json(
+                    resp_obj, orchestrator, ma_active,
+                    last_user_text=_ma_last_user_text(prep.body_obj or {}),
+                )
             except Exception as exc:  # noqa: BLE001 - 后处理失败绝不能污染上游成功响应
                 _lg.exception("multi_agent non-stream postprocess failed: %s", exc)
 
@@ -2145,6 +2199,7 @@ class ProxyHandler:
                 tool_search_enabled=ma_active,
                 tool_search_mode=self._multi_agent_tool_search_mode(),
                 spawn_execution=self._spawn_execution_mode(),
+                last_user_text=_ma_last_user_text(prep.body_obj or {}),
             )
             cancelled = asyncio.Event()
             _pc = self._v3_pipeline_config()  # AC-7.4
@@ -2521,7 +2576,10 @@ class ProxyHandler:
                     orch = await self._get_or_create_orchestrator(
                         session_key, ctx.requested_model or ""
                     )
-                    await self._postprocess_multi_agent_json(resp_obj, orch, True)
+                    await self._postprocess_multi_agent_json(
+                        resp_obj, orch, True,
+                        last_user_text=_ma_last_user_text(prep.body_obj or {}),
+                    )
                 except Exception:
                     _lg.exception("[v3-stream] multi_agent postprocess on fallback failed")
             try:

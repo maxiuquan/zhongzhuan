@@ -653,3 +653,90 @@ def test_ma_normalize_upstream_body_including_additional_tools():
     # 但认顶层 tools 里的普通 function——T3 实证）。
     top_names = [t["name"] for t in body["tools"] if isinstance(t, dict)]
     assert "close_agent" in top_names
+
+
+# ---------------------------------------------------------------------------
+# FR-12（v3.0 增量修订）：spawn_agent 空参数补丁（client 透传模式）
+# ---------------------------------------------------------------------------
+
+
+async def test_pipeline_client_empty_args_patched():
+    """client 透传 + 空参 spawn_agent → 合成 message 注入 arguments 后透传，无内联 fco。"""
+    orch = MultiAgentOrchestrator(runner=_fake_runner)
+    pipe = ResponsePipeline("resp_patch", multi_agent=orch, tool_search_enabled=False,
+                            spawn_execution="client",
+                            last_user_text="read the three config files and summarize")
+    frames = await _collect(pipe, [
+        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
+         "namespace": MULTI_AGENT_NAMESPACE, "arguments": "{}"},
+        {"type": "tool_call_done", "call_id": "c1", "arguments": "{}"},
+    ])
+    items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
+    fc = next((it for it in items if it["type"] == "function_call"
+               and it.get("namespace") == MULTI_AGENT_NAMESPACE), None)
+    assert fc is not None
+    # 补参后的 message 非空 + 防递归后缀存在
+    args = json.loads(fc["arguments"])
+    assert args.get("message", "").startswith("read the three config files")
+    assert "不要再次调用 spawn_agent" in args["message"]
+    # 无角色标记 → 不注入 model
+    assert "model" not in args
+    # 无内联 fco（FR-9 契约保持）
+    assert all(it["type"] != "function_call_output" for it in items)
+
+
+async def test_pipeline_client_empty_args_with_role_injects_model():
+    """空参 + leader 文本带角色标记 → 注入角色模型 + 剥前缀 + 防递归。"""
+    orch = MultiAgentOrchestrator(runner=_fake_runner)
+    pipe = ResponsePipeline("resp_patch_role", multi_agent=orch, tool_search_enabled=False,
+                            spawn_execution="client",
+                            last_user_text="read the files")
+    # 模拟团长先输出带 [explorer] 的文本，再 spawn
+    frames = []
+    frames += await _collect(pipe, [{"type": "text", "delta": "I will delegate to [explorer] to read"}])
+    frames += await _collect(pipe, [
+        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
+         "namespace": MULTI_AGENT_NAMESPACE, "arguments": "{}"},
+        {"type": "tool_call_done", "call_id": "c1", "arguments": "{}"},
+    ])
+    items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
+    fc = next((it for it in items if it["type"] == "function_call"
+               and it.get("namespace") == MULTI_AGENT_NAMESPACE), None)
+    assert fc is not None
+    args = json.loads(fc["arguments"])
+    assert args.get("model") == "juhe/deepseek-v4-flash"  # [explorer] → explorer 模型
+    assert "不要再次调用 spawn_agent" in args.get("message", "")
+
+
+async def test_pipeline_client_nonempty_args_untouched():
+    """非空参 spawn_agent（FR-12d）：原样透传，不改写。"""
+    orch = MultiAgentOrchestrator(runner=_fake_runner)
+    pipe = ResponsePipeline("resp_no_patch", multi_agent=orch, tool_search_enabled=False,
+                            spawn_execution="client", last_user_text="whatever")
+    args = json.dumps({"message": "read file x carefully", "model": "juhe/glm-5.2"})
+    frames = await _collect(pipe, [
+        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
+         "namespace": MULTI_AGENT_NAMESPACE, "arguments": args},
+        {"type": "tool_call_done", "call_id": "c1", "arguments": args},
+    ])
+    items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
+    fc = next((it for it in items if it["type"] == "function_call"
+               and it.get("namespace") == MULTI_AGENT_NAMESPACE), None)
+    assert fc is not None
+    assert json.loads(fc["arguments"]) == json.loads(args)  # 完全一致
+
+
+async def test_pipeline_client_empty_args_no_context_rejected():
+    """空参 + 无上下文（FR-12c）：返回错误 fco 拒绝重试。"""
+    orch = MultiAgentOrchestrator(runner=_fake_runner)
+    pipe = ResponsePipeline("resp_reject", multi_agent=orch, tool_search_enabled=False,
+                            spawn_execution="client", last_user_text="")
+    frames = await _collect(pipe, [
+        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
+         "namespace": MULTI_AGENT_NAMESPACE, "arguments": "{}"},
+        {"type": "tool_call_done", "call_id": "c1", "arguments": "{}"},
+    ])
+    items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
+    fco = next((it for it in items if it["type"] == "function_call_output"), None)
+    assert fco is not None
+    assert "non-empty message" in fco["output"]
