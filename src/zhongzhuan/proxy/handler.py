@@ -95,7 +95,7 @@ def _ma_safe_json(text: Any) -> dict:
 def _ma_last_user_text(body_obj: dict) -> str:
     """提取父会话最近一条 user 文本（FR-12 空参补丁的上下文来源）。"""
     try:
-        from .responses_v3.args_patch import extract_last_user_text
+        from ..responses_v3.args_patch import extract_last_user_text
 
         return extract_last_user_text(body_obj.get("input") if isinstance(body_obj, dict) else None)
     except Exception:
@@ -1661,7 +1661,7 @@ class ProxyHandler:
                     # mimo 团长稳定发 spawn_agent({})，本地 handler 拒执行。
                     # 透传前拦截：空参则从父会话上下文合成自包含 message +
                     # 角色路由注入 model（防递归后缀）；非空原样透传。
-                    from .responses_v3.args_patch import patch_spawn_agent_arguments
+                    from ..responses_v3.args_patch import patch_spawn_agent_arguments
 
                     leader_text = ""
                     for prev in new_output:
