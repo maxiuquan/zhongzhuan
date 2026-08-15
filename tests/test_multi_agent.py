@@ -228,6 +228,27 @@ async def test_pipeline_multi_agent_namespaced_flat_name():
     assert fco is not None
 
 
+async def test_pipeline_multi_agent_upstream_flattened_name():
+    # 上游自行摊平的形态 multi_agent_v1-spawn_agent 也要被识别并执行
+    # （2026-08-15 流式探针 P2 实证：部分上游把 namespace 摊平成 {ns}-{subtool} 命名）。
+    orch = MultiAgentOrchestrator(runner=_fake_runner)
+    pipe = ResponsePipeline("resp_upflat", multi_agent=orch, tool_search_enabled=False)
+    args = json.dumps({"instruction": "sub", "session_id": "s1"})
+    frames = await _collect(pipe, [
+        {"type": "tool_call", "call_id": "c1", "name": "multi_agent_v1-spawn_agent",
+         "arguments": args},
+        {"type": "tool_call_done", "call_id": "c1", "arguments": args},
+    ])
+    items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
+    fc = next((it for it in items if it["type"] == "function_call"), None)
+    assert fc is not None
+    # 回显名必须是纯子工具名 + namespace（客户端期望的 V1 形态）。
+    assert fc["name"] == "spawn_agent"
+    assert fc.get("namespace") == MULTI_AGENT_NAMESPACE
+    fco = next((it for it in items if it["type"] == "function_call_output"), None)
+    assert fco is not None
+
+
 def test_pipeline_output_items_include_synthesized():
     # 验证 output_items() 合并 _synthesized_items（retrieve 一致性）。
     import asyncio

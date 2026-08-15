@@ -612,11 +612,14 @@ class ResponsePipeline:
             ``"multi_agent"``，``normalized_name`` 为去除 namespace 前缀后的纯
             工具名；非特殊调用返回 ``None``。
 
-        判定依据（与上游两种风格兼容）：
+        判定依据（与上游三种风格兼容）：
         * ``tool_search``：仅当 ``tool_search_enabled`` 且工具名就是 ``tool_search``。
         * ``multi_agent_v1``：``namespace`` 命中、或（摊平风格）名字落在
           ``MULTI_AGENT_TOOLS`` 集合内，且编排器已注入。名字先用
           :func:`split_namespace_name` 归一化（剥离 ``mcp__ns__-`` / ``ns-``）。
+        * 上游自行摊平 namespace 的形态 ``multi_agent_v1-spawn_agent``
+          （2026-08-15 流式探针实测：部分上游把 namespace 容器摊平成
+          ``{ns}-{subtool}`` 命名再返回）。
         """
         if self._tool_search_enabled and name == TOOL_SEARCH_NAME:
             return ("tool_search", name)
@@ -629,6 +632,11 @@ class ResponsePipeline:
             name = norm_name
         if ns == MULTI_AGENT_NAMESPACE or name in MULTI_AGENT_TOOLS:
             return ("multi_agent", name)
+        # 兼容上游自摊平形态：multi_agent_v1-spawn_agent -> ("multi_agent", "spawn_agent")。
+        if "-" in name:
+            prefix, _, sub = name.rpartition("-")
+            if prefix == MULTI_AGENT_NAMESPACE and sub in MULTI_AGENT_TOOLS:
+                return ("multi_agent", sub)
         return None
 
     async def _finalize_special_call(self, chunk: dict[str, Any]) -> list[bytes] | None:

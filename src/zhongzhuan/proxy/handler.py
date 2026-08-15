@@ -2170,7 +2170,9 @@ class ProxyHandler:
             # Non-stream call: _prepare_v3_upstream_call(stream=False) rebuilds
             # the body with stream removed (translated and native branches both
             # handle it).  Strip it here too so NATIVE passthrough never sees it.
-            body_obj = dict(prep.body_obj or {})
+            # 用 prep.upstream_body（V1 多代理摊平后的体）而非 prep.body_obj：
+            # 否则 namespace 容器原样下发，上游模型看不到 spawn_agent（T3 实证）。
+            body_obj = dict(prep.upstream_body or {})
             body_obj.pop("stream", None)
             decision = SimpleNamespace(
                 key=k,
@@ -2230,6 +2232,18 @@ class ProxyHandler:
                 f"[v3-stream] non-stream fallback OK (key_id={k.key_id}); "
                 f"replaying {prep.response_id} as buffered SSE"
             )
+            # V1 多代理（APIAADBPW-REQ-MA-001 / FR-2 / FR-3）：降级路径同样要拦截
+            # tool_search / multi_agent_v1 调用并就地合成/执行，否则回放给客户端的
+            # 是未拦截的普通 function_call（2026-08-15 流式探针 P2 实证：spawn 以
+            # 原始形态透传、无 function_call_output）。
+            if self._multi_agent_active():
+                try:
+                    orch = await self._get_or_create_orchestrator(
+                        session_key, ctx.requested_model or ""
+                    )
+                    await self._postprocess_multi_agent_json(resp_obj, orch, True)
+                except Exception:
+                    _lg.exception("[v3-stream] multi_agent postprocess on fallback failed")
             try:
                 await self._persist_v3_stream_terminal(
                     prep, "completed", "", output=resp_obj.get("output") or []
