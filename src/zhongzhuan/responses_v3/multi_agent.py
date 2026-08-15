@@ -32,6 +32,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from loguru import logger as _loguru
+
+#: stdlib logger 仅作类型/兜底；默认走 loguru（zhongzhuan 的落盘通道，NFR-4
+#: 可观测性——2026-08-15 排查确认 stdlib logging 未被 setup_logging 接管，
+#: thread_spawn 等记录在生产日志里完全看不到）。
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -233,7 +238,7 @@ class MultiAgentOrchestrator:
         self._job_timeout = int(job_max_runtime_seconds)
         self._runner = runner
         self._default_model = default_model
-        self._log = logger or logging.getLogger(__name__)
+        self._log = logger or _loguru
         self._namespace = namespace
         self._agents: dict[str, AgentState] = {}
         self._lock = asyncio.Lock()

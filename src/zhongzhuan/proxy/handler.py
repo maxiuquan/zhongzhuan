@@ -1286,14 +1286,27 @@ class ProxyHandler:
         """
         if not instruction:
             return ""
-        key = self._keys[0] if self._keys else None
+        # 挑一个真正带上游 base/model 的 key，不盲取 _keys[0]：可能存在
+        # upstream_model 为空的 key，直接早退会让子代理产出恒为空（2026-08-15
+        # spawn→wait 回环实测 result=""，且无任何失败日志——即命中了空字段早退）。
+        key = next(
+            (
+                k
+                for k in (self._keys or [])
+                if getattr(k, "upstream_base", "") and getattr(k, "upstream_model", "")
+            ),
+            None,
+        )
         if key is None:
+            _lg.warning("multi_agent sub-agent: no key with upstream_base/upstream_model available")
             return ""
-        base = getattr(key, "upstream_base", "") or ""
-        native_model = getattr(key, "upstream_model", "") or ""
-        if not base or not native_model:
-            return ""
-        url = base.rstrip("/") + "/v1/responses"
+        base = str(getattr(key, "upstream_base", "") or "").rstrip("/")
+        native_model = str(getattr(key, "upstream_model", "") or "")
+        url = base + "/v1/responses"
+        _lg.info(
+            "multi_agent sub-agent rollout url=%s model=%s session=%s instruction_len=%d",
+            url, native_model, session_id, len(instruction),
+        )
         payload = {
             "model": native_model,
             "input": [{"role": "user", "content": instruction}],
@@ -1317,7 +1330,12 @@ class ProxyHandler:
         except Exception as exc:  # noqa: BLE001 - 子代理失败隔离
             _lg.warning("multi_agent sub-agent upstream call failed: %s", exc)
             return ""
-        return _ma_extract_text(data)
+        text = _ma_extract_text(data)
+        _lg.info(
+            "multi_agent sub-agent done url=%s status_code=%s out_len=%d",
+            url, getattr(resp, "status", "?"), len(text),
+        )
+        return text
 
     async def _postprocess_multi_agent_json(
         self, resp_obj: dict, orchestrator: Any | None, tool_search_enabled: bool
