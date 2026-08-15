@@ -1304,8 +1304,7 @@ class ProxyHandler:
         native_model = str(getattr(key, "upstream_model", "") or "")
         url = base + "/v1/responses"
         _lg.info(
-            "multi_agent sub-agent rollout url=%s model=%s session=%s instruction_len=%d",
-            url, native_model, session_id, len(instruction),
+            f"multi_agent sub-agent rollout url={url} model={native_model} session={session_id} instruction_len={len(instruction)}"
         )
         payload = {
             "model": native_model,
@@ -1328,12 +1327,11 @@ class ProxyHandler:
                 ) as resp:
                     data = await resp.json()
         except Exception as exc:  # noqa: BLE001 - 子代理失败隔离
-            _lg.warning("multi_agent sub-agent upstream call failed: %s", exc)
+            _lg.warning(f"multi_agent sub-agent upstream call failed: {exc}")
             return ""
         text = _ma_extract_text(data)
         _lg.info(
-            "multi_agent sub-agent done url=%s status_code=%s out_len=%d",
-            url, getattr(resp, "status", "?"), len(text),
+            f"multi_agent sub-agent done url={url} status_code={getattr(resp, 'status', '?')} out_len={len(text)}"
         )
         return text
 

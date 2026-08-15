@@ -289,7 +289,7 @@ class MultiAgentOrchestrator:
         try:
             return await handler(call_id, args, output_index)
         except Exception as exc:  # noqa: BLE001 - 编排错误必须隔离，不能炸父代理
-            self._log.exception("multi_agent %s failed: %s", name, exc)
+            self._log.exception(f"multi_agent {name} failed: {exc}")
             return self._error_output(call_id, f"{name} failed: {exc}", output_index=output_index)
 
     # -- 5 个子工具 -----------------------------------------------------------
@@ -318,8 +318,7 @@ class MultiAgentOrchestrator:
             state.status = "running"
             state.task = asyncio.create_task(self._run_agent(state))
             self._log.info(
-                "thread_spawn agent_id=%s model=%s session=%s instruction_len=%d",
-                agent_id, model, session_id, len(instruction),
+                f"thread_spawn agent_id={agent_id} model={model} session={session_id} instruction_len={len(instruction)}"
             )
         else:
             # 无 runner（纯占位）：直接标记完成，避免 wait 永久挂起。
@@ -340,7 +339,7 @@ class MultiAgentOrchestrator:
             return self._error_output(call_id, f"unknown agent_id: {agent_id}")
         # best-effort：把追加输入记录到状态；真正消费由下一轮 rollout 决定。
         state.instruction = (state.instruction + "\n" + text).strip()
-        self._log.info("send_input agent_id=%s len=%d", agent_id, len(text))
+        self._log.info(f"send_input agent_id={agent_id} len={len(text)}")
         return build_function_call_output(
             output_index=output_index, call_id=call_id, response_id="",
             output=json.dumps({"agent_id": agent_id, "received": True}),
@@ -352,7 +351,7 @@ class MultiAgentOrchestrator:
         if state is None:
             return self._error_output(call_id, f"unknown agent_id: {agent_id}")
         # best-effort：标记为恢复；若此前任务已结束则直接返回已有结果。
-        self._log.info("resume_agent agent_id=%s", agent_id)
+        self._log.info(f"resume_agent agent_id={agent_id}")
         return build_function_call_output(
             output_index=output_index, call_id=call_id, response_id="",
             output=json.dumps({"agent_id": agent_id, "status": state.status}),
@@ -370,7 +369,7 @@ class MultiAgentOrchestrator:
                 pass
         out = state.result if state.status == "completed" else (state.error or "")
         self._log.info(
-            "wait_agent agent_id=%s status=%s out_len=%d", agent_id, state.status, len(out),
+            f"wait_agent agent_id={agent_id} status={state.status} out_len={len(out)}"
         )
         return build_function_call_output(
             output_index=output_index, call_id=call_id, response_id="",
@@ -386,7 +385,7 @@ class MultiAgentOrchestrator:
             state.task.cancel()
         state.status = "closed"
         self._agents.pop(agent_id, None)
-        self._log.info("close_agent agent_id=%s", agent_id)
+        self._log.info(f"close_agent agent_id={agent_id}")
         return build_function_call_output(
             output_index=output_index, call_id=call_id, response_id="",
             output=json.dumps({"agent_id": agent_id, "closed": True}),
@@ -407,14 +406,14 @@ class MultiAgentOrchestrator:
         except asyncio.TimeoutError:
             state.error = f"sub-agent {state.agent_id} exceeded job_max_runtime_seconds={self._job_timeout}"
             state.status = "failed"
-            self._log.warning("multi_agent timeout agent_id=%s", state.agent_id)
+            self._log.warning(f"multi_agent timeout agent_id={state.agent_id}")
         except asyncio.CancelledError:
             state.status = "closed"
             raise
         except Exception as exc:  # noqa: BLE001 - 子代理失败隔离，不波及父代理
             state.error = f"sub-agent {state.agent_id} failed: {exc}"
             state.status = "failed"
-            self._log.exception("multi_agent rollout failed agent_id=%s", state.agent_id)
+            self._log.exception(f"multi_agent rollout failed agent_id={state.agent_id}")
 
     # -- 工具 ----------------------------------------------------------------
 
