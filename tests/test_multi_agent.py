@@ -467,3 +467,7 @@ def test_ma_normalize_upstream_body_including_additional_tools():
     assert body["tools"][0]["name"] == "tool_search"
     assert body["input"][0]["tools"][0]["type"] == "function"
     assert body["input"][0]["tools"][0]["name"] == "close_agent"
+    # additional_tools 的子工具必须合并进顶层 tools（juhe 不认 additional_tools，
+    # 但认顶层 tools 里的普通 function——T3 实证）。
+    top_names = [t["name"] for t in body["tools"] if isinstance(t, dict)]
+    assert "close_agent" in top_names

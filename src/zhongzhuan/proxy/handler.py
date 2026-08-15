@@ -132,20 +132,36 @@ def _ma_flatten_tools(tools: Any) -> list | None:
 
 def _ma_normalize_upstream_body(body: dict[str, Any]) -> None:
     """原地归一化上游请求体：``tools`` 与 ``input`` 里 ``additional_tools`` 的
-    ``tools`` 都做 V1 多代理摊平（FR-1 / C.4 #3）。"""
-    tools = _ma_flatten_tools(body.get("tools"))
-    if tools is not None:
-        body["tools"] = tools
+    ``tools`` 都做 V1 多代理摊平（FR-1 / C.4 #3）。
+
+    ``additional_tools`` 里的子工具摊平后**合并进顶层 ``tools``**：juhe 等上游
+    不认 ``additional_tools``（T3 实证：原样/摊平放里面模型都自称无 spawn_agent），
+    但会认顶层 ``tools`` 里的普通 function。合并按工具名去重，避免与客户端
+    已有的顶层工具重名冲突。
+    """
+    top = _ma_flatten_tools(body.get("tools"))
+    if top is not None:
+        body["tools"] = top
     inp = body.get("input")
-    if isinstance(inp, list):
-        for item in inp:
-            if (
-                isinstance(item, dict)
-                and str(item.get("type") or "") == "additional_tools"
-            ):
-                item_tools = _ma_flatten_tools(item.get("tools"))
-                if item_tools is not None:
-                    item["tools"] = item_tools
+    if not isinstance(inp, list):
+        return
+    for item in inp:
+        if not isinstance(item, dict) or str(item.get("type") or "") != "additional_tools":
+            continue
+        flat = _ma_flatten_tools(item.get("tools"))
+        if flat is None:
+            continue
+        item["tools"] = flat
+        existing = body.get("tools")
+        if not isinstance(existing, list):
+            existing = []
+            body["tools"] = existing
+        seen = {str(t.get("name")) for t in existing if isinstance(t, dict)}
+        for t in flat:
+            name = str(t.get("name") or "")
+            if name and name not in seen:
+                existing.append(t)
+                seen.add(name)
 
 #: V3 流式路径在把首个字节发给客户端之前，最多可切换的上游 key 次数
 #: （即最多尝试 ``_V3_STREAM_MAX_SWITCHES + 1`` 个 key）。用于「空响应自动换 key」。
