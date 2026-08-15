@@ -82,12 +82,31 @@ def extract_last_user_text(input_items: Any) -> str:
 
 
 def _extract_nonempty_message(args: dict[str, Any]) -> str:
-    """取 ``message`` / ``instruction`` 中 trim 后非空者（二者等价，FR-12a）。"""
-    for key in ("message", "instruction", "task", "content"):
-        val = args.get(key)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
+    """取 V1 权威字段 ``message`` 中 trim 后非空者（v3.1：V1 handler 只读
+    ``args.message``，``task_name`` 是 V2 才有的字段；``instruction``/``task``/
+    ``content`` 等**不视为有效**——否则 mimo 发 ``{"task":...}`` 会被当有效
+    原样透传，而桌面端 V1 handler 读不到 message → 仍零执行）。
+    """
+    val = args.get("message")
+    if isinstance(val, str) and val.strip():
+        return val.strip()
     return ""
+
+
+def _migrate_nonstandard_fields(args: dict[str, Any]) -> dict[str, Any] | None:
+    """把非标准字段（``task``/``instruction``/``name``/``description`` 等）的
+    非空内容**迁移到 ``message``**（9.6.3 决定性整改项）：V1 handler 只读
+    ``args.message``，内容落在别处等于没给。返回补 `message` 后的 dict；
+    无任何非空内容时返回 ``None``（调用方继续走空参合成）。
+    """
+    out = dict(args)
+    for key in ("instruction", "task", "name", "description", "content", "prompt"):
+        val = out.get(key)
+        if isinstance(val, str) and val.strip():
+            if "message" not in out or not str(out.get("message") or "").strip():
+                out["message"] = val.strip()
+                return out
+    return None
 
 
 def patch_spawn_agent_arguments(
@@ -98,9 +117,11 @@ def patch_spawn_agent_arguments(
     """FR-12 核心：空参补丁（纯函数）。
 
     解析 ``raw_args``（dict 或 JSON 字符串）：
-    - 已含非空 ``message``/``instruction`` → 原样返回（FR-12d：正常调用不改写）。
-    - 空参：从上下文合成非空自包含 ``message``（最近用户消息 + 角色标记剥离 +
-      防递归后缀），并重放 FR-8 角色路由注入 ``model``。
+    - 已含非空 ``message`` → 原样返回（FR-12d：正常调用不改写）。
+    - 内容落在非标准字段（``task``/``instruction``/``name`` 等）→ **迁移到
+      ``message``**（v3.1 决定性整改：V1 handler 只读 message）。
+    - 全空：从上下文合成非空自包含 ``message``（最近用户消息 + 角色标记剥离 +
+      防递归后缀），并重放 FR-8 角色路由注入 ``model`` 与 ``agent_type``。
     - 上下文不足（无用户文本）→ 返回 ``None``（调用方落 FR-12c 拒绝重试）。
 
     返回补参后的 arguments dict；``raw_args`` 无法解析时按空参处理。
@@ -119,6 +140,11 @@ def patch_spawn_agent_arguments(
     if existing:
         return args  # FR-12d：正常调用原样透传
 
+    # 内容落在非标准字段 → 迁移到 message（v3.1 决定性整改）
+    migrated = _migrate_nonstandard_fields(args)
+    if migrated is not None:
+        return migrated
+
     # 空参 → 上下文合成（FR-12b）
     base = last_user_text.strip()
     if not base:
@@ -126,8 +152,14 @@ def patch_spawn_agent_arguments(
 
     # 角色标记：优先从 leader 文本（团长推理/计划片段），其次合成 message 本身
     role_model = role_model_for(leader_text)
+    role_tag = ""
     if not role_model:
         role_model = role_model_for(base)
+    if role_model:
+        for tag in _ROLE_TAGS:
+            if ROLE_MODEL_MAP[tag] == role_model:
+                role_tag = tag
+                break
 
     msg = base
     if role_model:
@@ -142,4 +174,8 @@ def patch_spawn_agent_arguments(
     args["message"] = msg
     if role_model:
         args["model"] = role_model
+        # v3.1 质量增强②：注入 agent_type 恢复 FR-8 角色路由（V1 handler 读
+        # ``args.agent_type`` → ``role_name``）。
+        if role_tag:
+            args["agent_type"] = role_tag
     return args

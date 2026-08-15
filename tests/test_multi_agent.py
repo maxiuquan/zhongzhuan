@@ -780,3 +780,33 @@ async def test_nonstream_postprocess_client_preserves_args_and_patches():
     assert args2["message"].startswith("read the three config files")
     assert "不要再次调用 spawn_agent" in args2["message"]
     assert all(i["type"] != "function_call_output" for i in out2)
+
+
+# ---------------------------------------------------------------------------
+# v3.1（00:50 复测反转）：字段名统一为 message + agent_type 注入
+# ---------------------------------------------------------------------------
+
+
+def test_args_patch_v31_task_migrates_to_message():
+    """v3.1 决定性整改：task/label 等非标准字段内容必须迁移到 message（V1 handler 只读 message）。"""
+    from zhongzhuan.responses_v3.args_patch import patch_spawn_agent_arguments
+
+    # task + label（9.6.2 样本 A4 形态）
+    r = patch_spawn_agent_arguments(json.dumps({"task": "请读取 README.md 并总结", "label": "summarize_readme"}), "ctx")
+    assert r is not None
+    assert r.get("message") == "请读取 README.md 并总结"  # 迁移到 message
+    # instruction 也迁移
+    r2 = patch_spawn_agent_arguments(json.dumps({"instruction": "do it"}), "ctx")
+    assert r2.get("message") == "do it"
+    # 标准 message 不受影响
+    r3 = patch_spawn_agent_arguments(json.dumps({"message": "read x"}), "ctx")
+    assert r3 == {"message": "read x"}
+
+
+def test_args_patch_v31_agent_type_injected_with_role():
+    """v3.1 质量增强②：角色命中时注入 agent_type（V1 handler 读 args.agent_type）。"""
+    from zhongzhuan.responses_v3.args_patch import patch_spawn_agent_arguments
+
+    r = patch_spawn_agent_arguments("{}", "read files", "delegate to [explorer] to read")
+    assert r.get("model") == "juhe/deepseek-v4-flash"
+    assert r.get("agent_type") == "explorer"
