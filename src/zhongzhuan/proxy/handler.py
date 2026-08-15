@@ -1286,23 +1286,47 @@ class ProxyHandler:
         """
         if not instruction:
             return ""
-        # 挑一个真正带上游 base/model 的 key，不盲取 _keys[0]：可能存在
-        # upstream_model 为空的 key，直接早退会让子代理产出恒为空（2026-08-15
-        # spawn→wait 回环实测 result=""，且无任何失败日志——即命中了空字段早退）。
+        # 挑与父模型同一 slug 的 key（model_name == model，model 即父模型 slug，
+        # spawn_agent.arguments.model 的角色模型 override 同样落在这条匹配上，
+        # 天然满足 FR-4）。不盲取 _keys[0]：可能挑到别的 provider 的 key
+        # （2026-08-15 实测：打到 macc.eu.cc 的 agnes 上、404、产出恒空）。
         key = next(
             (
                 k
                 for k in (self._keys or [])
-                if getattr(k, "upstream_base", "") and getattr(k, "upstream_model", "")
+                if k.model_name == model
+                and getattr(k, "upstream_base", "")
+                and getattr(k, "upstream_model", "")
             ),
             None,
         )
+        if key is None:
+            _lg.warning(
+                f"multi_agent sub-agent: no key for model_name={model!r}; "
+                f"falling back to first usable key"
+            )
+            key = next(
+                (
+                    k
+                    for k in (self._keys or [])
+                    if getattr(k, "upstream_base", "")
+                    and getattr(k, "upstream_model", "")
+                ),
+                None,
+            )
         if key is None:
             _lg.warning("multi_agent sub-agent: no key with upstream_base/upstream_model available")
             return ""
         base = str(getattr(key, "upstream_base", "") or "").rstrip("/")
         native_model = str(getattr(key, "upstream_model", "") or "")
-        url = base + "/v1/responses"
+        path = str(getattr(key, "upstream_path_override", "") or "")
+        if not path:
+            path = "/v1/responses"
+        # 部分 key 的 upstream_base 自带 /v1（如 https://macc.eu.cc/v1），拼
+        # /v1/responses 会双重前缀。规范化：base 已含 /v1 时去掉。
+        if path.lstrip("/").startswith("v1/") and base.endswith("/v1"):
+            base = base[:-3]
+        url = f"{base}/{path.lstrip('/')}"
         _lg.info(
             f"multi_agent sub-agent rollout url={url} model={native_model} session={session_id} instruction_len={len(instruction)}"
         )
