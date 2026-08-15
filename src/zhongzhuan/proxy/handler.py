@@ -43,10 +43,22 @@ def _ma_extract_text(data: Any) -> str:
     """从上游 /v1/responses 响应中抽取 message 文本（供子代理 rollout 回传）。
 
     兼容三种 content 形态：``output_text`` item、普通 ``text``/``input_text``
-    item、以及 content 直接是字符串（部分上游非标准）。
+    item、以及 content 直接是字符串；同时兼容部分上游 /v1/responses 兼容层
+    返回的 ``chat.completion`` 形状（``choices[].message.content``）。
     """
     if not isinstance(data, dict):
         return ""
+    # chat.completion 形状（aihubmix 等兼容层实测返回）。
+    if data.get("object") == "chat.completion" or "choices" in data:
+        parts: list[str] = []
+        for ch in data.get("choices") or []:
+            if not isinstance(ch, dict):
+                continue
+            msg = ch.get("message") or {}
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                parts.append(content)
+        return "\n".join(parts)
     output = data.get("output") or []
     parts: list[str] = []
     for item in output:
@@ -1290,49 +1302,55 @@ class ProxyHandler:
             return orch
 
     async def _run_sub_agent(self, instruction: str, model: str, session_id: str) -> str:
-        """真正执行一个子代理 rollout：向上游 /v1/responses 发一次非流式请求。
+        """真正执行一个子代理 rollout：向上游 /v1/responses 发非流式请求。
 
         子代理的『输入』即父代理下发的 instruction（spawn_agent 描述要求单一、
         自包含的指令）；上游返回后抽取其 message 文本作为子代理产出回传父代理。
-        失败/超时隔离：异常只影响该子代理，不波及父代理会话。
+
+        同一家族 key 间 **failover**：先按 model basename 匹配（分组模型的 key 的
+        model_name 是成员/provider slug，如 zz-slomerex/mimo-v2.5-pro），任一 key
+        空产出/失败就试下一个（2026-08-15 实测：首个匹配的 aihubmix 免费 key 额度
+        耗尽、恒空产出）。全部失败返回 ""（失败隔离，不波及父代理会话）。
         """
         if not instruction:
             return ""
-        # 挑与父模型同一 provider 的 key。model 是父模型 slug（juhe/mimo-v2.5-pro
-        # 或 spawn_agent.arguments.model 的角色模型）；分组模型的 key 的 model_name
-        # 是成员/provider slug（如 zz-slomerex/mimo-v2.5-pro），所以先精确匹配、
-        # 再按 basename 后缀匹配（2026-08-15 实测：精确匹配对分组 slug 恒失败，
-        # 兜底挑到了 macc.eu.cc 的 agnes——能出结果但 provider 不对）。
+
         def _usable(k) -> bool:
             return bool(getattr(k, "upstream_base", "") and getattr(k, "upstream_model", ""))
 
         target_base = model.rsplit("/", 1)[-1] if model else ""
-        key = next(
-            (
-                k
-                for k in (self._keys or [])
-                if _usable(k)
-                and (
-                    k.model_name == model
-                    or (target_base and k.model_name.endswith("/" + target_base))
-                    or (target_base and k.model_name == target_base)
-                )
-            ),
-            None,
-        )
-        if key is None:
-            _lg.warning(
-                f"multi_agent sub-agent: no key for model={model!r} (basename={target_base!r}); "
-                f"falling back to first usable key"
+        keys = [
+            k
+            for k in (self._keys or [])
+            if _usable(k)
+            and (
+                k.model_name == model
+                or (target_base and (k.model_name.endswith("/" + target_base) or k.model_name == target_base))
             )
-            key = next((k for k in (self._keys or []) if _usable(k)), None)
-        if key is None:
+        ]
+        if not keys:
+            keys = [k for k in (self._keys or []) if _usable(k)]
+            _lg.warning(
+                f"multi_agent sub-agent: no key matching model={model!r} (basename={target_base!r}); "
+                f"using all usable keys as failover pool ({len(keys)})"
+            )
+        if not keys:
             _lg.warning("multi_agent sub-agent: no key with upstream_base/upstream_model available")
             return ""
         _lg.info(
-            f"multi_agent sub-agent picked key_id={getattr(key, 'key_id', '?')} "
-            f"model_name={getattr(key, 'model_name', '')} for model={model!r}"
+            "multi_agent sub-agent pool for model=" + repr(model) + ": "
+            + ", ".join(
+                f"{getattr(k, 'key_id', '?')}:{getattr(k, 'model_name', '')}" for k in keys[:8]
+            )
         )
+        for key in keys:
+            text = await self._run_sub_agent_one(key, instruction, session_id)
+            if text:
+                return text
+        return ""
+
+    async def _run_sub_agent_one(self, key: Any, instruction: str, session_id: str) -> str:
+        """单个 key 的子代理上游调用（空产出/异常返回 ""，由调用方 failover）。"""
         base = str(getattr(key, "upstream_base", "") or "").rstrip("/")
         native_model = str(getattr(key, "upstream_model", "") or "")
         path = str(getattr(key, "upstream_path_override", "") or "")
@@ -1367,16 +1385,16 @@ class ProxyHandler:
                 ) as resp:
                     data = await resp.json()
         except Exception as exc:  # noqa: BLE001 - 子代理失败隔离
-            _lg.warning(f"multi_agent sub-agent upstream call failed: {exc}")
+            _lg.warning(f"multi_agent sub-agent upstream call failed url={url} model={native_model}: {exc}")
             return ""
         text = _ma_extract_text(data)
         _lg.info(
-            f"multi_agent sub-agent done url={url} status_code={getattr(resp, 'status', '?')} out_len={len(text)}"
+            f"multi_agent sub-agent done url={url} model={native_model} status_code={getattr(resp, 'status', '?')} out_len={len(text)}"
         )
         if not text:
             _lg.warning(
                 f"multi_agent sub-agent empty output url={url} model={native_model} "
-                f"body={json.dumps(data, ensure_ascii=False)[:500]}"
+                f"body={json.dumps(data, ensure_ascii=False)[:400]}"
             )
         return text
 
