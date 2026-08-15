@@ -1302,7 +1302,7 @@ async function loadGroups() {
     : groups.map(g => `
       <tr class="group-row"><td><strong class="truncate" title="${esc(g.name)}">${esc(g.name)}</strong></td><td><code>${esc(g.strategy)}</code></td>
       <td><span class="truncate" title="${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id)) + '(w'+(x.weight||1)+',o'+(x.ord||0)+')').join(', ')}">${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id)) + '<span style="color:var(--text-subtle);font-size:11px">(w'+(x.weight||1)+',o'+(x.ord||0)+')</span>').join(", ") || '<span style="color:var(--text-subtle)">无</span>'}</span></td>
-      <td><button class="btn small" onclick="editGroup(${g.id})">编辑</button> <button class="btn small danger" onclick="delGroup(${g.id})">删除</button></td></tr>`).join("");
+      <td><button class="btn small" onclick="testGroup(${g.id}, '${esc(g.name)}')">测试</button> <button class="btn small" onclick="editGroup(${g.id})">编辑</button> <button class="btn small danger" onclick="delGroup(${g.id})">删除</button></td></tr>`).join("");
   // 名称列按最长分组名自适应宽度
   fitColumn("colGroupName", groups.map(g => g.name), {px:13, weight:600, pad:28, min:140, max:360});
 }
@@ -1311,6 +1311,33 @@ async function delGroup(id) {
   if (!confirm("确认删除此分组?")) return;
   const r = await api("/api/groups/" + id, {method:"DELETE"});
   if (r !== null) loadGroups();
+}
+
+// 测试分组内所有模型的连通性：对每个成员的每个启用 key 做极简 ping。
+async function testGroup(id, name) {
+  if (!confirm("将对分组「" + name + "」内所有启用 Key 逐一直连上游测试,可能产生少量请求费用,继续?")) return;
+  const r = await api("/api/groups/" + id + "/test", {method:"POST"});
+  if (!r) return;
+  const s = r.summary || {total_keys:0, ok:0, fail:0};
+  let html = `<h3>分组测试：${esc(name)}</h3>
+    <div style="margin:8px 0;font-size:13px">共 <b>${s.total_keys}</b> 个 Key：<span style="color:var(--ok,#2e7d32)"><b>${s.ok}</b> 成功</span> / <span style="color:var(--err,#c62828)"><b>${s.fail}</b> 失败</span></div>
+    <div style="max-height:60vh;overflow:auto"><table style="font-size:12px"><thead><tr><th>模型</th><th>Key ID</th><th>状态</th><th>延迟</th><th>错误</th></tr></thead><tbody>`;
+  (r.models || []).forEach(m => {
+    if (!m.keys.length) {
+      html += `<tr><td>${esc(m.name)} <span style="color:var(--text-subtle)">(o${m.ord})</span></td><td colspan="4" style="color:var(--text-subtle)">无启用 Key</td></tr>`;
+      return;
+    }
+    m.keys.forEach(k => {
+      const ok = k.ok;
+      const st = ok ? '<span style="color:var(--ok,#2e7d32)">✅ ' + k.status + '</span>'
+                    : '<span style="color:var(--err,#c62828)">❌ ' + (k.status || "—") + '</span>';
+      html += `<tr><td>${esc(m.name)} <span style="color:var(--text-subtle)">(o${m.ord})</span></td><td>${k.key_id}</td><td>${st}</td><td>${k.latency_ms ?? "—"}ms</td><td style="word-break:break-all">${esc(k.error || "")}</td></tr>`;
+    });
+  });
+  html += `</tbody></table></div>
+    <div class="modal-actions"><button class="btn" onclick="closeModal()">关闭</button></div>`;
+  document.getElementById("modalContent").innerHTML = html;
+  document.getElementById("modal").classList.add("show");
 }
 
 function editGroup(id) {

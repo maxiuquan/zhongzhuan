@@ -274,3 +274,107 @@ async def test_ui_serves(store):
                 assert "onclick=\"copyText(document.getElementById('newTokenVal').textContent)\"" in text
     finally:
         await runner.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# 分组测试（2026-08-15 新增：POST /api/groups/{id}/test 测试分组内所有启用 Key）
+# ---------------------------------------------------------------------------
+
+
+async def _make_group_fixture(store):
+    """建 2 个模型 + 1 个分组（含 2 个成员 + 各 1 个 key）。返回 (model1, model2, group)。"""
+    from zhongzhuan.store.models import Model, create_model
+    from zhongzhuan.store.keys import ApiKey, create_key
+    from zhongzhuan.store.groups import GroupData, GroupMemberData, create_group, set_group_members
+
+    m1 = await create_model(store, Model(name="am/t1", upstream_base="http://up1.example/v1",
+                                         upstream_model="t1", protocol="openai"))
+    m2 = await create_model(store, Model(name="bz/t2", upstream_base="http://up2.example/v1",
+                                         upstream_model="t2", protocol="openai"))
+    for m in (m1, m2):
+        await create_key(store, ApiKey(id=None, model_id=m.id, label="k", key_value="sk-test123", enabled=1))
+    g = await create_group(store, GroupData(name="grp-test", strategy="failover"))
+    await set_group_members(store, g.id, [
+        GroupMemberData(group_id=g.id, model_id=m1.id, weight=1, ord=0),
+        GroupMemberData(group_id=g.id, model_id=m2.id, weight=1, ord=1),
+    ])
+    return m1, m2, g
+
+
+@pytest.mark.asyncio
+async def test_group_test_endpoint_runs_all_member_keys(store, monkeypatch):
+    from zhongzhuan.admin import api_groups
+
+    m1, m2, g = await _make_group_fixture(store)
+    key_ids = [r[0] for r in await store.fetchall("SELECT id FROM api_keys ORDER BY id")]
+
+    # 打桩：不发真实网络请求，直接返回可控结果
+    async def fake_test(ctx, key_id, model):
+        ok = key_id == key_ids[0]
+        return {"key_id": key_id, "ok": ok, "status": 200 if ok else 503,
+                "latency_ms": 5, "url": "http://stub", "model": model.name, "error": "" if ok else "boom"}
+
+    monkeypatch.setattr(api_groups, "_test_group_key", fake_test)
+
+    admin = AdminServer(store=store)
+    port = _free_port()
+    runner = web.AppRunner(admin.app())
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    try:
+        async with ClientSession() as sess:
+            async with sess.post(f"http://127.0.0.1:{port}/api/groups/{g.id}/test") as resp:
+                body = await resp.json()
+                assert resp.status == 200
+                assert body["ok"] is True
+                assert body["group"] == "grp-test"
+                assert len(body["models"]) == 2
+                # 每模型 1 个 key，结果按 ord 排序
+                assert body["models"][0]["name"] == "am/t1"
+                assert body["models"][0]["keys"][0]["ok"] is True
+                assert body["models"][1]["name"] == "bz/t2"
+                assert body["models"][1]["keys"][0]["ok"] is False
+                assert body["summary"] == {"total_keys": 2, "ok": 1, "fail": 1}
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_group_test_endpoint_unknown_group(store):
+    admin = AdminServer(store=store)
+    port = _free_port()
+    runner = web.AppRunner(admin.app())
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    try:
+        async with ClientSession() as sess:
+            async with sess.post("http://127.0.0.1:{0}/api/groups/999999/test".format(port)) as resp:
+                body = await resp.json()
+                assert resp.status == 404
+                assert body["ok"] is False
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_group_test_endpoint_empty_group(store):
+    from zhongzhuan.store.groups import GroupData, create_group
+
+    g = await create_group(store, GroupData(name="grp-empty", strategy="failover"))
+    admin = AdminServer(store=store)
+    port = _free_port()
+    runner = web.AppRunner(admin.app())
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    try:
+        async with ClientSession() as sess:
+            async with sess.post(f"http://127.0.0.1:{port}/api/groups/{g.id}/test") as resp:
+                body = await resp.json()
+                assert resp.status == 200
+                assert body["ok"] is True
+                assert body["summary"] == {"total_keys": 0, "ok": 0, "fail": 0}
+    finally:
+        await runner.cleanup()
