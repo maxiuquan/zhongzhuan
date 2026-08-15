@@ -1663,6 +1663,12 @@ class ProxyHandler:
                     # 角色路由注入 model（防递归后缀）；非空原样透传。
                     from ..responses_v3.args_patch import patch_spawn_agent_arguments
 
+                    _lg.info(
+                        f"[args-patch] spawn_agent detected call_id={call_id} "
+                        f"raw_args={str(item.get('arguments'))[:80]!r} "
+                        f"last_user_len={len(last_user_text)}"
+                    )
+
                     leader_text = ""
                     for prev in new_output:
                         if isinstance(prev, dict) and prev.get("type") == "message":
