@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 from aiohttp import web
 from aiohttp.payload import Payload
@@ -162,6 +163,8 @@ class ProxyServer:
         app.router.add_get("/version", self._version)
         app.router.add_get("/v1/models", self._list_models)
         app.router.add_post("/api/reload", lambda r: self._reload(r, handler))
+        app.router.add_post("/api/keys/{key_id}/reactivate", lambda r: self._reactivate_key(r, handler))
+        app.router.add_get("/api/keys/health", lambda r: self._key_health(r, handler))
         return app
 
     # ------------------------------------------------------------------
@@ -342,6 +345,51 @@ class ProxyServer:
                 logger.exception("reload models/groups snapshot failed")
         logger.info(f"reloaded {n} keys from store")
         return web.json_response({"ok": True, "keys": n})
+
+    async def _reactivate_key(self, request: web.Request, handler) -> web.Response:
+        """管理端「确认恢复」：重置指定 key 为 healthy（回分组原排名）。
+
+        permanent（欠费/配置已修）与 banned（封禁解除）都走这里；只重置目标
+        key，不触发 reload（reload 会重建所有 KeyHealth 对象，且 2026-08-15 v1
+        语义下 reload 不重置 invalid——直接改内存状态即可立即生效）。
+        """
+        key_id = int(request.match_info.get("key_id", "0") or 0)
+        if key_id <= 0:
+            return web.json_response({"ok": False, "error": "invalid key_id"}, status=400)
+        ok = handler.reactivate_key(key_id)
+        if not ok:
+            return web.json_response({"ok": False, "error": "key not found in proxy memory"}, status=404)
+        return web.json_response({"ok": True, "key_id": key_id})
+
+    async def _key_health(self, _request: web.Request, handler) -> web.Response:
+        """管理端查询全部 key 的健康状态（内存权威，实时）。
+
+        返回 key_id → {status, failure_class, backoff_level, cooldown_until,
+        cooldown_remaining, last_failure_at}，供 Key 池/分组页展示失效原因与
+        「确认恢复」按钮状态。
+        """
+        now = time.time()
+        items = []
+        for k in handler._keys or []:
+            if k.key_id <= 0:
+                continue
+            remaining = 0.0
+            if k.cooldown_until > now:
+                remaining = k.cooldown_until - now
+            items.append(
+                {
+                    "key_id": k.key_id,
+                    "status": k.status,
+                    "failure_class": k.failure_class or "",
+                    "backoff_level": k.backoff_level,
+                    "cooldown_until": k.cooldown_until,
+                    "cooldown_remaining": round(remaining, 1),
+                    "last_failure_at": k.last_failure_at,
+                    "consecutive_failures": k.consecutive_failures,
+                    "total_failures": k.total_failures,
+                }
+            )
+        return web.json_response({"ok": True, "items": items})
 
     async def _version(self, _request: web.Request) -> web.Response:
         from zhongzhuan import __version__

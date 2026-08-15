@@ -61,6 +61,28 @@ STATE_RATE_LIMITED = "rate_limited"
 STATE_INVALID = "invalid"
 STATE_ERROR = "error"
 
+# ---- Failure classification (2026-08-15, backoff v1) ----
+# 分类标签：permanent(永久失效，需确认恢复) / banned(封禁，长冷却) /
+# rate_limit(限流) / transient(瞬时) / no_retry(换 key 无意义) / unknown(交给 agnes 补判)。
+# 标签判定逻辑在 retry.py 的 classify_label()；此处仅定义常量与 KeyHealth 状态机方法。
+CLASS_PERMANENT = "permanent"
+CLASS_BANNED = "banned"
+CLASS_RATE_LIMIT = "rate_limit"
+CLASS_TRANSIENT = "transient"
+CLASS_NO_RETRY = "no_retry"
+CLASS_UNKNOWN = "unknown"
+
+#: 逐级退避档位（秒）：level 0→1→2→3 对应冷却时长。失败抬级，成功降级。
+BACKOFF_STEPS: tuple[int, ...] = (5, 10, 60, 600)
+#: 冷却等级上限（索引到 BACKOFF_STEPS 的最后一个）。
+BACKOFF_MAX_LEVEL: int = len(BACKOFF_STEPS) - 1
+
+
+def backoff_seconds(level: int) -> int:
+    """level 对应的冷却秒数（越界收敛到上下限）。"""
+    level = max(0, min(int(level), BACKOFF_MAX_LEVEL))
+    return BACKOFF_STEPS[level]
+
 
 @dataclass
 class KeyHealth:
@@ -88,6 +110,12 @@ class KeyHealth:
     # 连续失败次数（成功即清零，退避判断依据，T07）
     consecutive_failures: int = 0
     recent_429_count: int = 0
+    # 退避等级（2026-08-15 v1）：0-3 对应 BACKOFF_STEPS 档位；失败抬级、成功降级。
+    backoff_level: int = 0
+    # 最近一次失败的分类标签（CLASS_*），供管理端展示失效原因。
+    failure_class: str = ""
+    # 最近一次失败时间（epoch 秒），供管理端展示「失效时长」。
+    last_failure_at: float = 0.0
     # v3 能力路由字段（T07 建字段，T25 接 CapabilityRouter）。
     #
     # DEVIATION（§3.9 / T25）：文档把它们写成 ``frozenset[Capability]`` 与
@@ -169,6 +197,73 @@ class KeyHealth:
             if self.rpd_count >= self.rpd_limit:
                 return False
         return True
+
+    def record_failure(self, failure_class: str, *, retry_after: str | None = None) -> None:
+        """记录一次上游失败，按分类更新健康状态与退避等级。
+
+        * ``permanent``：标记 invalid，不参与 failover，等待管理端确认恢复。
+        * ``banned``：长冷却（600s 档），自动恢复，也可手动提前恢复。
+        * ``rate_limit`` / ``transient``：逐级退避（level 0→3），成功降级。
+        * ``no_retry``：不标记（当前请求直接 break，不换 key）。
+        * ``unknown``：按 transient 降级处理（当前请求继续 failover），
+          分类结论交给 agnes 异步补判（不阻塞）。
+        """
+        now = time.time()
+        self.total_failures += 1
+        self.consecutive_failures += 1
+        self.last_failure_at = now
+        self.failure_class = failure_class
+
+        if failure_class == CLASS_PERMANENT:
+            self.status = STATE_INVALID
+            self.cooldown_until = 0.0
+            return
+        if failure_class == CLASS_BANNED:
+            # 封禁：直接长冷却档（不再逐级），到期自动恢复。
+            self.status = STATE_ERROR
+            self.backoff_level = BACKOFF_MAX_LEVEL
+            self.cooldown_until = now + backoff_seconds(BACKOFF_MAX_LEVEL)
+            return
+        if failure_class == CLASS_RATE_LIMIT:
+            # 429：尊重上游 Retry-After（若合法），否则逐级退避。
+            self.status = STATE_RATE_LIMITED
+            if retry_after:
+                try:
+                    ra = max(1, int(float(retry_after)))
+                    self.backoff_level = min(BACKOFF_MAX_LEVEL, self.backoff_level + 1)
+                    self.cooldown_until = now + min(ra, backoff_seconds(BACKOFF_MAX_LEVEL))
+                    return
+                except (TypeError, ValueError):
+                    pass
+            self.backoff_level = min(BACKOFF_MAX_LEVEL, self.backoff_level + 1)
+            self.cooldown_until = now + backoff_seconds(self.backoff_level)
+            return
+        # transient / unknown：逐级退避
+        self.status = STATE_ERROR
+        self.backoff_level = min(BACKOFF_MAX_LEVEL, self.backoff_level + 1)
+        self.cooldown_until = now + backoff_seconds(self.backoff_level)
+
+    def record_success(self) -> None:
+        """记录一次成功：连续失败清零；退避等级降一级（半开探测，成功即降）。"""
+        self.consecutive_failures = 0
+        self.success_count += 1
+        if self.backoff_level > 0:
+            self.backoff_level -= 1
+        # 冷却中的 key 成功后立即恢复可用（冷却已到期或提前成功都回 healthy）
+        if self.status in (STATE_ERROR, STATE_RATE_LIMITED):
+            self.status = STATE_HEALTHY
+            self.cooldown_until = 0.0
+
+    def reactivate(self) -> None:
+        """管理端「确认恢复」：重置为 healthy，回到分组原排名参与 failover。
+
+        用于 permanent（欠费/配置已修）与 banned（封禁已解除，提前结束长冷却）。
+        """
+        self.status = STATE_HEALTHY
+        self.cooldown_until = 0.0
+        self.backoff_level = 0
+        self.failure_class = ""
+        self.consecutive_failures = 0
 
     def record_request(self) -> None:
         """Call when a request is dispatched to this key (for RPD counting)."""

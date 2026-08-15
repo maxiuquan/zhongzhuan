@@ -119,6 +119,24 @@ class FallbackConfig:
 
 
 @dataclass
+class KeyBackoffConfig:
+    """Key 失败退避与 agnes 异步补判（2026-08-15 v1）。
+
+    permanent（欠费/配置）标记 invalid 等待管理端「确认恢复」；banned（403 CF）
+    长冷却自动恢复；rate_limit/transient 逐级退避 5s→10s→60s→600s。
+    规则无法分类的失败异步交给 agnes 补判（``agnes_classify_enabled`` 开关）。
+    """
+
+    #: 规则盲区（unknown）是否异步交给 agnes 补判。默认开；关闭时 unknown
+    #: 仅按瞬时降级处理，不调模型。
+    agnes_classify_enabled: bool = True
+    #: agnes 补判用的模型（走中继 relay slug；需是免费且稳定的模型）。
+    agnes_classify_model: str = "juhe/agnes-2.5-flash"
+    #: 同一 key 同类错误的最小补判间隔（秒）：防止高频失败反复触发模型调用。
+    agnes_classify_min_interval: int = 300
+
+
+@dataclass
 class HostedToolsConfig:
     """hosted tool 执行开关（T27 遗留的 opt-in，T28 补上显式启用路径）。
 
@@ -246,6 +264,7 @@ class Config:
     storage: StorageConfig = field(default_factory=StorageConfig)
     windows_service: WinSvcConfig = field(default_factory=WinSvcConfig)
     fallback: FallbackConfig = field(default_factory=FallbackConfig)
+    key_backoff: KeyBackoffConfig = field(default_factory=KeyBackoffConfig)
     hosted_tools: HostedToolsConfig = field(default_factory=HostedToolsConfig)
     cors: CorsConfig = field(default_factory=CorsConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
@@ -329,6 +348,11 @@ def _schema_to_config(s: StrictConfig) -> Config:
             chat_path=s.fallback.chat_path,
             model_prefix=s.fallback.model_prefix,
             fallback_penalty=s.fallback.fallback_penalty,
+        ),
+        key_backoff=KeyBackoffConfig(
+            agnes_classify_enabled=s.key_backoff.agnes_classify_enabled,
+            agnes_classify_model=s.key_backoff.agnes_classify_model,
+            agnes_classify_min_interval=s.key_backoff.agnes_classify_min_interval,
         ),
         hosted_tools=HostedToolsConfig(
             mcp_enabled=s.hosted_tools.mcp_enabled,

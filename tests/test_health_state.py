@@ -40,8 +40,10 @@ class TestHealthStateMachine:
         k = _kh()
         mark_auth_failure(k)
         assert k.status == STATE_INVALID
-        assert not k.is_available()  # invalid 永不可用
-        assert k.cooldown_until > time.time() + 3500  # ~1 小时冷却
+        assert not k.is_available()  # invalid 永不可用（等管理端确认恢复）
+        # v1（2026-08-15）：不再自动到期——cooldown=0，invalid 由
+        # is_available() 直接拒绝，直到「确认恢复」或服务重启。
+        assert k.cooldown_until == 0.0
 
     def test_mark_rate_limited_sets_state_and_cooldown(self):
         k = _kh()
@@ -98,11 +100,19 @@ class TestClassifyFailure:
         assert should_retry is True
         assert k.status == STATE_INVALID
 
-    def test_403_returns_true_and_marks_invalid(self):
+    def test_403_returns_true_and_marks_transient_without_cf_markers(self):
         k = _kh()
         should_retry = classify_failure(k, 403, {})
         assert should_retry is True
-        assert k.status == STATE_INVALID
+        # v1：无 CF 特征的裸 403 按瞬时处理（避免误伤）；带 CF/WAF 特征才是 banned。
+        assert k.status == STATE_ERROR
+
+    def test_403_cf_block_marks_banned(self):
+        k = _kh()
+        should_retry = classify_failure(k, 403, {"server": "cloudflare"})
+        assert should_retry is True
+        assert k.status == STATE_ERROR  # banned = 长冷却的 error 态
+        assert k.cooldown_until > time.time() + 500  # 600s 档
 
     def test_429_returns_true_and_marks_rate_limited(self):
         k = _kh()
@@ -163,3 +173,91 @@ class TestReasonForExhaustion:
         mark_auth_failure(keys[0])
         mark_rate_limited(keys[1])
         assert reason_for_exhaustion(keys) == "all_exhausted"
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-15 v1：classify_label 纯函数 + 逐级退避 + 确认恢复
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyLabel:
+    def test_permanent_body_keywords(self):
+        from zhongzhuan.proxy.retry import classify_label
+        from zhongzhuan.proxy.ratelimit import CLASS_PERMANENT
+
+        cases = [
+            (400, b'{"error":{"code":"model_not_found"}}'),
+            (500, b'{"error":{"message":"No available channel for model x"}}'),
+            (402, '{"error":"INSUFFICIENT_BALANCE","message":"请充值 topup"}'.encode("utf-8")),
+            (401, b'{"error":{"message":"Invalid token"}}'),
+        ]
+        for status, body in cases:
+            assert classify_label(status, {}, body) == CLASS_PERMANENT, (status, body)
+
+    def test_banned_cloudflare(self):
+        from zhongzhuan.proxy.retry import classify_label
+        from zhongzhuan.proxy.ratelimit import CLASS_BANNED
+
+        assert classify_label(403, {"server": "cloudflare"}, b"") == CLASS_BANNED
+        assert classify_label(403, {}, b"<!doctype html>Just a moment...") == CLASS_BANNED
+        assert classify_label(503, {"server": "cloudflare"}, b"") == CLASS_BANNED
+
+    def test_bare_403_transient(self):
+        from zhongzhuan.proxy.retry import classify_label
+        from zhongzhuan.proxy.ratelimit import CLASS_TRANSIENT
+
+        assert classify_label(403, {}, b"{}") == CLASS_TRANSIENT
+
+    def test_status_code_rules(self):
+        from zhongzhuan.proxy.retry import classify_label
+        from zhongzhuan.proxy.ratelimit import (
+            CLASS_RATE_LIMIT, CLASS_TRANSIENT, CLASS_NO_RETRY, CLASS_UNKNOWN,
+        )
+
+        assert classify_label(429, {}, b"") == CLASS_RATE_LIMIT
+        assert classify_label(503, {}, b"") == CLASS_TRANSIENT
+        assert classify_label(554, {}, b"") == CLASS_TRANSIENT
+        assert classify_label(499, {}, b"") == CLASS_NO_RETRY
+        assert classify_label(422, {}, b"{}") == CLASS_NO_RETRY
+        assert classify_label(200, {}, b"") == CLASS_UNKNOWN  # 规则盲区
+
+
+class TestBackoffLevels:
+    def test_transient_escalates_and_success_degrades(self):
+        k = _kh()
+        k.record_failure("transient")
+        assert k.backoff_level == 1
+        assert k.cooldown_until > time.time()
+        k.record_failure("transient")
+        assert k.backoff_level == 2
+        k.record_success()
+        assert k.backoff_level == 1  # 成功降一级
+        assert k.status == STATE_HEALTHY
+
+    def test_permanent_invalid_requires_reactivate(self):
+        k = _kh()
+        k.record_failure("permanent")
+        assert k.status == STATE_INVALID
+        assert not k.is_available()
+        assert k.cooldown_until == 0.0  # 不自动到期
+        k.reactivate()
+        assert k.status == STATE_HEALTHY
+        assert k.is_available()
+        assert k.backoff_level == 0
+
+    def test_banned_uses_max_backoff_and_reactivate_clears(self):
+        k = _kh()
+        k.record_failure("banned")
+        assert k.status == STATE_ERROR
+        assert k.backoff_level == 3  # 600s 档
+        assert k.cooldown_until > time.time() + 500
+        k.reactivate()
+        assert k.status == STATE_HEALTHY
+        assert k.cooldown_until == 0.0
+
+    def test_rate_limit_respects_retry_after(self):
+        k = _kh()
+        k.record_failure("rate_limit", retry_after="3")
+        assert k.status == STATE_RATE_LIMITED
+        assert k.cooldown_until > time.time() + 1
+        assert k.cooldown_until <= time.time() + 10  # 尊重 Retry-After，不超 600s

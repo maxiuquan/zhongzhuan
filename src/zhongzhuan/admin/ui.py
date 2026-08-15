@@ -357,7 +357,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
               <button class="btn primary" onclick="showBatchImportModal()">批量导入</button>
             </div>
           </div>
-          <table><thead><tr><th>标签</th><th>模型</th><th>Key</th><th>优先级</th><th>启用</th><th>连通性</th><th>操作</th></tr></thead>
+          <table><thead><tr><th>标签</th><th>模型</th><th>Key</th><th>优先级</th><th>启用</th><th>连通性</th><th>健康</th><th>操作</th></tr></thead>
           <tbody id="keyTable"></tbody></table>
         </div>
       </div>
@@ -1129,7 +1129,7 @@ async function loadKeys() {
 
   const collapsed = JSON.parse(localStorage.getItem("keyGroupCollapsed") || "{}");
   if (visibleModels.length === 0) {
-    document.getElementById("keyTable").innerHTML = '<tr><td colspan="7" class="empty">还没有模型,先在「模型管理」添加模型,然后点击 + 添加 Key</td></tr>';
+    document.getElementById("keyTable").innerHTML = '<tr><td colspan="8" class="empty">还没有模型,先在「模型管理」添加模型,然后点击 + 添加 Key</td></tr>';
     return;
   }
 
@@ -1144,7 +1144,7 @@ async function loadKeys() {
     if (keyTerm && !keyModelHit(m) && matched.length === 0) continue;
     parts.push(
       '<tr class="group-header" data-model="' + mid + '" onclick="toggleKeyGroup(' + mid + ')">' +
-        '<td colspan="7">' +
+        '<td colspan="8">' +
           '<span class="kg-arrow" style="display:inline-block;width:16px;color:var(--text-muted)">' + arrow + '</span> ' +
           esc(m.name) +
           '<span style="color:var(--text-muted);font-weight:400;margin-left:8px">' + matched.length + ' 个 Key</span>' +
@@ -1153,7 +1153,7 @@ async function loadKeys() {
         '</td></tr>');
     if (!isCollapsed) {
       if (matched.length === 0) {
-        parts.push('<tr><td colspan="7" class="empty">' + (keyTerm ? '该模型下没有匹配的 Key' : '该模型下还没有 Key') + '</td></tr>');
+        parts.push('<tr><td colspan="8" class="empty">' + (keyTerm ? '该模型下没有匹配的 Key' : '该模型下还没有 Key') + '</td></tr>');
       } else {
         for (const k of matched) {
           const tr = testResults[k.id];
@@ -1162,6 +1162,16 @@ async function loadKeys() {
             if (tr.ok) connCell = '<span class="tag ok">OK ' + tr.latency + 'ms</span>';
             else connCell = '<span class="tag err">失败</span>';
           }
+          // 健康状态（2026-08-15 v1：invalid/冷却 + 原因 + 确认恢复）
+          const h = k.health || {};
+          let healthCell = '<span style="color:var(--text-subtle)">正常</span>';
+          if (h.status === "invalid") {
+            healthCell = '<span class="tag err" title="永久失效：' + esc(h.failure_class || "permanent") + '">失效</span>';
+          } else if (h.status && h.status !== "healthy") {
+            const rem = h.cooldown_remaining != null ? Math.ceil(h.cooldown_remaining) + "s" : "";
+            healthCell = '<span class="tag warn" title="冷却中：' + esc(h.failure_class || "") + '">冷却' + (rem ? " " + rem : "") + '</span>';
+          }
+          const canReactivate = h.status === "invalid" || (h.status && h.status !== "healthy");
           parts.push(
             '<tr>' +
               '<td>' + esc(k.label) + '</td>' +
@@ -1170,7 +1180,10 @@ async function loadKeys() {
               '<td>' + k.priority + '</td>' +
               '<td>' + (k.enabled? '<span class="health-dot good"></span>是' : '<span class="health-dot bad"></span>否') + '</td>' +
               '<td>' + connCell + '</td>' +
-              '<td><button class="btn small" onclick="testKey(' + k.id + ')">测试</button> <button class="btn small" onclick="reprobeKey(' + k.id + ')">重探</button> <button class="btn small danger" onclick="delKey(' + k.id + ')">删除</button></td>' +
+              '<td>' + healthCell + '</td>' +
+              '<td><button class="btn small" onclick="testKey(' + k.id + ')">测试</button> <button class="btn small" onclick="reprobeKey(' + k.id + ')">重探</button>' +
+                (canReactivate ? ' <button class="btn small" onclick="reactivateKey(' + k.id + ')">确认恢复</button>' : '') +
+                ' <button class="btn small danger" onclick="delKey(' + k.id + ')">删除</button></td>' +
             '</tr>');
         }
       }
@@ -1190,6 +1203,19 @@ async function delKey(id) {
   if (!confirm("确认删除此 Key?")) return;
   const r = await api("/api/keys/" + id, {method:"DELETE"});
   if (r !== null) { loadKeys(); refreshPoolIfOpen(); }
+}
+
+// 确认恢复一个被标记失效的 key：proxy 重置为 healthy，回到分组原排名。
+async function reactivateKey(id) {
+  if (!confirm("确认该 Key 已恢复可用（充值/配置已修复）？确认后它将回到分组原排名参与请求路由。")) return;
+  const r = await api("/api/keys/" + id + "/reactivate", {method:"POST"});
+  if (r === null) return;
+  if (r.ok) {
+    alert("已恢复 Key " + id);
+    loadKeys(); refreshPoolIfOpen(); loadGroups();
+  } else {
+    alert("恢复失败: " + (r.error || "未知错误"));
+  }
 }
 
 async function testKey(id, reprobe=false) {
@@ -1301,7 +1327,10 @@ async function loadGroups() {
     ? '<tr><td colspan="4" class="empty">还没有分组</td></tr>'
     : groups.map(g => `
       <tr class="group-row"><td><strong class="truncate" title="${esc(g.name)}">${esc(g.name)}</strong></td><td><code>${esc(g.strategy)}</code></td>
-      <td><span class="truncate" title="${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id)) + '(w'+(x.weight||1)+',o'+(x.ord||0)+')').join(', ')}">${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id)) + '<span style="color:var(--text-subtle);font-size:11px">(w'+(x.weight||1)+',o'+(x.ord||0)+')</span>').join(", ") || '<span style="color:var(--text-subtle)">无</span>'}</span></td>
+      <td><span class="truncate" title="${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id)) + '(w'+(x.weight||1)+',o'+(x.ord||0)+')' + ((x.bad_keys||[]).length ? ' [失效 '+x.bad_keys.length+' key]' : '')).join(', ')}">${(g.members||[]).map(x => {
+        const bad = x.bad_keys && x.bad_keys.length ? '<span style="color:#c62828" title="失效 key: '+x.bad_keys.join(',')+'">⚠</span>' : '';
+        return esc(modelMap[x.model_id] || ("model#"+x.model_id)) + bad + '<span style="color:var(--text-subtle);font-size:11px">(w'+(x.weight||1)+',o'+(x.ord||0)+')</span>';
+      }).join(", ") || '<span style="color:var(--text-subtle)">无</span>'}</span></td>
       <td><button class="btn small" onclick="testGroup(${g.id}, '${esc(g.name)}')">测试</button> <button class="btn small" onclick="editGroup(${g.id})">编辑</button> <button class="btn small danger" onclick="delGroup(${g.id})">删除</button></td></tr>`).join("");
   // 名称列按最长分组名自适应宽度
   fitColumn("colGroupName", groups.map(g => g.name), {px:13, weight:600, pad:28, min:140, max:360});

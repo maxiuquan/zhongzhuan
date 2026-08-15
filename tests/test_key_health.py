@@ -67,16 +67,37 @@ def test_client_errors_do_not_mark_health(code):
     assert _snapshot(k) == before
 
 
-@pytest.mark.parametrize("code", AUTH_CODES)
+@pytest.mark.parametrize("code", [401])
 def test_auth_errors_mark_invalid(code):
-    """认证类（401/403）：标记 invalid，长冷却。"""
+    """认证/凭据类（401）：标记 invalid，等待管理端确认恢复（v1 不再自动到期）。"""
     k = _key()
     retryable = classify_failure(k, code, {})
     assert retryable is True
     assert k.status == STATE_INVALID
     assert k.total_failures == 1
     assert k.consecutive_failures == 1
-    assert k.cooldown_until > time.time()
+    # v1（2026-08-15）：cooldown=0，invalid 由 is_available() 永久拒绝，
+    # 直到「确认恢复」或服务重启——不再 1h 自动到期。
+    assert k.cooldown_until == 0.0
+
+
+@pytest.mark.parametrize("code", [403])
+def test_bare_403_marks_transient(code):
+    """裸 403（无 CF 特征）：按瞬时处理（v1，避免误伤非封禁的网关拒绝）。"""
+    k = _key()
+    retryable = classify_failure(k, code, {})
+    assert retryable is True
+    assert k.status == STATE_ERROR
+    assert k.total_failures == 1
+
+
+def test_403_cf_block_marks_banned():
+    """带 CF/WAF 特征的 403：banned（长冷却 600s，自动恢复 + 可手动提前）。"""
+    k = _key()
+    retryable = classify_failure(k, 403, {"server": "cloudflare"})
+    assert retryable is True
+    assert k.status == STATE_ERROR
+    assert k.cooldown_until > time.time() + 500
 
 
 def test_rate_limited_marks_health():

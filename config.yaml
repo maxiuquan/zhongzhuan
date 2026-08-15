@@ -39,3 +39,17 @@ multi_agent:
   job_max_runtime_seconds: 1800
   minimal_client_version: "0.144.0"
   tool_search_mode: "client"
+
+# ---------------------------------------------------------------------------
+# Key 失败退避 + agnes 异步补判（2026-08-15 v1）
+# ---------------------------------------------------------------------------
+# permanent（401/402/欠费/model_not_found）→ 标记失效，等待管理端「确认恢复」；
+# banned（403 CF 封禁）→ 长冷却 600s，自动恢复（也可手动提前恢复）；
+# rate_limit / transient → 逐级退避 5s→10s→60s→600s。
+# agnes_classify_enabled: 规则无法分类的失败是否异步交给 agnes 补判（默认开）。
+# agnes_classify_model: 补判模型（走中继 slug，需免费稳定）。
+# agnes_classify_min_interval: 同一 key 同类错误的最小补判间隔（秒）。
+key_backoff:
+  agnes_classify_enabled: true
+  agnes_classify_model: "juhe/agnes-2.5-flash"
+  agnes_classify_min_interval: 300

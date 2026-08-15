@@ -21,7 +21,7 @@ from ..store.groups import (
 from ..store.keys import get_key_cipher
 from ..store.models import get_model_by_id
 from .api_keys import _build_fingerprint_headers, _build_upstream_url
-from .notify import notify_proxy_reload
+from .notify import fetch_proxy_key_health, notify_proxy_reload
 
 
 async def _test_group_key(ctx, key_id: int, model) -> dict:
@@ -119,7 +119,37 @@ async def _test_group_key(ctx, key_id: int, model) -> dict:
 def register_routes(app: web.Application, ctx) -> None:
     async def list_(request):
         groups = await list_groups(ctx.store)
-        return web.json_response({"data": groups})
+        # 拉取 proxy 内存健康状态（2026-08-15 v1：分组页标红失效成员）
+        try:
+            health = await fetch_proxy_key_health()
+            health_map = {h["key_id"]: h for h in health}
+        except Exception:
+            health_map = {}
+        # 成员 key 的失效标记（model_id → set(失效 key_id)）
+        bad_by_model: dict[int, list[int]] = {}
+        for g in groups:
+            for m in (g.get("members") or []):
+                mid = m["model_id"]
+                keys = await ctx.store.fetchall(
+                    "SELECT id FROM api_keys WHERE model_id=? AND enabled=1",
+                    (mid,),
+                )
+                bad = []
+                for (kid,) in keys:
+                    h = health_map.get(kid)
+                    if h and h.get("status") in ("invalid", "error", "rate_limited"):
+                        bad.append(kid)
+                if bad:
+                    bad_by_model.setdefault(mid, []).extend(bad)
+        out = []
+        for g in groups:
+            g = dict(g)
+            for m in (g.get("members") or []):
+                m = dict(m)
+                m["bad_keys"] = bad_by_model.get(m["model_id"], [])
+            g["members"] = g.get("members") or []
+            out.append(g)
+        return web.json_response({"data": out})
 
     async def create(request):
         data = await request.json()

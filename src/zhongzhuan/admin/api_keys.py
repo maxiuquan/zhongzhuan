@@ -13,7 +13,7 @@ from aiohttp import web
 from ..crypto import mask
 from ..store.keys import ApiKey, create_key, list_keys, delete_key, update_key, get_key_cipher
 from ..store.models import get_model_by_id
-from .notify import notify_proxy_reload
+from .notify import notify_proxy_reload, notify_proxy_reactivate, fetch_proxy_key_health
 
 
 # 标准思考等级(与代理翻译层对齐, M013)
@@ -180,6 +180,12 @@ def register_routes(app: web.Application, ctx) -> None:
     async def list_(request):
         model_id = request.query.get("model_id")
         rows = await list_keys(ctx.store, int(model_id) if model_id else None)
+        # 拉取 proxy 内存健康状态（2026-08-15 v1：展示失效原因/冷却，供「确认恢复」）
+        try:
+            health = await fetch_proxy_key_health()
+            health_map = {h["key_id"]: h for h in health}
+        except Exception:
+            health_map = {}
         return web.json_response(
             {
                 "data": [
@@ -191,6 +197,8 @@ def register_routes(app: web.Application, ctx) -> None:
                         "enabled": r.enabled,
                         "priority": r.priority,
                         "created_at": r.created_at,
+                        # 健康状态（proxy 内存实时值；拉取失败时为空 dict）
+                        "health": health_map.get(r.id, {}),
                     }
                     for r in rows
                 ]
@@ -407,3 +415,20 @@ def register_routes(app: web.Application, ctx) -> None:
     app.router.add_put("/api/keys/{id}", update)
     app.router.add_delete("/api/keys/{id}", delete)
     app.router.add_post("/api/keys/{id}/test", test)
+
+    async def reactivate(request):
+        """「确认恢复」一个被标记失效的 key：通知 proxy 重置为 healthy。
+
+        permanent（欠费/配置已修）与 banned（封禁解除）都走这里；成功后
+        key 回到分组原 ord/weight 排名参与 failover。
+        """
+        key_id = int(request.match_info["id"])
+        ok = await notify_proxy_reactivate(key_id)
+        if not ok:
+            return web.json_response(
+                {"ok": False, "error": "proxy did not confirm reactivation (is proxy running?)"},
+                status=502,
+            )
+        return web.json_response({"ok": True, "key_id": key_id})
+
+    app.router.add_post("/api/keys/{id}/reactivate", reactivate)

@@ -46,3 +46,69 @@ async def notify_proxy_reload() -> None:
             last_err = e
             continue
     logger.warning(f"failed to notify proxy reload on port {port}: {last_err}")
+
+
+async def notify_proxy_reactivate(key_id: int) -> bool:
+    """Notify the proxy server to reactivate a specific key (manual confirm).
+
+    返回 True 表示 proxy 确认已重置（key 回到 healthy / 分组原排名）。
+    """
+    import aiohttp
+    from loguru import logger
+
+    port = _RELOAD_PORT
+    schemes = ["https", "http"] if _RELOAD_USE_TLS else ["http", "https"]
+    last_err: Exception | None = None
+    for scheme in schemes:
+        url = f"{scheme}://127.0.0.1:{port}/api/keys/{key_id}/reactivate"
+        ssl_arg = False if scheme == "https" else None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    ssl=ssl_arg,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        logger.debug(f"proxy reactivated key {key_id} via {url}")
+                        return True
+                    logger.warning(f"proxy reactivate via {url} returned {resp.status}")
+                    return False
+        except Exception as e:
+            last_err = e
+            continue
+    logger.warning(f"failed to notify proxy reactivate on port {port}: {last_err}")
+    return False
+
+
+async def fetch_proxy_key_health() -> list[dict]:
+    """从 proxy 拉取全部 key 的健康状态（内存权威，实时）。
+
+    失败时返回空列表（管理端降级为不显示健康列，不影响其他功能）。
+    """
+    import aiohttp
+    from loguru import logger
+
+    port = _RELOAD_PORT
+    schemes = ["https", "http"] if _RELOAD_USE_TLS else ["http", "https"]
+    last_err: Exception | None = None
+    for scheme in schemes:
+        url = f"{scheme}://127.0.0.1:{port}/api/keys/health"
+        ssl_arg = False if scheme == "https" else None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    ssl=ssl_arg,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get("items") or []
+                    logger.warning(f"proxy health via {url} returned {resp.status}")
+                    return []
+        except Exception as e:
+            last_err = e
+            continue
+    logger.warning(f"failed to fetch proxy key health on port {port}: {last_err}")
+    return []

@@ -202,6 +202,16 @@ class FallbackSchema(BaseModel):
         return v
 
 
+class KeyBackoffSchema(BaseModel):
+    """Key 失败退避 + agnes 异步补判（2026-08-15 v1）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agnes_classify_enabled: bool = True
+    agnes_classify_model: str = "juhe/agnes-2.5-flash"
+    agnes_classify_min_interval: Int = Field(300, ge=0)
+
+
 class HostedToolsSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -353,6 +363,7 @@ class StrictConfig(BaseModel):
     storage: StorageSchema = Field(default_factory=StorageSchema)  # type: ignore[arg-type]
     windows_service: WinSvcSchema = Field(default_factory=WinSvcSchema)
     fallback: FallbackSchema = Field(default_factory=FallbackSchema)  # type: ignore[arg-type]
+    key_backoff: KeyBackoffSchema = Field(default_factory=KeyBackoffSchema)
     hosted_tools: HostedToolsSchema = Field(default_factory=HostedToolsSchema)
     multi_agent: MultiAgentSchema = Field(default_factory=MultiAgentSchema)
     cors: CorsSchema = Field(default_factory=CorsSchema)

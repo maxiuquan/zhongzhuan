@@ -618,6 +618,7 @@ from .retry import (
     mark_empty_response,
     learn_rate_limits,
     classify_failure,
+    classify_failure_labelled,
     looks_like_cloudflare_block,
     reason_for_exhaustion,
 )
@@ -781,6 +782,8 @@ class ProxyHandler:
         self._ma_lock = asyncio.Lock()
         #: 子代理执行器（调用上游 /v1/responses 真正跑 rollout），惰性构建一次。
         self._ma_runner: Any | None = None
+        #: agnes 异步补判去重时间戳（key_id → last_ts，2026-08-15 v1）。
+        self._agnes_classify_ts: dict[int, float] = {}
         # R-P1-35: let ``POST /v1/responses/{id}/cancel`` reach the worker that
         # is actually running the job.  A *provider* is handed over instead of
         # the worker itself because the worker above is built lazily on first
@@ -1282,6 +1285,115 @@ class ProxyHandler:
             and getattr(ma_cfg, "enabled", False)
             and self._multi_agent_tool_search_enabled()
         )
+
+    def _agnes_classify_backoff(self) -> tuple[bool, str, int]:
+        """读取 key_backoff 配置（agnes 补判开关/模型/最小间隔）。"""
+        try:
+            from ..config import default_config
+
+            kb = default_config().key_backoff
+            return (
+                bool(getattr(kb, "agnes_classify_enabled", True)),
+                str(getattr(kb, "agnes_classify_model", "juhe/agnes-2.5-flash") or "juhe/agnes-2.5-flash"),
+                int(getattr(kb, "agnes_classify_min_interval", 300) or 300),
+            )
+        except Exception:
+            return True, "juhe/agnes-2.5-flash", 300
+
+    def _maybe_agnes_classify(self, key_id: int, status_code: int, body: bytes | str) -> None:
+        """规则无法分类的失败 → 异步交给 agnes 补判（config 开关控制，非阻塞）。
+
+        同一 key 同类错误按 ``agnes_classify_min_interval`` 去重，避免高频失败
+        反复触发模型调用；模型本身失败/超时静默，不影响主流程（补判结论只写
+        日志，供运维参考，不改变本次请求的路由决策）。
+        """
+        enabled, model, min_interval = self._agnes_classify_backoff()
+        if not enabled:
+            return
+        try:
+            now = time.time()
+            last = self._agnes_classify_ts.get(key_id, 0.0)
+            if now - last < min_interval:
+                return
+            self._agnes_classify_ts[key_id] = now
+        except Exception:
+            pass
+        text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body or "")
+        snippet = text[:500]
+
+        async def _run():
+            try:
+                result = await self._agnes_classify_call(model, status_code, snippet)
+                _lg.info(
+                    f"[key-backoff] agnes classify key_id={key_id} status={status_code} "
+                    f"-> {result} (snippet={snippet[:80]!r})"
+                )
+            except Exception as exc:  # noqa: BLE001 - 补判失败静默
+                _lg.debug(f"[key-backoff] agnes classify failed key_id={key_id}: {exc}")
+
+        try:
+            asyncio.ensure_future(_run())
+        except Exception:
+            pass
+
+    async def _agnes_classify_call(self, model: str, status_code: int, snippet: str) -> str:
+        """调 agnes 把失败响应归类成五分类标签之一（permanent/banned/rate_limit/transient/no_retry）。
+
+        走中继 /v1/chat/completions（agnes 是 chat 类上游），prompt 要求只返回
+        一个标签词；解析失败时返回 "unknown"。
+        """
+        import aiohttp as _aio
+
+        key = None
+        for k in self._keys or []:
+            if getattr(k, "model_name", "") == model:
+                key = k
+                break
+        if key is None:
+            # 没有匹配 key：走中继自调用（用主 key 命中同一模型）
+            base = "https://api.aadb.pw/v1"
+            api_key = ""
+            native = model
+            for k in self._keys or []:
+                if k.model_name and k.model_name.endswith("/" + model.split("/")[-1]):
+                    key = k
+                    break
+            if key is None:
+                return "unknown"
+            base = str(getattr(key, "upstream_base", "") or "https://api.aadb.pw/v1").rstrip("/")
+            native = str(getattr(key, "upstream_model", "") or model)
+            api_key = str(getattr(key, "api_key", "") or "")
+            url = f"{base}/v1/chat/completions"
+        else:
+            base = str(getattr(key, "upstream_base", "") or "").rstrip("/")
+            native = str(getattr(key, "upstream_model", "") or model)
+            api_key = str(getattr(key, "api_key", "") or "")
+            url = f"{base}/v1/chat/completions"
+        prompt = (
+            "Classify this upstream API error into exactly one word: "
+            "permanent (auth/balance/config), banned (firewall/block), "
+            "rate_limit (429), transient (5xx/timeout), no_retry (bad request). "
+            f"HTTP {status_code}. Body: {snippet[:400]}\nAnswer with one word only."
+        )
+        payload = {
+            "model": native,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+        }
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        async with _aio.ClientSession() as session:
+            async with session.post(
+                url, json=payload, headers=headers,
+                timeout=_aio.ClientTimeout(total=20),
+            ) as resp:
+                data = await resp.json()
+        for item in (data.get("choices") or []):
+            text = (item.get("message") or {}).get("content") or ""
+            word = text.strip().lower().split()[0] if text.strip() else ""
+            if word in ("permanent", "banned", "rate_limit", "transient", "no_retry"):
+                return word
+        return "unknown"
 
     def _multi_agent_runner(self):
         """构建子代理执行器（惰性单例）：向上游真实发起一次非流式 /v1/responses。
@@ -1946,11 +2058,13 @@ class ProxyHandler:
                         )
                         await self._aclose_quietly(upstream_gen)
                         continue
-                    _retryable = classify_failure(key, upstream_resp.status_code, upstream_headers, error_body)
-                    if _retryable:
-                        # Retryable upstream states must not park the key: the next
-                        # request gets to try it again (same rule as the non-stream path).
-                        mark_success(key)
+                    _retryable, _flabel = classify_failure_labelled(key, upstream_resp.status_code, upstream_headers, error_body)
+                    if _flabel == "unknown":
+                        # 规则盲区：异步交给 agnes 补判（非阻塞，不影响本次路由）
+                        self._maybe_agnes_classify(key.key_id, upstream_resp.status_code, error_body)
+                    # 注意：这里**不再** mark_success。v1 退避语义要求 classify 设置的
+                    # cooldown/invalid 保留到下一次请求（本次 failover 换 key 继续），
+                    # 否则刚设的冷却被立即抹掉，退避形同虚设（2026-08-15 v1）。
                     http_failed.add(key.key_id)
                     _lg.info(
                         f"[v3-stream] key_id={key.key_id} upstream status={upstream_resp.status_code} body={error_body[:300]!r}"
@@ -3142,14 +3256,14 @@ class ProxyHandler:
             resp_headers.pop("content-encoding", None)
 
         if resp.status_code >= 400:
-            should_retry = classify_failure(key, resp.status_code, resp_headers, data)
+            should_retry, _flabel = classify_failure_labelled(key, resp.status_code, resp_headers, data)
+            if _flabel == "unknown":
+                # 规则盲区：异步交给 agnes 补判（非阻塞，不影响本次路由）
+                self._maybe_agnes_classify(key.key_id, resp.status_code, data)
             _lg.info(
                 f"[v3] key_id={key.key_id} upstream status={resp.status_code} retry={should_retry} body={data[:300]!r}"
             )
-            if should_retry:
-                # Single-shot for now: the full scheduler retry loop is the
-                # T28 pass.  Keep the key healthy for the next request.
-                mark_success(key)
+            # 注意：不再 mark_success（v1 退避语义，见流式路径注释）。
             # Auto-degrade: a responses-native call (we skipped translation)
             # got a chat-only-style error ("messages is required", "expected
             # array", ...).  The model is mis-configured as protocol=responses
@@ -3478,33 +3592,62 @@ class ProxyHandler:
         except Exception:
             _lg.exception("upsert_route_binding failed")
 
+    def reactivate_key(self, key_id: int) -> bool:
+        """管理端「确认恢复」：重置指定 key 为 healthy（回分组原排名参与 failover）。
+
+        用于 permanent（欠费/配置已修）与 banned（封禁解除，提前结束长冷却）。
+        返回是否找到并重置了该 key。
+        """
+        for k in self._keys or []:
+            if k.key_id == key_id:
+                k.status = STATE_HEALTHY
+                k.cooldown_until = 0.0
+                k.backoff_level = 0
+                k.failure_class = ""
+                k.consecutive_failures = 0
+                _lg.info(f"key_id={key_id} reactivated by admin (manual confirm)")
+                return True
+        return False
+
     async def reload_keys(self) -> int:
         """Reload keys (and groups) from the store. Returns new key count.
 
-        优化点3：reload 时重置 invalid 状态。从 DB 重新加载意味着 key 可能已修复，
-        所以把 status 强制重置为 healthy（但保留学到的 rpm_limit/tpm_limit 限额）。
+        2026-08-15 v1（退避语义变更）：reload **不再重置 invalid**。
+        permanent（欠费/配置）与 banned 状态的 key 在 reload 后保持原状态——
+        只有**服务重启**或管理端「确认恢复」才回到 healthy（用户确认可用后回原排名）。
+        仍然保留学到的 rpm_limit/tpm_limit 限额，以及冷却/退避状态。
         """
         if self._load_keys_fn is not None:
             new_keys = await self._load_keys_fn()
-            # 保留旧 keys 中学到的限额（learn_rate_limits 的成果）
-            old_limits: dict[int, tuple[int, int]] = {}
+            # 保留旧 keys 中学到的限额 + 健康状态（2026-08-15 v1：invalid 不因 reload 复活）
+            old_state: dict[int, KeyHealth] = {}
             for ok in self._keys:
                 if ok.key_id > 0:  # 跳过 env/dummy key (key_id=0)
-                    old_limits[ok.key_id] = (ok.rpm_limit, ok.tpm_limit)
-            # 对新加载的 keys：重置状态但恢复学到的限额
+                    old_state[ok.key_id] = ok
             for nk in new_keys:
-                nk.status = STATE_HEALTHY
-                nk.cooldown_until = 0.0
-                nk.recent_429_count = 0
-                if nk.key_id in old_limits:
-                    old_rpm, old_tpm = old_limits[nk.key_id]
-                    # 只保留更严格的限额（学到的比配置的更小才保留）
-                    if old_rpm > 0 and (nk.rpm_limit == 0 or old_rpm < nk.rpm_limit):
-                        nk.rpm_limit = old_rpm
-                    if old_tpm > 0 and (nk.tpm_limit == 0 or old_tpm < nk.tpm_limit):
-                        nk.tpm_limit = old_tpm
+                old = old_state.get(nk.key_id)
+                if old is not None:
+                    # 保留学到的限额
+                    if old.rpm_limit > 0 and (nk.rpm_limit == 0 or old.rpm_limit < nk.rpm_limit):
+                        nk.rpm_limit = old.rpm_limit
+                    if old.tpm_limit > 0 and (nk.tpm_limit == 0 or old.tpm_limit < nk.tpm_limit):
+                        nk.tpm_limit = old.tpm_limit
                         if nk.tpm_window is not None:
-                            nk.tpm_window.limit = old_tpm
+                            nk.tpm_window.limit = old.tpm_limit
+                    # 保留健康状态（invalid/error/rate_limited + 冷却 + 退避等级 + 失败原因）
+                    if old.status != STATE_HEALTHY:
+                        nk.status = old.status
+                        nk.cooldown_until = old.cooldown_until
+                        nk.backoff_level = old.backoff_level
+                        nk.failure_class = old.failure_class
+                        nk.last_failure_at = old.last_failure_at
+                        nk.consecutive_failures = old.consecutive_failures
+                        nk.total_failures = old.total_failures
+                        nk.recent_429_count = old.recent_429_count
+                else:
+                    nk.status = STATE_HEALTHY
+                    nk.cooldown_until = 0.0
+                    nk.recent_429_count = 0
             self._keys = new_keys
         # Also reload groups so admin edits to groups take effect without restart
         if self.store is not None:
