@@ -33,12 +33,18 @@ hosted_tools:
 #   client（默认）= 仅回 tool_search_call(execution="client")，Codex 本地 BM25 命中
 #   models.json 的 multi_agent_v1 namespace；server = 外加 function_call_output
 #   把中继已知的 namespace 喂回（若 client 方案下 Codex 未暴露 spawn_agent 再切）。
+# spawn_execution: spawn_agent 执行归属（FR-9 / 增量修订 v2.0）：
+#   client（默认，方案 A）= 中继不代执行，原样透传 function_call 给 Codex 客户端，
+#     由本地 SpawnAgentHandler 执行（子代理推理走普通 /v1/responses）；消除
+#     23:08 冒烟日志的 unexpected tool output（内联 fco 违反客户端契约）。
+#   server（方案 B 兜底）= 保留中继代执行（FR-3），fco 回传子代理产物（FR-10）。
 multi_agent:
   enabled: false
   max_threads: 4
   job_max_runtime_seconds: 1800
   minimal_client_version: "0.144.0"
   tool_search_mode: "client"
+  spawn_execution: "client"
 
 # ---------------------------------------------------------------------------
 # Key 失败退避 + agnes 异步补判（2026-08-15 v1）

@@ -240,6 +240,7 @@ class ResponsePipeline:
         multi_agent: Any | None = None,
         tool_search_enabled: bool = False,
         tool_search_mode: str = "client",
+        spawn_execution: str = "client",
     ) -> None:
         self.response_id = response_id
         self.workspace_id = workspace_id
@@ -255,6 +256,9 @@ class ResponsePipeline:
         self._multi_agent = multi_agent
         #: 是否合成 ``tool_search_output``（FR-1 / FR-2）。关闭时 tool_search 透传。
         self._tool_search_enabled = bool(tool_search_enabled)
+        #: spawn_agent 执行归属（FR-9 / v2.0）：``"client"`` 透传（方案 A，默认）/
+        #: ``"server"`` 中继代执行（方案 B 兜底）。
+        self._spawn_execution = spawn_execution or "client"
         #: tool_search 结果回传形态（FR-2.1 / 附录 C.10.3）："client"（方案 A，仅
         #: tool_search_call）| "server"（方案 B，外加 function_call_output 兜底）。
         self._tool_search_mode = tool_search_mode if tool_search_mode in ("client", "server") else "client"
@@ -715,13 +719,22 @@ class ResponsePipeline:
             fc_idx = self._next_output_index()
             frames.extend(await self._emit_special_item(fc_idx, fc_item))
             self._synthesized_items.append((fc_idx, fc_item))
-            # 2) 执行子代理生命周期并回传 function_call_output。
-            out_idx = self._next_output_index()
-            result = await self._multi_agent.handle(
-                MULTI_AGENT_NAMESPACE, name, call_id, sc["args"], output_index=out_idx,
-            )
-            frames.extend(await self._emit_special_item(out_idx, result))
-            self._synthesized_items.append((out_idx, result))
+            if self._spawn_execution == "server":
+                # 2) 方案 B（server 代执行兜底，FR-9 兜底路径）：中继执行子代理
+                #    生命周期并回传 function_call_output（FR-10 保证含子代理产物）。
+                out_idx = self._next_output_index()
+                result = await self._multi_agent.handle(
+                    MULTI_AGENT_NAMESPACE, name, call_id, sc["args"], output_index=out_idx,
+                )
+                frames.extend(await self._emit_special_item(out_idx, result))
+                self._synthesized_items.append((out_idx, result))
+            else:
+                # 方案 A（client 透传，FR-9 推荐）：**不执行、不内联 fco**——把
+                # function_call 原样透传给 Codex 客户端，由本地 SpawnAgentHandler
+                # 执行；子代理推理走普通 /v1/responses 路由；客户端回贴 fco 后
+                # 下一轮透传上游续写（标准两轮契约）。内联 fco 会让客户端报
+                # ``unexpected tool output from stream``（23:08 真冒烟铁证）。
+                pass
         else:
             # 防御：未启用却进入特殊收尾（正常不会发生，_special_kind 已把关）。
             return None

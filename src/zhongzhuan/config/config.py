@@ -178,6 +178,15 @@ class MultiAgentConfig:
     #: ``"server"``（方案 B）——外加 ``function_call_output(output={tools:[namespace]})``
     #:   兜底，把中继已知的 namespace 作为搜索结果喂回。
     tool_search_mode: str = "client"
+    #: spawn_agent 执行归属（FR-9 / 增量修订 v2.0，默认 client = 方案 A）：
+    #: ``"client"``（方案 A，推荐）——中继**不代执行** spawn_agent，把
+    #:   ``function_call`` 原样透传给 Codex 客户端，由本地 ``SpawnAgentHandler``
+    #:   执行；子代理推理请求走普通 /v1/responses 路由（同父代理）。消除
+    #:   23:08 真冒烟日志的 ``unexpected tool output`` / ``failed to parse``
+    #:   （内联 fco 违反客户端契约）与 fco 只回 status 无内容的问题。
+    #: ``"server"``（方案 B，兜底）——保留中继代执行（FR-3），但 fco 必须回传
+    #:   子代理 output-last-message（FR-10），供团长综合。
+    spawn_execution: str = "client"
 
 
 @dataclass
@@ -394,6 +403,7 @@ def _schema_to_config(s: StrictConfig) -> Config:
             job_max_runtime_seconds=int(s.multi_agent.job_max_runtime_seconds),
             minimal_client_version=str(s.multi_agent.minimal_client_version),
             tool_search_mode=str(s.multi_agent.tool_search_mode),
+            spawn_execution=str(s.multi_agent.spawn_execution),
         ),
     )
 

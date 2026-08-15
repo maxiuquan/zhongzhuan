@@ -234,6 +234,9 @@ class MultiAgentSchema(BaseModel):
     minimal_client_version: str = "0.144.0"
     #: tool_search 结果回传形态（FR-2.1 / 附录 C.10.3）：client（方案 A，默认）| server（方案 B）。
     tool_search_mode: Literal["client", "server"] = "client"
+    #: spawn_agent 执行归属（FR-9 / 增量修订 v2.0）：client（方案 A，透传给客户端
+    #: 本地 SpawnAgentHandler，默认）| server（方案 B，中继代执行兜底）。
+    spawn_execution: Literal["client", "server"] = "client"
 
 
 class CorsSchema(BaseModel):

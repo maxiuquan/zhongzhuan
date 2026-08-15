@@ -1276,6 +1276,16 @@ class ProxyHandler:
             mode = "client"
         return mode if mode in ("client", "server") else "client"
 
+    def _spawn_execution_mode(self) -> str:
+        """spawn_agent 执行归属（FR-9 / v2.0）：client（透传，默认）| server（代执行）。"""
+        try:
+            from ..config import default_config
+
+            mode = str(default_config().multi_agent.spawn_execution or "client")
+        except Exception:
+            mode = "client"
+        return mode if mode in ("client", "server") else "client"
+
     def _multi_agent_active(self) -> bool:
         """V1 多代理是否激活：两个开关（hosted_tools.tool_search_enabled 与
         multi_agent.enabled）必须同时为真，避免「只开其一」的半残状态。"""
@@ -1620,18 +1630,26 @@ class ProxyHandler:
             if orchestrator is not None and itype == "function_call" and (
                 ns == MULTI_AGENT_NAMESPACE or name in MULTI_AGENT_TOOLS
             ):
-                result = await orchestrator.handle(
-                    MULTI_AGENT_NAMESPACE, name, call_id, item.get("arguments") or "{}",
-                    output_index=idx + 1,
-                )
                 fc_item = dict(item)
                 fc_item["status"] = "completed"
                 fc_item["namespace"] = MULTI_AGENT_NAMESPACE
                 fc_item.pop("arguments", None)
                 new_output.append(fc_item)
                 idx += 1
-                new_output.append(result)
-                idx += 1
+                if self._spawn_execution_mode() == "server":
+                    # 方案 B（server 代执行兜底，FR-9）：执行并内联 fco。
+                    # 注意：内联 fco 会让 Codex 客户端报 "unexpected tool output
+                    # from stream"（23:08 真冒烟铁证）——该路径仅作为无法走通
+                    # client 透传时的兜底，且 FR-10 保证 fco 含子代理产物。
+                    result = await orchestrator.handle(
+                        MULTI_AGENT_NAMESPACE, name, call_id, item.get("arguments") or "{}",
+                        output_index=idx,
+                    )
+                    new_output.append(result)
+                    idx += 1
+                # 方案 A（client 透传，默认）：不执行、不内联 fco——原样透传
+                # function_call，客户端本地 SpawnAgentHandler 执行后回贴 fco，
+                # 下一轮透传上游续写（标准两轮契约）。
                 continue
             new_output.append(item)
         resp_obj["output"] = new_output
@@ -2126,6 +2144,7 @@ class ProxyHandler:
                 multi_agent=orchestrator,
                 tool_search_enabled=ma_active,
                 tool_search_mode=self._multi_agent_tool_search_mode(),
+                spawn_execution=self._spawn_execution_mode(),
             )
             cancelled = asyncio.Event()
             _pc = self._v3_pipeline_config()  # AC-7.4

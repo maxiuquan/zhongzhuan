@@ -325,8 +325,10 @@ async def test_pipeline_tool_search_disabled_passthrough():
 
 
 async def test_pipeline_multi_agent_executed():
+    # server 模式（方案 B 兜底）：中继代执行并内联 fco。
     orch = MultiAgentOrchestrator(runner=_fake_runner, default_model="m1")
-    pipe = ResponsePipeline("resp_ma", multi_agent=orch, tool_search_enabled=False)
+    pipe = ResponsePipeline("resp_ma", multi_agent=orch, tool_search_enabled=False,
+                            spawn_execution="server")
     args = json.dumps({"instruction": "sub", "model": "", "session_id": "s1"})
     frames = await _collect(pipe, [
         {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
@@ -345,10 +347,33 @@ async def test_pipeline_multi_agent_executed():
     assert "agent_id" in json.loads(fco["output"])
 
 
+async def test_pipeline_multi_agent_client_passthrough_no_fco():
+    # client 模式（方案 A，FR-9 推荐，默认）：中继不代执行、不内联 fco——
+    # function_call 原样透传，等客户端本地 SpawnAgentHandler 执行后回贴。
+    orch = MultiAgentOrchestrator(runner=_fake_runner)
+    pipe = ResponsePipeline("resp_ma_c", multi_agent=orch, tool_search_enabled=False,
+                            spawn_execution="client")
+    args = json.dumps({"instruction": "sub", "session_id": "s1"})
+    frames = await _collect(pipe, [
+        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
+         "namespace": MULTI_AGENT_NAMESPACE, "arguments": args},
+        {"type": "tool_call_done", "call_id": "c1", "arguments": args},
+    ])
+    items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
+    # 回显 function_call（带 namespace + arguments，客户端据此执行）。
+    fc = next((it for it in items if it["type"] == "function_call"
+               and it.get("namespace") == MULTI_AGENT_NAMESPACE), None)
+    assert fc is not None
+    assert fc.get("arguments") is not None  # 透传必须保留参数
+    # 绝无内联 function_call_output（内联会让客户端报 unexpected tool output）。
+    assert all(it["type"] != "function_call_output" for it in items)
+
+
 async def test_pipeline_multi_agent_namespaced_flat_name():
     # 摊平风格名字 mcp__multi_agent_v1__-spawn_agent 也能被识别。
     orch = MultiAgentOrchestrator(runner=_fake_runner)
-    pipe = ResponsePipeline("resp_flat", multi_agent=orch, tool_search_enabled=False)
+    pipe = ResponsePipeline("resp_flat", multi_agent=orch, tool_search_enabled=False,
+                            spawn_execution="server")
     args = json.dumps({"instruction": "sub", "session_id": "s1"})
     frames = await _collect(pipe, [
         {"type": "tool_call", "call_id": "c1", "name": "mcp__multi_agent_v1__-spawn_agent",
@@ -364,7 +389,8 @@ async def test_pipeline_multi_agent_upstream_flattened_name():
     # 上游自行摊平的形态 multi_agent_v1-spawn_agent 也要被识别并执行
     # （2026-08-15 流式探针 P2 实证：部分上游把 namespace 摊平成 {ns}-{subtool} 命名）。
     orch = MultiAgentOrchestrator(runner=_fake_runner)
-    pipe = ResponsePipeline("resp_upflat", multi_agent=orch, tool_search_enabled=False)
+    pipe = ResponsePipeline("resp_upflat", multi_agent=orch, tool_search_enabled=False,
+                            spawn_execution="server")
     args = json.dumps({"instruction": "sub", "session_id": "s1"})
     frames = await _collect(pipe, [
         {"type": "tool_call", "call_id": "c1", "name": "multi_agent_v1-spawn_agent",
@@ -387,7 +413,8 @@ def test_pipeline_output_items_include_synthesized():
 
     async def _run():
         orch = MultiAgentOrchestrator(runner=_fake_runner)
-        pipe = ResponsePipeline("resp_out", multi_agent=orch, tool_search_enabled=True)
+        pipe = ResponsePipeline("resp_out", multi_agent=orch, tool_search_enabled=True,
+                                spawn_execution="server")
         args = json.dumps({"instruction": "sub", "session_id": "s1"})
         for chunk in [
             {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME,
@@ -405,7 +432,7 @@ def test_pipeline_output_items_include_synthesized():
     assert "tool_search_output" not in types  # 26.803 不认顶级形态（C.7）
     assert "tool_search_call" in types        # FR-2.1：tool_search 改写形态
     assert "function_call" in types           # spawn 回显
-    assert "function_call_output" in types    # spawn 的 fco
+    assert "function_call_output" in types    # spawn 的 fco（server 模式代执行）
 
 
 # ---------------------------------------------------------------------------
