@@ -1286,37 +1286,41 @@ class ProxyHandler:
         """
         if not instruction:
             return ""
-        # 挑与父模型同一 slug 的 key（model_name == model，model 即父模型 slug，
-        # spawn_agent.arguments.model 的角色模型 override 同样落在这条匹配上，
-        # 天然满足 FR-4）。不盲取 _keys[0]：可能挑到别的 provider 的 key
-        # （2026-08-15 实测：打到 macc.eu.cc 的 agnes 上、404、产出恒空）。
+        # 挑与父模型同一 provider 的 key。model 是父模型 slug（juhe/mimo-v2.5-pro
+        # 或 spawn_agent.arguments.model 的角色模型）；分组模型的 key 的 model_name
+        # 是成员/provider slug（如 zz-slomerex/mimo-v2.5-pro），所以先精确匹配、
+        # 再按 basename 后缀匹配（2026-08-15 实测：精确匹配对分组 slug 恒失败，
+        # 兜底挑到了 macc.eu.cc 的 agnes——能出结果但 provider 不对）。
+        def _usable(k) -> bool:
+            return bool(getattr(k, "upstream_base", "") and getattr(k, "upstream_model", ""))
+
+        target_base = model.rsplit("/", 1)[-1] if model else ""
         key = next(
             (
                 k
                 for k in (self._keys or [])
-                if k.model_name == model
-                and getattr(k, "upstream_base", "")
-                and getattr(k, "upstream_model", "")
+                if _usable(k)
+                and (
+                    k.model_name == model
+                    or (target_base and k.model_name.endswith("/" + target_base))
+                    or (target_base and k.model_name == target_base)
+                )
             ),
             None,
         )
         if key is None:
             _lg.warning(
-                f"multi_agent sub-agent: no key for model_name={model!r}; "
+                f"multi_agent sub-agent: no key for model={model!r} (basename={target_base!r}); "
                 f"falling back to first usable key"
             )
-            key = next(
-                (
-                    k
-                    for k in (self._keys or [])
-                    if getattr(k, "upstream_base", "")
-                    and getattr(k, "upstream_model", "")
-                ),
-                None,
-            )
+            key = next((k for k in (self._keys or []) if _usable(k)), None)
         if key is None:
             _lg.warning("multi_agent sub-agent: no key with upstream_base/upstream_model available")
             return ""
+        _lg.info(
+            f"multi_agent sub-agent picked key_id={getattr(key, 'key_id', '?')} "
+            f"model_name={getattr(key, 'model_name', '')} for model={model!r}"
+        )
         base = str(getattr(key, "upstream_base", "") or "").rstrip("/")
         native_model = str(getattr(key, "upstream_model", "") or "")
         path = str(getattr(key, "upstream_path_override", "") or "")
