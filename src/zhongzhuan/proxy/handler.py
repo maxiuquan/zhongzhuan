@@ -714,6 +714,40 @@ def _swap_model_name(raw_body: bytes, old_name: str, new_name: str) -> bytes:
     return json.dumps(obj, ensure_ascii=False).encode()
 
 
+def _extract_usage_from_chat_stream_chunk(chunk: bytes) -> dict | None:
+    """Pull a Chat Completions ``usage`` block out of one raw SSE chunk.
+
+    When an upstream runs with ``stream_options.include_usage=true`` the final
+    chunk carries ``{"choices": [], "usage": {...}}``.  The legacy
+    ``_stream_proxy`` passthrough path has no translator (``need_translation``
+    is False for an OpenAI→OpenAI hop), so the token usage was always 0/0 in
+    request_logs / dashboard.  This helper gives that path the same usage the
+    translated paths already get.
+
+    Returns ``None`` when the chunk carries no usage (text / tool delta / keep
+    alive / malformed).  Deliberately tolerant: a broken frame is skipped, never
+    fatal.
+    """
+    if not chunk or b"usage" not in chunk:
+        return None
+    for line in chunk.split(b"\n"):
+        line = line.strip()
+        if not line.startswith(b"data:"):
+            continue
+        payload = line[len(b"data:") :].strip()
+        if not payload or payload == b"[DONE]":
+            continue
+        try:
+            obj = json.loads(payload)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict):
+            usage = obj.get("usage")
+            if isinstance(usage, dict) and usage:
+                return usage
+    return None
+
+
 class ProxyHandler:
     """Handles /v1/* (chat/completions, messages, models) with retry + protocol translation."""
 
@@ -2178,9 +2212,16 @@ class ProxyHandler:
                 _key_succeeded = True
                 break
             if _key_succeeded:
-                break
-            # else: inner loop exited via `break` (network error / retryable
-            # non-RE 4xx / 5xx) → try the next candidate key.
+                # 成功（上游已 200 且响应已就绪）：**继续**走下面的
+                # adapter/pipeline 消费（A8 起），把真实流式内容交给客户端。
+                # 不能 break 外层 for —— 那会跳过消费、直接落进非流降级
+                # （b0f758a 重构引入的回归：生产上 8-15 起 188 次
+                # "non-stream fallback OK" 全是这个 break 的产物）。
+                pass
+            else:
+                # inner loop exited via `break` (network error / retryable
+                # non-RE 4xx / 5xx) → try the next candidate key.
+                continue
 
             # A8. ---- Phase A 结束：从这里开始状态码是 200。 ----
             adapter = UpstreamSSEChunkAdapter.for_protocol(
@@ -2273,8 +2314,12 @@ class ProxyHandler:
                     self._set_sticky(session_key, key.key_id, required_caps)
                     asyncio.create_task(self._persist_sticky_binding(session_key, key.key_id, required_caps))
                 status = pipeline.state if pipeline.state in ("completed", "failed", "incomplete") else "incomplete"
-                # 流式成功（已向客户端提交内容）：记 200。token 用量 v3 流
-                # 路径暂无可靠来源，记 0/0（请求数/成功率/延迟已足够驱动仪表盘）。
+                # 流式成功（已向客户端提交内容）：记 200。token 用量取自上游
+                # 终态事件（adapter.usage：native responses 的 response.completed
+                # 或 chat 流的 usage chunk）。上游未上报时回落 0/0，不阻塞日志。
+                _stream_u = adapter.usage if isinstance(adapter.usage, dict) else {}
+                _stream_tin = int(_stream_u.get("input_tokens") or _stream_u.get("prompt_tokens") or 0)
+                _stream_tout = int(_stream_u.get("output_tokens") or _stream_u.get("completion_tokens") or 0)
                 self._v3_log_request(
                     request=request,
                     model_name=ctx.requested_model or "",
@@ -2282,6 +2327,8 @@ class ProxyHandler:
                     key_id=key.key_id,
                     status=200,
                     latency_ms=int((time.time() - t0) * 1000),
+                    tokens_in=_stream_tin,
+                    tokens_out=_stream_tout,
                     outbound_protocol=call.outbound_protocol,
                     translated=call.need_translation,
                 )
@@ -3168,6 +3215,13 @@ class ProxyHandler:
                     translated_req["stream"] = True
                 else:
                     translated_req.pop("stream", None)
+                # 流式翻译路径同样强制 include_usage：上游只在显式请求时才回
+                # usage chunk，否则 v3 流式成功路径从 adapter.usage 提取到的
+                # 恒为空、request_logs / 仪表盘 token 记 0（2026-08-16 实证）。
+                if stream and outbound_protocol == "openai" and isinstance(translated_req, dict):
+                    so = translated_req.setdefault("stream_options", {})
+                    if not so.get("include_usage"):
+                        so["include_usage"] = True
                 if key.upstream_model:
                     translated_req["model"] = key.upstream_model
                 if _pending_frag:
@@ -4660,6 +4714,14 @@ class ProxyHandler:
 
                         headers["Content-Length"] = str(len(final_body))
                     else:
+                        # 无需翻译（如 OpenAI→OpenAI 直通）：透传请求体，但流式
+                        # 场景强制 include_usage，否则上游不回 usage chunk、后台
+                        # 日志/仪表盘的 token 恒为 0（2026-08-16 线上实证）。
+                        if isinstance(body_obj_s, dict) and body_obj_s.get("stream") is True:
+                            body_obj_s = dict(body_obj_s)
+                            so = body_obj_s.setdefault("stream_options", {})
+                            if not so.get("include_usage"):
+                                so["include_usage"] = True
                         final_body = json.dumps(body_obj_s, ensure_ascii=False).encode()
                         if requested_model and k.upstream_model and requested_model != k.upstream_model:
                             final_body = _swap_model_name(final_body, requested_model, k.upstream_model)
@@ -4771,6 +4833,10 @@ class ProxyHandler:
                                     stream_translator = StreamA2O(model=requested_model or "")
 
                             chunk_count = 0
+                            # 无 translator 的透传路径（OpenAI→OpenAI）：上游
+                            # include_usage=true 时末 chunk 带 usage，从这里收集，
+                            # 供下方日志/配额使用（2026-08-16 之前恒为 0/0）。
+                            _raw_stream_usage: dict | None = None
                             try:
                                 async for chunk in upstream_resp.aiter_raw():
                                     if chunk:
@@ -4780,6 +4846,8 @@ class ProxyHandler:
                                                 await resp.write(tc)
                                         else:
                                             await resp.write(chunk)
+                                            if _raw_stream_usage is None:
+                                                _raw_stream_usage = _extract_usage_from_chat_stream_chunk(chunk)
                                         chunk_count += 1
                             except (ConnectionResetError, ConnectionError, OSError):
                                 _lg.warning(
@@ -4802,7 +4870,9 @@ class ProxyHandler:
                             _lg.info(f"[{id(request):x}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)")
                             mark_success(k)
 
-                            # 流式响应的 token 用量：尝试从 stream_translator 提取
+                            # 流式响应的 token 用量：优先从 stream_translator 提取
+                            # （翻译路径）；透传路径（无 translator）回落上游
+                            # usage chunk（_raw_stream_usage）。
                             _stream_tokens_in = 0
                             _stream_tokens_out = 0
                             if stream_translator and hasattr(stream_translator, "usage"):
@@ -4810,6 +4880,17 @@ class ProxyHandler:
                                 if isinstance(_u, dict):
                                     _stream_tokens_in = int(_u.get("prompt_tokens", 0))
                                     _stream_tokens_out = int(_u.get("completion_tokens", 0))
+                            elif _raw_stream_usage:
+                                _stream_tokens_in = int(
+                                    _raw_stream_usage.get("prompt_tokens")
+                                    or _raw_stream_usage.get("input_tokens")
+                                    or 0
+                                )
+                                _stream_tokens_out = int(
+                                    _raw_stream_usage.get("completion_tokens")
+                                    or _raw_stream_usage.get("output_tokens")
+                                    or 0
+                                )
                             if _stream_tokens_in or _stream_tokens_out:
                                 k.record_tokens(_stream_tokens_in, _stream_tokens_out)
 

@@ -966,6 +966,106 @@ def test_server_startup_writes_the_audit_line():
         assert field in line, line
 
 
+# ---------------------------------------------------------------------------
+# FR-12.5: v3 流式路径把上游 usage 写进 request_logs（不再记 0/0）
+# ---------------------------------------------------------------------------
+
+
+def test_adapter_captures_chat_usage_chunk():
+    """Chat Completions 的 usage-only chunk 被归一化捕获为 input/output tokens."""
+    from zhongzhuan.responses_v3.upstream_chunk_adapter import UpstreamSSEChunkAdapter
+
+    adapter = UpstreamSSEChunkAdapter.for_protocol("openai")
+    assert adapter.usage == {}
+    # ``include_usage=true`` 的最后一个 chunk：``choices`` 为空数组 + ``usage``。
+    adapter._capture_usage({"choices": [], "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15}})
+    assert adapter.usage == {"input_tokens": 11, "output_tokens": 4, "total_tokens": 15}
+
+
+def test_adapter_captures_native_responses_completed_usage():
+    """Native ``response.completed`` 的 usage 嵌套在 ``response`` 容器里，也要捕获."""
+    from zhongzhuan.responses_v3.upstream_chunk_adapter import UpstreamSSEChunkAdapter
+
+    adapter = UpstreamSSEChunkAdapter.for_protocol("responses", native=True)
+    adapter._capture_usage(
+        {
+            "type": "response.completed",
+            "response": {"id": "resp_1", "status": "completed", "usage": {"input_tokens": 21, "output_tokens": 9}},
+        }
+    )
+    assert adapter.usage == {"input_tokens": 21, "output_tokens": 9}
+
+
+def test_adapter_ignores_payload_without_usage():
+    """没有 usage 的普通内容帧不产生 usage 状态."""
+    from zhongzhuan.responses_v3.upstream_chunk_adapter import UpstreamSSEChunkAdapter
+
+    adapter = UpstreamSSEChunkAdapter.for_protocol("openai")
+    adapter._capture_usage({"choices": [{"delta": {"content": "hi"}}]})
+    assert adapter.usage == {}
+
+
+def test_extract_usage_from_chat_stream_chunk():
+    """透传路径（无 translator）从上游 SSE chunk 提取 usage 块."""
+    from zhongzhuan.proxy.handler import _extract_usage_from_chat_stream_chunk
+
+    # usage-only chunk（include_usage=true 的最后一个 chunk）。
+    chunk = b'data: {"id":"c1","choices":[],"usage":{"prompt_tokens":11,"completion_tokens":4,"total_tokens":15}}\n\n'
+    assert _extract_usage_from_chat_stream_chunk(chunk) == {
+        "prompt_tokens": 11,
+        "completion_tokens": 4,
+        "total_tokens": 15,
+    }
+    # 普通文本 delta chunk 无 usage → None。
+    assert _extract_usage_from_chat_stream_chunk(b'data: {"id":"c1","choices":[{"delta":{"content":"hi"}}]}\n\n') is None
+    # [DONE] 哨兵 → None。
+    assert _extract_usage_from_chat_stream_chunk(b"data: [DONE]\n\n") is None
+    # 无 data 前缀 / 空 chunk → None。
+    assert _extract_usage_from_chat_stream_chunk(b": keep-alive\n\n") is None
+    assert _extract_usage_from_chat_stream_chunk(b"") is None
+
+
+async def _wait_request_log_tokens(store, *, timeout: float = 5.0) -> tuple[int, int] | None:
+    """轮询 request_logs，等待 fire-and-forget 日志写入（tokens_in, tokens_out）。"""
+    import asyncio
+
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        row = await store.fetchone("SELECT tokens_in, tokens_out FROM request_logs ORDER BY id DESC LIMIT 1")
+        if row is not None:
+            return int(row[0] or 0), int(row[1] or 0)
+        await asyncio.sleep(0.02)
+    return None
+
+
+@pytest.mark.asyncio
+async def test_stream_success_writes_real_tokens_to_request_logs(astore):
+    """v3 流式成功路径把上游 usage 写进 request_logs（此前恒为 0/0）。
+
+    mock 上游 ``openai_text_stream()`` 默认 ``include_usage=True``，最后一个
+    chunk 携带 ``{"prompt_tokens": 11, "completion_tokens": 4}``。断言日志里
+    出现 11/4，而不是旧的 0/0——这是仪表盘 token 图的唯一数据源。
+    """
+    up = MockUpstream()
+    up.set_behavior(UpstreamBehavior(stream_payload=openai_text_stream(pieces=("ok",))))
+    await up.start()
+    port, runner, upstream, token = await _start_proxy(up.url, astore)
+    try:
+        status, _ctype, raw = await _stream(port, {"model": "gpt-4o", "input": "hi", "stream": True}, token)
+        assert status == 200, raw
+        _assert_lifecycle_unique(raw)
+
+        got = await _wait_request_log_tokens(astore)
+        assert got is not None, "request_logs 始终没有写入（fire-and-forget 超时）"
+        tokens_in, tokens_out = got
+        assert tokens_in == 11, f"tokens_in={tokens_in}, 期望 11"
+        assert tokens_out == 4, f"tokens_out={tokens_out}, 期望 4"
+    finally:
+        await runner.cleanup()
+        await upstream.close()
+        await up.stop()
+
+
 def test_startup_audit_logging_stays_bounded():
     """Startup logging must stay bounded — a verbose dump deadlocks boot.
 

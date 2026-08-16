@@ -89,7 +89,7 @@ class UpstreamSSEChunkAdapter:
     response, matching the lifetime of the :class:`SSEParser` it owns.
     """
 
-    __slots__ = ("_protocol", "_parser", "_finished", "_open_tools", "_closed_tools")
+    __slots__ = ("_protocol", "_parser", "_finished", "_open_tools", "_closed_tools", "_usage")
 
     def __init__(self, protocol: str = PROTOCOL_OPENAI) -> None:
         self._protocol: str = (protocol or PROTOCOL_OPENAI).strip().lower()
@@ -102,6 +102,11 @@ class UpstreamSSEChunkAdapter:
         #: source indices already closed, so a terminator is never duplicated
         #: (a second ``output_item.done`` would break 铁律 3).
         self._closed_tools: set[int] = set()
+        #: Usage captured from the upstream terminal event (native Responses
+        #: ``response.completed``) or the final Chat Completions chunk.  Filled
+        #: by :meth:`_capture_usage`, read by the caller after the stream is
+        #: consumed so request_logs gets real token counts (was always 0/0).
+        self._usage: dict[str, Any] = {}
 
     # -- construction ------------------------------------------------------
 
@@ -131,6 +136,48 @@ class UpstreamSSEChunkAdapter:
     def saw_finish(self) -> bool:
         """Whether a positive completion signal has already been emitted."""
         return self._finished
+
+    @property
+    def usage(self) -> dict[str, Any]:
+        """Usage observed from the upstream terminal / final chunk.
+
+        Returns a normalized ``{"input_tokens": int, "output_tokens": int}``
+        dict (0 when the upstream never sent usage).  Empty until the stream
+        reaches its terminal event, so it must be read only after the caller
+        has consumed the full chunk stream.
+        """
+        return self._usage
+
+    def _capture_usage(self, payload: dict[str, Any]) -> None:
+        """Normalize + retain upstream usage so the caller can log real tokens.
+
+        Accepts either the Responses shape (``input_tokens`` / ``output_tokens``
+        / ``total_tokens``) or the Chat Completions shape (``prompt_tokens`` /
+        ``completion_tokens`` / ``total_tokens``).  Native Responses terminal
+        events nest usage inside a ``response`` container; the Chat Completions
+        usage chunk carries it at the top level.  The last one seen wins, which
+        for Chat Completions is the final chunk carrying ``usage``.
+        """
+        usage = payload.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            resp_container = payload.get("response")
+            if isinstance(resp_container, dict):
+                usage = resp_container.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            return
+        norm: dict[str, Any] = {}
+        for in_key in ("input_tokens", "prompt_tokens"):
+            if in_key in usage:
+                norm["input_tokens"] = _int_or(usage.get(in_key), 0)
+                break
+        for out_key in ("output_tokens", "completion_tokens"):
+            if out_key in usage:
+                norm["output_tokens"] = _int_or(usage.get(out_key), 0)
+                break
+        if "total_tokens" in usage:
+            norm["total_tokens"] = _int_or(usage.get("total_tokens"), 0)
+        if norm:
+            self._usage = norm
 
     # -- the stream --------------------------------------------------------
 
@@ -212,6 +259,11 @@ class UpstreamSSEChunkAdapter:
         chunks: list[dict[str, Any]] = []
         choices = payload.get("choices")
         if not isinstance(choices, list):
+            # Usage-only chunk: ``{"usage": {...}}`` with no choices (sent when
+            # ``stream_options.include_usage=true``).  No content to forward,
+            # but the tokens must not be lost.
+            if "usage" in payload:
+                self._capture_usage(payload)
             return chunks
         for choice in choices:
             if not isinstance(choice, dict):
@@ -229,6 +281,9 @@ class UpstreamSSEChunkAdapter:
                 # Chat Completions has no per-call terminator: finish_reason is
                 # the only point at which the arguments are known to be final.
                 chunks.extend(self._finish())
+        # Some upstreams attach ``usage`` on the final chunk *with* choices.
+        if "usage" in payload:
+            self._capture_usage(payload)
         return chunks
 
     def _openai_tool_calls(self, tool_calls: Any) -> list[dict[str, Any]]:
@@ -268,6 +323,10 @@ class UpstreamSSEChunkAdapter:
         if event in _ANTHROPIC_STOP_EVENTS:
             return self._finish()
         if event == "message_delta":
+            # Anthropic reports final usage on ``message_delta``.  Keep it even
+            # when this delta is not a stop signal (multi-stop streams).
+            if isinstance(payload.get("usage"), dict):
+                self._capture_usage(payload)
             delta = payload.get("delta")
             if isinstance(delta, dict) and delta.get("stop_reason"):
                 return self._finish()
@@ -357,6 +416,10 @@ class UpstreamSSEChunkAdapter:
         if etype == "response.function_call_arguments.done":
             return self._close_tool(_int_or(payload.get("output_index"), 0))
         if etype in _NATIVE_TERMINAL_EVENTS:
+            # ``response.completed`` / ``failed`` / ``incomplete`` carry the
+            # usage block (usually nested under ``response``).  Capture it so
+            # the caller can write real tokens into request_logs instead of 0/0.
+            self._capture_usage(payload)
             return self._finish()
         return []
 
