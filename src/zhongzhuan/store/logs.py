@@ -210,6 +210,19 @@ async def get_usage_stats(s: Store, days: int = 7) -> dict:
     except Exception:
         # 模型表不可用时不丢弃数据，仅保留 SQL 聚合结果。
         pass
+    # groups 表存的是**客户端视角**的分组名（request_logs.model_name 的
+    # ``(`` 前部分，如 ``juhe/mimo-v2.5-pro``），models 表存的则是上游名
+    # （如 ``vercel/mimo-v2.5-pro``）——两表语义不同层。客户端请求的"模型
+    # 名"通常对应 group name，单看 models 会把全部客户端行剔掉、by_model
+    # 渲染空（2026-08-17 用户报）。这里合并两组。
+    try:
+        from .groups import list_groups
+
+        for g in await list_groups(s):
+            if g.get("name"):
+                configured_names.add(g["name"])
+    except Exception:
+        pass
     by_model: list[dict] = []
     # request_logs.model_name 写入格式是「客户端模型(上游模型)」（参见
     # _log_and_deduct 的入参约定）。``get_usage_stats`` 历史上把整串拿去
