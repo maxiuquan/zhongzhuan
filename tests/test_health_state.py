@@ -188,11 +188,51 @@ class TestClassifyLabel:
         cases = [
             (400, b'{"error":{"code":"model_not_found"}}'),
             (500, b'{"error":{"message":"No available channel for model x"}}'),
-            (402, '{"error":"INSUFFICIENT_BALANCE","message":"请充值 topup"}'.encode("utf-8")),
             (401, b'{"error":{"message":"Invalid token"}}'),
         ]
         for status, body in cases:
             assert classify_label(status, {}, body) == CLASS_PERMANENT, (status, body)
+
+    def test_balance_body_keywords_and_bare_402(self):
+        """402 欠费/免费额度用尽 → balance（长冷却自动恢复），不是永久 invalid。
+
+        2026-08-17 线上实证：把 insufficient_balance 归为永久失效会让免费 key
+        池逐渐萎缩（mimo 组 31 key → 可用 2），上游一抖动就整组 502。
+        """
+        from zhongzhuan.proxy.retry import classify_label
+        from zhongzhuan.proxy.ratelimit import CLASS_BALANCE, CLASS_PERMANENT
+
+        # body 关键字（INSUFFICIENT_BALANCE / topup / 中文充值文案）
+        cases = [
+            (402, '{"error":"INSUFFICIENT_BALANCE","message":"请充值 topup"}'.encode("utf-8")),
+            (400, b'{"error":{"message":"insufficient balance, please topup"}}'),
+            (402, b'{"error":{"message":"Your balance is insufficient"}}'),
+        ]
+        for status, body in cases:
+            assert classify_label(status, {}, body) == CLASS_BALANCE, (status, body)
+        # 裸 402（无 body 关键字）也归 balance——402 语义就是 Payment Required
+        assert classify_label(402, {}, b"") == CLASS_BALANCE
+        # 401 仍是永久（密钥级问题，不是余额）
+        assert classify_label(401, {}, b"") == CLASS_PERMANENT
+
+    def test_mark_balance_depleted_long_cooldown_auto_recovers(self):
+        """mark_balance_depleted：STATE_ERROR + 1h 冷却，到期 is_available 自动恢复。"""
+        from zhongzhuan.proxy.retry import classify_failure, mark_balance_depleted
+        from zhongzhuan.proxy.ratelimit import (
+            KeyHealth, SlidingWindow, STATE_ERROR, CLASS_BALANCE, BALANCE_COOLDOWN_SECONDS,
+        )
+
+        k = KeyHealth(key_id=1, api_key="sk-x", window=SlidingWindow(60, 0))
+        retryable = classify_failure(k, 402, {}, b'{"error":"INSUFFICIENT_BALANCE"}')
+        assert retryable is True  # 可重试（换 key）
+        assert k.status == STATE_ERROR
+        assert k.failure_class == CLASS_BALANCE
+        # 冷却 ~1h 内不可用
+        assert not k.is_available()
+        assert 0 < k.cooldown_until - time.time() <= BALANCE_COOLDOWN_SECONDS
+        # 到期自动恢复（无需管理端干预）
+        k.cooldown_until = time.time() - 1
+        assert k.is_available()
 
     def test_banned_cloudflare(self):
         from zhongzhuan.proxy.retry import classify_label

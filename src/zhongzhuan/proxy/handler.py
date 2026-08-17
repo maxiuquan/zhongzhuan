@@ -4614,6 +4614,9 @@ class ProxyHandler:
             # 严格按成员顺序故障转移：failover 组返回按 ord 排的成员顺序，否则 None。
             # 流式每轮 tried 重置，故每轮都从主成员开始尝试（符合故障转移语义）。
             failover_order = self._failover_member_order(requested_model)
+            # 分组兜底（2026-08-17）：主组全部候选失败后，用配置的兜底分组再试
+            # 一轮。标记放在 while 外——continue 重开一轮时不得重置，否则死循环。
+            fb_attempted = False
             while True:
                 tried: set[int] = set()
                 attempt = 0
@@ -4639,12 +4642,12 @@ class ProxyHandler:
                             await self._persist_sticky_failover(session_key)
                         if sticky_k is not None:
                             k = sticky_k
-                        elif failover_order is not None:
+                        elif failover_order is not None and not fb_attempted:
                             k = self._next_failover_key(candidates, tried, failover_order)
                         else:
                             k = pick_key([x for x in candidates if x.key_id not in tried])
                     else:
-                        if failover_order is not None:
+                        if failover_order is not None and not fb_attempted:
                             k = self._next_failover_key(candidates, tried, failover_order)
                         else:
                             k = pick_key([x for x in candidates if x.key_id not in tried])
@@ -4945,10 +4948,32 @@ class ProxyHandler:
                             all_same_type = False
                         continue
 
+                # 分组兜底（2026-08-17）：主组全部候选已试且失败 → 用配置的
+                # 兜底分组（fallback_group）的可用 key 再试一轮。与 v3 路径
+                # （_v3_stream_nonstream_fallback 之后的分组兜底）语义一致，
+                # 防止主组候选池因 402/554/冷却萎缩时（候选不足）直接 502。
+                if not fb_attempted:
+                    fb_attempted = True
+                    fb_cands = self._fallback_group_candidates(requested_model, exclude=tried)
+                    if fb_cands:
+                        _lg.warning(
+                            f"[{id(request):x}] streaming: group {requested_model!r} "
+                            f"all candidates failed; trying fallback group "
+                            f"({len(fb_cands)} keys)"
+                        )
+                        candidates = fb_cands
+                        continue
+
                 # Circuit breaker: all keys failed with the same exception
                 # (e.g. ReadError / ConnectError) — upstream is systemically down.
                 # Don't waste time retrying; return 502 immediately.
-                if attempt > 0 and all_same_type and first_exc_type not in ("",):
+                # NOTE: first_exc_type is None when every failure was a *status-code*
+                # failure (e.g. upstream 554) rather than an exception.  Those keys
+                # were already cooled via classify_failure, so the right move is the
+                # backoff retry / fallback-group path below — NOT the breaker.
+                # (`None not in ("",)` was always True, which wrongly short-circuited
+                #  all-554 rounds into an immediate 502 — 2026-08-17 线上实证.)
+                if attempt > 0 and all_same_type and first_exc_type:
                     _lg.error(
                         f"[{id(request):x}] streaming: all {attempt} key(s) failed with "
                         f"{first_exc_type}, upstream appears unavailable. "

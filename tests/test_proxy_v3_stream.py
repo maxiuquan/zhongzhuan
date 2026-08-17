@@ -1109,3 +1109,172 @@ def test_effective_config_dump_carries_the_v3_switch_section():
     rendered = "\n".join(format_effective_config(Config()))
     assert "responses_v3.enabled" in rendered
     assert "responses_v3.effective_version" in rendered
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-17：熔断误判 + 分组兜底（B/C）
+# ---------------------------------------------------------------------------
+async def _start_proxy_groups(
+    main_url: str,
+    fb_url: str,
+    store,
+    *,
+    token: str = "",
+    strategy: str = "round_robin",
+    with_fallback: bool = True,
+):
+    """Boot the production app with a 2-group setup.
+
+    - ``g-main``: one key (model_id=101) on ``main_url``; when
+      ``with_fallback`` it points ``fallback_group`` at ``g-fb``.
+    - ``g-fb``: one key (model_id=202) on ``fb_url``.
+
+    Returns ``(port, runner, token)``.
+    """
+    import os
+
+    os.environ["ZHONGZHUAN_PROXY_AUTH"] = "true"
+    if not token:
+        from zhongzhuan.store.access_tokens import create_token
+
+        token = (await create_token(store, label="fb-token", quota_tokens=100000)).token
+    from zhongzhuan.proxy.ratelimit import KeyHealth, SlidingWindow
+
+    up_main = UpstreamClient(base_url=main_url, timeout=10.0)
+    await up_main.start()
+    groups: list[dict] = [{"name": "g-main", "members": [101], "strategy": strategy}]
+    keys = [
+        KeyHealth(
+            key_id=1,
+            api_key="sk-main",
+            window=SlidingWindow(60, 1000),
+            upstream_base=main_url,
+            model_id=101,
+            model_name="m-main",
+        )
+    ]
+    upstream_clients = {main_url: up_main}
+    if with_fallback:
+        up_fb = UpstreamClient(base_url=fb_url, timeout=10.0)
+        await up_fb.start()
+        groups[0]["fallback_group"] = "g-fb"
+        groups.append({"name": "g-fb", "members": [202]})
+        keys.append(
+            KeyHealth(
+                key_id=2,
+                api_key="sk-fb",
+                window=SlidingWindow(60, 1000),
+                upstream_base=fb_url,
+                model_id=202,
+                model_name="m-fb",
+            )
+        )
+        upstream_clients[fb_url] = up_fb
+    proxy = ProxyServer(
+        upstream_clients=upstream_clients,
+        api_key="sk-x",
+        keys=keys,
+        groups=groups,
+        proxy_timeout=10.0,
+        store=store,
+        responses_bridge=None,
+    )
+    port = _free_port()
+    runner = web.AppRunner(proxy.app())
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    return port, runner, token
+
+
+async def _stream_cc(port: int, body: dict, token: str) -> tuple[int, str, bytes]:
+    """POST a plain chat.completions streaming request (``_stream_proxy`` path)."""
+    async with ClientSession() as sess:
+        async with sess.post(
+            f"http://127.0.0.1:{port}/v1/chat/completions",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+            data=json.dumps(body),
+        ) as resp:
+            raw = await resp.read()
+            return resp.status, resp.headers.get("Content-Type", ""), raw
+
+
+async def test_stream_main_group_554_falls_back_to_fallback_group(astore):
+    """B+C: 主组全部 554（状态码失败，非异常）→ 不熔断 502，兜底分组接管。
+
+    线上实证（2026-08-17）：mimo 组候选萎缩到 2 个且同时 554 → 熔断误判
+    502 → Pi Agent 报 "upstream temporarily unavailable"。修复后 554 走
+    分组兜底而不是立即熔断。
+    """
+    up_main = MockUpstream()
+    up_main.set_behavior(UpstreamBehavior(status=554))
+    await up_main.start()
+    up_fb = MockUpstream()
+    up_fb.set_behavior(UpstreamBehavior(stream_payload=openai_text_stream(pieces=("fb-ok",))))
+    await up_fb.start()
+    try:
+        port, runner, token = await _start_proxy_groups(up_main.url, up_fb.url, astore)
+        try:
+            status, _ctype, raw = await _stream_cc(
+                port,
+                {"model": "g-main", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                token,
+            )
+            assert status == 200, raw
+            assert b"fb-ok" in raw, f"响应应来自兜底组，实际: {raw[:300]!r}"
+            assert up_fb.request_count >= 1, "兜底组上游未被请求"
+            assert up_main.request_count >= 1, "主组上游应被尝试（554）"
+        finally:
+            await runner.cleanup()
+    finally:
+        await up_main.stop()
+        await up_fb.stop()
+
+
+async def test_stream_fallback_group_with_failover_strategy(astore):
+    """C 回归：failover 策略下主组 554 → 兜底组仍能接管。
+
+    failover 组的 ``_next_failover_key`` 只认主组成员；若切到兜底组后仍走
+    failover_order 选择，会永远选不到兜底组 key（死循环 break）。
+    """
+    up_main = MockUpstream()
+    up_main.set_behavior(UpstreamBehavior(status=554))
+    await up_main.start()
+    up_fb = MockUpstream()
+    up_fb.set_behavior(UpstreamBehavior(stream_payload=openai_text_stream(pieces=("fb-failover",))))
+    await up_fb.start()
+    try:
+        port, runner, token = await _start_proxy_groups(up_main.url, up_fb.url, astore, strategy="failover")
+        try:
+            status, _ctype, raw = await _stream_cc(
+                port,
+                {"model": "g-main", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                token,
+            )
+            assert status == 200, raw
+            assert b"fb-failover" in raw, f"响应应来自兜底组，实际: {raw[:300]!r}"
+            assert up_fb.request_count >= 1
+        finally:
+            await runner.cleanup()
+    finally:
+        await up_main.stop()
+        await up_fb.stop()
+
+
+async def test_stream_all_connection_errors_still_break_circuit(astore):
+    """B 回归：异常类失败（连接错误）仍触发熔断 → 502 SSE error（原行为保留）。
+
+    熔断只应放宽「纯状态码失败（first_exc_type=None）」；同类型异常全败
+    （如 ConnectError）仍应立即 502，不浪费时间重试。
+    """
+    dead_url = f"http://127.0.0.1:{_free_port()}"  # 未监听端口 → httpx.ConnectError
+    port, runner, token = await _start_proxy_groups(dead_url, "http://127.0.0.1:1", astore, with_fallback=False)
+    try:
+        status, _ctype, raw = await _stream_cc(
+            port,
+            {"model": "g-main", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            token,
+        )
+        assert b"upstream temporarily unavailable" in raw, f"应熔断 502 SSE，实际: {raw[:300]!r}"
+    finally:
+        await runner.cleanup()

@@ -63,14 +63,21 @@ STATE_ERROR = "error"
 
 # ---- Failure classification (2026-08-15, backoff v1) ----
 # 分类标签：permanent(永久失效，需确认恢复) / banned(封禁，长冷却) /
-# rate_limit(限流) / transient(瞬时) / no_retry(换 key 无意义) / unknown(交给 agnes 补判)。
+# balance(余额耗尽，长冷却自动恢复) / rate_limit(限流) / transient(瞬时) /
+# no_retry(换 key 无意义) / unknown(交给 agnes 补判)。
 # 标签判定逻辑在 retry.py 的 classify_label()；此处仅定义常量与 KeyHealth 状态机方法。
 CLASS_PERMANENT = "permanent"
 CLASS_BANNED = "banned"
+CLASS_BALANCE = "balance"
 CLASS_RATE_LIMIT = "rate_limit"
 CLASS_TRANSIENT = "transient"
 CLASS_NO_RETRY = "no_retry"
 CLASS_UNKNOWN = "unknown"
+
+#: 余额耗尽类冷却时长（秒）：免费额度 key 签到/充值可恢复，属临时态，
+#: 用 1h 长冷却而非永久 invalid（2026-08-17 线上实证：freetokenfaucet 免费
+#: key 402 被 mark_auth_failure 永久封禁 → mimo 组候选池萎缩到 2 个 → 502）。
+BALANCE_COOLDOWN_SECONDS: int = 3600
 
 #: 逐级退避档位（秒）：level 0→1→2→3 对应冷却时长。失败抬级，成功降级。
 BACKOFF_STEPS: tuple[int, ...] = (5, 10, 60, 600)
@@ -203,6 +210,8 @@ class KeyHealth:
 
         * ``permanent``：标记 invalid，不参与 failover，等待管理端确认恢复。
         * ``banned``：长冷却（600s 档），自动恢复，也可手动提前恢复。
+        * ``balance``：余额耗尽（402 欠费），长冷却（1h 档）自动恢复——
+          免费 key 签到/充值可恢复，不应永久封禁。
         * ``rate_limit`` / ``transient``：逐级退避（level 0→3），成功降级。
         * ``no_retry``：不标记（当前请求直接 break，不换 key）。
         * ``unknown``：按 transient 降级处理（当前请求继续 failover），
@@ -217,6 +226,13 @@ class KeyHealth:
         if failure_class == CLASS_PERMANENT:
             self.status = STATE_INVALID
             self.cooldown_until = 0.0
+            return
+        if failure_class == CLASS_BALANCE:
+            # 余额耗尽：固定 1h 长冷却，到期自动恢复。不抬 backoff_level——
+            # 与上游故障（逐级退避）不同，余额是配额问题，充值/签到后应
+            # 立即回到正常排名，不残留健康分惩罚。
+            self.status = STATE_ERROR
+            self.cooldown_until = now + BALANCE_COOLDOWN_SECONDS
             return
         if failure_class == CLASS_BANNED:
             # 封禁：直接长冷却档（不再逐级），到期自动恢复。

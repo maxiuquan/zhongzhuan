@@ -22,10 +22,12 @@ from .ratelimit import (
     STATE_ERROR,
     CLASS_PERMANENT,
     CLASS_BANNED,
+    CLASS_BALANCE,
     CLASS_RATE_LIMIT,
     CLASS_TRANSIENT,
     CLASS_NO_RETRY,
     CLASS_UNKNOWN,
+    BALANCE_COOLDOWN_SECONDS,
     backoff_seconds,
 )
 
@@ -48,16 +50,23 @@ def _bump_failure(k: KeyHealth) -> None:
 
 
 #: 永久失效的关键字（body 小写匹配，覆盖裸状态码无法区分的情形）。
-#: 402 通常是欠费文案；400/404/422/500 里的 model_not_found 是配置缺失。
+#: 401/403 的 invalid_token/unauthorized 是密钥级问题；model_not_found 是配置缺失。
+#: 402 欠费（insufficient_balance/topup）**不属于**永久失效——免费额度 key
+#: 签到/充值可恢复，拆到 :data:`_BALANCE_BODY_MARKERS` 走长冷却自动恢复
+#: （2026-08-17 线上实证：把 402 当永久 invalid 导致 mimo 组候选池萎缩到 2 个 → 502）。
 _PERMANENT_BODY_MARKERS = (
-    "insufficient_balance",
-    "insufficient balance",
-    "topup",
     "model_not_found",
     "no available channel",
     "invalid token",
     "invalid_api_key",
     "unauthorized",
+)
+
+#: 余额耗尽类关键字：402 欠费/免费额度用尽。临时态，长冷却自动恢复。
+_BALANCE_BODY_MARKERS = (
+    "insufficient_balance",
+    "insufficient balance",
+    "topup",
 )
 
 
@@ -79,8 +88,15 @@ def classify_label(status_code: int, headers: dict, body: bytes = b"") -> str:
         low = str(raw).lower()
     if any(m in low for m in _PERMANENT_BODY_MARKERS):
         return CLASS_PERMANENT
+    # 欠费（402 余额/免费额度耗尽）：临时态，长冷却自动恢复，非永久失效。
+    if any(m in low for m in _BALANCE_BODY_MARKERS):
+        return CLASS_BALANCE
     # 裸状态码
-    if status_code in (401, 402):
+    if status_code == 402:
+        # 无 body 关键字也按余额耗尽处理：402 语义就是 Payment Required，
+        # 免费 key 充值/签到后自动恢复，不应永久封禁（401 才是密钥级永久问题）。
+        return CLASS_BALANCE
+    if status_code == 401:
         return CLASS_PERMANENT
     if status_code == 403:
         # 无 CF 特征的非 401 403（如网关自定义拒绝）：按瞬时处理，避免误伤
@@ -107,6 +123,21 @@ def mark_auth_failure(k: KeyHealth) -> None:
     k.status = STATE_INVALID
     k.cooldown_until = 0.0
     k.failure_class = CLASS_PERMANENT
+    k.last_failure_at = time.time()
+
+
+def mark_balance_depleted(k: KeyHealth) -> None:
+    """402 余额耗尽（欠费/免费额度用尽）：长冷却（1h）自动恢复。
+
+    与 ``mark_auth_failure`` 的关键区别：余额是**临时**状态（签到/充值可
+    恢复），不能把 key 永久封禁——否则免费 key 池会随时间逐渐萎缩，候选
+    不足时上游一抖动就整组 502（2026-08-17 线上实证）。到期后 ``is_available``
+    自然恢复，管理端也可手动 ``reactivate`` 提前恢复。
+    """
+    _bump_failure(k)
+    k.status = STATE_ERROR
+    k.cooldown_until = time.time() + BALANCE_COOLDOWN_SECONDS
+    k.failure_class = CLASS_BALANCE
     k.last_failure_at = time.time()
 
 
@@ -354,6 +385,9 @@ def classify_failure_labelled(
     label = classify_label(status_code, headers, body)
     if label == CLASS_PERMANENT:
         mark_auth_failure(k)
+        return True, label
+    if label == CLASS_BALANCE:
+        mark_balance_depleted(k)
         return True, label
     if label == CLASS_BANNED:
         mark_banned(k)
