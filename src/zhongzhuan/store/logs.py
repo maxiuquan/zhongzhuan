@@ -210,17 +210,43 @@ async def get_usage_stats(s: Store, days: int = 7) -> dict:
     except Exception:
         # 模型表不可用时不丢弃数据，仅保留 SQL 聚合结果。
         pass
-    by_model = [
-        {
-            "model_name": r[0] or "unknown",
-            "requests": int(r[1] or 0),
-            "tokens_in": int(r[2] or 0),
-            "tokens_out": int(r[3] or 0),
-            "cost": round(float(r[4] or 0), 4),
-        }
-        for r in model_rows
-        if not configured_names or (r[0] or "") in configured_names
-    ]
+    by_model: list[dict] = []
+    # request_logs.model_name 写入格式是「客户端模型(上游模型)」（参见
+    # _log_and_deduct 的入参约定）。``get_usage_stats`` 历史上把整串拿去
+    # 跟 ``configured_names`` 比，导致任何带括号的行全被剔掉、by_model
+    # 长期为空、仪表盘模型分布图渲染成空环（2026-08-17 用户报）。
+    # 修复：拆括号取客户端名 → 按客户端聚合（跨上游合并）→ 再做 configured
+    # 过滤，输出前 20。`configured_names` 为空（list_models 不可用）时
+    # 退化为保留全部。
+    buckets: dict[str, dict] = {}
+    for r in model_rows:
+        raw = r[0] or ""
+        # 取 `(` 前的客户端名（raw 形如 "juhe/mimo-v2.5-pro(vercel/...)"）
+        if "(" in raw:
+            client = raw.split("(", 1)[0].strip()
+        else:
+            client = raw.strip()
+        if not client:
+            client = "unknown"
+        if configured_names and client not in configured_names:
+            continue
+        b = buckets.get(client)
+        if b is None:
+            b = {
+                "model_name": client,
+                "requests": 0,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "cost": 0.0,
+            }
+            buckets[client] = b
+        b["requests"] += int(r[1] or 0)
+        b["tokens_in"] += int(r[2] or 0)
+        b["tokens_out"] += int(r[3] or 0)
+        b["cost"] += float(r[4] or 0)
+    for b in sorted(buckets.values(), key=lambda x: x["requests"], reverse=True)[:20]:
+        b["cost"] = round(b["cost"], 4)
+        by_model.append(b)
 
     # 总计
     total_row = await s.fetchone(

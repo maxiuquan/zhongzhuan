@@ -198,6 +198,59 @@ async def test_usage_stats_filters_unconfigured_probe_models(store, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_usage_stats_by_model_strips_upstream_suffix_and_merges(store, monkeypatch):
+    """仪表盘模型分布必须按**客户端模型**聚合，不被 ``(上游)`` 后缀分裂。
+
+    2026-08-17 线上回归：``request_logs.model_name`` 写入格式是
+    ``juhe/mimo-v2.5-pro(vercel/mimo-v2.5-pro)``（客户端+上游拼接），
+    原 ``get_usage_stats`` 直接用整串与 ``configured_names`` 比，导致
+    全部行被过滤掉，仪表盘模型分布图渲染成空环（用户报）。
+
+    修复：取 ``(`` 前的客户端名 → 按客户端聚合（跨上游合并 requests）→
+    再做 configured 过滤。model_name 字段输出也去括号。
+    """
+    from zhongzhuan.store.models import create_model, Model
+
+    now = Store.now()
+    await create_model(store, Model(name="juhe/mimo", upstream_base="http://x", upstream_model="mimo"))
+    await create_model(store, Model(name="juhe/ds", upstream_base="http://x", upstream_model="ds"))
+
+    # 同一客户端模型跨 3 个上游 + 一个无上游直写 → 应合并为 1 条
+    rows = [
+        (now - 3600, "juhe/mimo(vercel/mimo)", "r1", 100, 50),
+        (now - 3600, "juhe/mimo(zz-slo/mimo)", "r2", 80, 40),
+        (now - 3600, "juhe/mimo(de5/mimo)", "r3", 60, 30),
+        (now - 3600, "juhe/ds(amd/ds)", "r4", 200, 100),
+        (now - 3600, "juhe/mimo", "r5", 40, 20),  # 无上游后缀的也归入
+    ]
+    for ts, model, rid, tin, tout in rows:
+        await store.execute(
+            "INSERT INTO request_logs(ts, model_name, status, latency_ms, request_id, "
+            "tokens_in, tokens_out, cost) VALUES(?,?,?,?,?,?,?,?)",
+            (ts, model, 200, 10, rid, tin, tout, 0.0),
+        )
+
+    result = await get_usage_stats(store, days=7)
+    by_model = {m["model_name"]: m for m in result["by_model"]}
+
+    # 跨上游合并：juhe/mimo 共 4 次请求，token 累加
+    assert "juhe/mimo" in by_model
+    mimo = by_model["juhe/mimo"]
+    assert mimo["requests"] == 4
+    assert mimo["tokens_in"] == 100 + 80 + 60 + 40
+    assert mimo["tokens_out"] == 50 + 40 + 30 + 20
+    # model_name 输出不带括号
+    assert "(" not in mimo["model_name"]
+    # juhe/ds 独立
+    assert by_model["juhe/ds"]["requests"] == 1
+    assert by_model["juhe/ds"]["tokens_in"] == 200
+    # 未配置的探测数据全被剔（如 'x'）
+    assert "x" not in by_model
+    # totals 不受展示过滤影响
+    assert result["totals"]["requests"] == 5
+
+
+@pytest.mark.asyncio
 async def test_token_create_stores_cipher_and_reveal_roundtrip(store):
     """新建令牌必须同时保存哈希与可解密密文，复制接口返回完整 Key。"""
     from zhongzhuan.store.access_tokens import create_token, reveal_token, list_tokens
