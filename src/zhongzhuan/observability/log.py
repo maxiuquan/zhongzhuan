@@ -23,4 +23,5 @@ def setup_logging(log_dir: Path, level: str = "INFO") -> None:
         retention="14 days",
         encoding="utf-8",
         enqueue=True,
+        catch=True,  # 2026-08-20：handler 异常（磁盘满/权限）降级而非让日志线程退出
     )

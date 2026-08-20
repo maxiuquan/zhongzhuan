@@ -621,7 +621,7 @@ class _DeferredEventStore:
 
 
 from .context import RequestContextBuilder
-from .ratelimit import KeyHealth, STATE_HEALTHY
+from .ratelimit import KeyHealth, STATE_HEALTHY, STATE_INVALID
 from .retry import (
     mark_network_failure,
     mark_success,
@@ -954,6 +954,34 @@ class ProxyHandler:
             return []
 
         return available
+
+    def _resolve_degraded(self, requested_model: str) -> KeyHealth | None:
+        """全候选冷却/失效时的降级候选：冷却剩余最短的非永久失效 key。
+
+        当 :meth:`_resolve_candidates` 返回空（组内所有 key 均不可用）时调用，
+        返回一个"冷却即将到期"的 key 强行试一次，避免直接 503 ``no enabled
+        keys`` 把本可恢复的瞬时上游故障（SERVICE_BUSY / 429 / 402 余额冷却）
+        变成用户可见的硬失败。永久失效（``invalid``，欠费/配置坏）的 key
+        不参与降级 —— 它们没有恢复预期，试了也是浪费。
+
+        返回 ``None`` 表示连降级候选都没有（真正无 key 可试），调用方再
+        返回 503。
+        """
+        pool: list[KeyHealth] = [k for k in self._keys if k.status != STATE_INVALID]
+        if requested_model:
+            grp = self._groups.get(requested_model)
+            if grp and grp.get("members"):
+                member_ids = grp["members"]
+                pool = [k for k in pool if k.model_id in member_ids]
+            else:
+                pool = [k for k in pool if k.model_name == requested_model]
+        if not pool:
+            return None
+        now = time.time()
+        cooling = [k for k in pool if k.cooldown_until > now]
+        if not cooling:
+            return None
+        return min(cooling, key=lambda k: k.cooldown_until)
 
     # ------------------------------------------------------------------
     # Strict member-order failover (故障转移策略实际生效的实现)
@@ -1865,6 +1893,7 @@ class ProxyHandler:
                 key_id=None,
                 status=503,
                 latency_ms=int((time.time() - t0) * 1000),
+                error="no enabled keys",
             )
             return web.json_response({"error": "no enabled keys"}, status=503)
 
@@ -1899,6 +1928,11 @@ class ProxyHandler:
                             break
                         # 200 但空壳（非 dict）→ 试下一个 fallback key
         if resp.status_code >= 400:
+            _v3_err_body = ""
+            try:
+                _v3_err_body = (payload_bytes or b"").decode("utf-8", errors="replace")[:500]
+            except Exception:
+                pass
             self._v3_log_request(
                 request=request,
                 model_name=ctx.requested_model or "",
@@ -1908,6 +1942,7 @@ class ProxyHandler:
                 latency_ms=int((time.time() - t0) * 1000),
                 outbound_protocol=getattr(resp, "outbound_protocol", ""),
                 translated=getattr(resp, "need_translation", False),
+                error=_v3_err_body,
             )
             return web.Response(
                 status=resp.status_code,
@@ -3769,15 +3804,32 @@ class ProxyHandler:
                         if nk.tpm_window is not None:
                             nk.tpm_window.limit = old.tpm_limit
                     # 保留健康状态（invalid/error/rate_limited + 冷却 + 退避等级 + 失败原因）
+                    # 2026-08-20：只保留"仍处于冷却窗口内 / 永久失效"的状态；瞬态冷却
+                    # （transient/balance/rate_limit）已过期的归位 healthy —— 否则长跑
+                    # 进程每次 reload 都背着过期冷却，配合失败不入库会造成"no enabled
+                    # keys"静默 503（线上根因，见 _log_gate_failure 注释）。
                     if old.status != STATE_HEALTHY:
-                        nk.status = old.status
-                        nk.cooldown_until = old.cooldown_until
-                        nk.backoff_level = old.backoff_level
-                        nk.failure_class = old.failure_class
-                        nk.last_failure_at = old.last_failure_at
-                        nk.consecutive_failures = old.consecutive_failures
-                        nk.total_failures = old.total_failures
-                        nk.recent_429_count = old.recent_429_count
+                        if old.status == STATE_INVALID:
+                            # 永久失效（欠费/配置坏）：reload 不复活，等管理端「确认恢复」。
+                            nk.status = old.status
+                            nk.cooldown_until = old.cooldown_until
+                            nk.backoff_level = old.backoff_level
+                            nk.failure_class = old.failure_class
+                            nk.last_failure_at = old.last_failure_at
+                            nk.consecutive_failures = old.consecutive_failures
+                            nk.total_failures = old.total_failures
+                            nk.recent_429_count = old.recent_429_count
+                        elif old.cooldown_until > time.time():
+                            # 冷却未过期：保留瞬态冷却状态（error/rate_limited + 退避）。
+                            nk.status = old.status
+                            nk.cooldown_until = old.cooldown_until
+                            nk.backoff_level = old.backoff_level
+                            nk.failure_class = old.failure_class
+                            nk.last_failure_at = old.last_failure_at
+                            nk.consecutive_failures = old.consecutive_failures
+                            nk.total_failures = old.total_failures
+                            nk.recent_429_count = old.recent_429_count
+                        # else: 瞬态冷却已过期 → 保持 nk 默认 healthy，不拷贝旧状态。
                 else:
                     nk.status = STATE_HEALTHY
                     nk.cooldown_until = 0.0
@@ -4168,11 +4220,32 @@ class ProxyHandler:
         # Short circuit: no keys configured
         candidates = self._resolve_candidates(requested_model)
         if not candidates:
-            model_hint = f" for model {requested_model!r}" if requested_model else ""
-            return web.json_response(
-                {"error": f"no enabled keys{model_hint}"},
-                status=503,
-            )
+            # 2026-08-20：全候选冷却/失效时降级放行一个冷却最短的 key 试一次，
+            # 避免 "no enabled keys" 硬 503 把瞬时上游故障变成用户可见错误；
+            # 连降级候选都没有才返回 503，且该失败必须写审计（此前此出口
+            # 静默返回，曾造成"后台全是 200"的假象）。
+            degraded = self._resolve_degraded(requested_model)
+            if degraded is not None:
+                _lg.warning(
+                    f"[{id(request):x}] all candidates cooling for model {requested_model!r}; "
+                    f"degraded attempt with key_id={degraded.key_id} "
+                    f"(cooldown_until={degraded.cooldown_until:.0f})"
+                )
+                candidates = [degraded]
+            else:
+                model_hint = f" for model {requested_model!r}" if requested_model else ""
+                _lg.warning(f"[{id(request):x}] no enabled keys{model_hint} — returning 503")
+                self._log_gate_failure(
+                    request,
+                    requested_model or "",
+                    503,
+                    f"no enabled keys{model_hint}",
+                    inbound_protocol,
+                )
+                return web.json_response(
+                    {"error": f"no enabled keys{model_hint}"},
+                    status=503,
+                )
 
         # Determine if this is a streaming request
         is_stream = bool(body_obj and body_obj.get("stream", False))
@@ -4237,6 +4310,14 @@ class ProxyHandler:
                 if k is None:
                     # 优化点8：429 响应带 X-Zhongzhuan-Reason 头
                     reason = reason_for_exhaustion(candidates)
+                    # 2026-08-20：补审计，避免"候选耗尽"失败在后台不可见。
+                    self._log_gate_failure(
+                        request,
+                        requested_model or "",
+                        429,
+                        f"all keys exhausted: {reason}",
+                        inbound_protocol,
+                    )
                     return web.json_response(
                         {"error": "all keys exhausted"},
                         status=429,
@@ -4426,6 +4507,9 @@ class ProxyHandler:
                                 key_id=k.key_id,
                                 status=resp.status_code,
                                 latency_ms=latency_ms,
+                                # 2026-08-20：失败带错误详情入审计，后台可直接看到
+                                # SERVICE_BUSY / model_not_found 等上游原因。
+                                error=(err_msg or "")[:500],
                                 inbound_protocol=inbound_protocol,
                                 outbound_protocol=outbound_protocol,
                                 translated=need_translation,
@@ -4986,6 +5070,14 @@ class ProxyHandler:
                         )
                     except Exception:
                         pass
+                    # 2026-08-20：熔断失败补审计（此前流式失败不写 request_logs）。
+                    self._log_gate_failure(
+                        request,
+                        requested_model,
+                        502,
+                        f"all keys failed with {first_exc_type}",
+                        inbound_protocol,
+                    )
                     break
 
                 # All keys in this round failed — wait with backoff, then retry
@@ -5026,6 +5118,7 @@ class ProxyHandler:
         translated: bool = False,
         token_id: int = 0,
         member_model: str = "",
+        error: str = "",
     ) -> None:
         """记录请求日志 + 扣减令牌配额 + 计算成本（异步调用）。"""
         # 计算成本
@@ -5054,6 +5147,7 @@ class ProxyHandler:
                 translated=translated,
                 token_id=token_id,
                 cost=cost,
+                error=error,
             )
         except Exception:
             _lg.exception("log_request failed")
@@ -5081,6 +5175,7 @@ class ProxyHandler:
         tokens_out: int = 0,
         outbound_protocol: str = "",
         translated: bool = False,
+        error: str = "",
     ) -> None:
         """Fire-and-forget request logging for the v3 (``/v1/responses``) path.
 
@@ -5108,6 +5203,7 @@ class ProxyHandler:
             _model = f"{_model}({_member})"
         _ob = outbound_protocol
         _tr = translated
+        _err = (error or "")[:500]
         asyncio.create_task(
             self._log_and_deduct(
                 self.store,
@@ -5122,8 +5218,70 @@ class ProxyHandler:
                 outbound_protocol=_ob,
                 translated=_tr,
                 token_id=_token_id,
+                error=_err,
             )
         )
+
+    def _log_gate_failure(
+        self,
+        request: web.Request,
+        model_name: str,
+        status: int,
+        error: str,
+        inbound_protocol: str = "",
+    ) -> None:
+        """Fire-and-forget 记录门控/兜底出口的失败（无 key 可试 / 全失败）。
+
+        这类请求走不到上游，此前既不写 ``request_logs`` 也不打日志 —— 线上
+        503 ``no enabled keys`` 曾因此静默近 8 小时（仪表盘"全是 200"假象的
+        根源之一，2026-08-20 实证）。这里统一补审计：失败在后台日志页可见，
+        且 ``/api/stats`` 的 ``top_errors`` / ``success_rate`` 如实反映失败。
+        所有 DB 异常在任务内吞掉，绝不回传影响响应。
+        """
+        if not self.store:
+            return
+        _client_ip = request.remote or ""
+        _token_id = request.get("token_id", 0)
+        _model = model_name or ""
+        _err = error or ""
+        _inbound = inbound_protocol or ""
+        asyncio.create_task(
+            self._log_gate_failure_task(
+                self.store,
+                client_ip=_client_ip,
+                model_name=_model,
+                status=status,
+                error=_err,
+                inbound_protocol=_inbound,
+                token_id=_token_id,
+            )
+        )
+
+    @staticmethod
+    async def _log_gate_failure_task(
+        store,
+        *,
+        client_ip: str,
+        model_name: str,
+        status: int,
+        error: str,
+        inbound_protocol: str,
+        token_id: int,
+    ) -> None:
+        try:
+            await log_request(
+                store,
+                client_ip=client_ip,
+                model_name=model_name,
+                key_id=None,
+                status=status,
+                latency_ms=0,
+                error=error,
+                inbound_protocol=inbound_protocol,
+                token_id=token_id,
+            )
+        except Exception:
+            _lg.exception("log_request(gate failure) failed")
 
     async def _list_models(self) -> web.Response:
         """Return the list of custom model names configured in the admin UI.

@@ -10,8 +10,10 @@ ExecStart=/usr/bin/python3 -m zhongzhuan
 Restart=always
 RestartSec=5
 EnvironmentFile=/root/zhongzhuan/.env
-StandardOutput=append:/var/log/zhongzhuan.log
-StandardError=append:/var/log/zhongzhuan.log
+# 2026-08-20：stdout/stderr 改走 journald（自动轮转、永不因文件被 rename 而假死）。
+# 请求审计/统计在 TiDB request_logs，应用诊断日志在 journald + loguru 文件双份。
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
