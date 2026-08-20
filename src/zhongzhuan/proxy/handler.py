@@ -17,7 +17,11 @@ import asyncio
 from ..store import Store
 from ..store.logs import log_request
 from ..upstream import UpstreamClient
-from ..config.timeouts import DEFAULT_TIMEOUT_POLICY, TimeoutPolicy
+from ..config.timeouts import (
+    DEFAULT_TIMEOUT_POLICY,
+    TimeoutPolicy,
+    STREAM_HARD_DEADLINE_SECONDS,
+)
 from ..observability.metrics import record_v3_fallback
 from ..responses_v3.background import BackgroundWorker
 from ..responses_v3.capability import CapabilityRouter, StaticRouteRegistry
@@ -5081,6 +5085,33 @@ class ProxyHandler:
                     break
 
                 # All keys in this round failed — wait with backoff, then retry
+                # 墙钟硬死线（2026-08-21 修复「根因 B」）：状态码类失败（554/503/429）
+                # 会落入此处退避重试，但若上游长期不恢复，循环会无限进行、把 SSE
+                # 连接永久挂起（零字节），客户端（如 Pi Agent）超时断开 = "又断了"。
+                # 熔断（上方 first_exc_type 分支）只覆盖异常类失败，不覆盖状态码类，
+                # 所以这里单独用墙钟兜底——整轮全部失败后、准备再次退避重试前硬性终止。
+                if time.time() - _stream_start >= STREAM_HARD_DEADLINE_SECONDS:
+                    _lg.error(
+                        f"[{id(request):x}] streaming: hard deadline "
+                        f"({STREAM_HARD_DEADLINE_SECONDS:.0f}s) exceeded for model "
+                        f"{requested_model!r} after perpetual key failures; "
+                        f"giving up instead of looping forever"
+                    )
+                    try:
+                        await resp.write(
+                            b'event: error\ndata: {"error":{"type":"upstream_error",'
+                            b'"message":"upstream temporarily unavailable"}}\n\n'
+                        )
+                    except Exception:
+                        pass
+                    self._log_gate_failure(
+                        request,
+                        requested_model,
+                        504,
+                        f"stream hard deadline {STREAM_HARD_DEADLINE_SECONDS:.0f}s exceeded",
+                        inbound_protocol,
+                    )
+                    break
                 _lg.warning(
                     f"[{id(request):x}] streaming: all {attempt} key(s) "
                     f"failed this round, retrying in {retry_delay:.0f}s"

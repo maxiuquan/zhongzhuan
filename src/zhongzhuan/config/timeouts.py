@@ -55,6 +55,7 @@ __all__ = [
     "DEFAULT_TIMEOUT_POLICY",
     "MIN_FIRST_TOKEN_SECONDS",
     "MIN_READ_IDLE_SECONDS",
+    "STREAM_HARD_DEADLINE_SECONDS",
     "ENV_PREFIX",
     "SOURCE_DEFAULT",
     "SOURCE_YAML",
@@ -65,6 +66,25 @@ __all__ = [
 # are guaranteed to be truncated, so we refuse to start.
 MIN_FIRST_TOKEN_SECONDS: float = 300.0
 MIN_READ_IDLE_SECONDS: float = 300.0
+
+#: 流式重试循环硬墙钟死线（2026-08-21 新增，修复「根因 B」）。
+#:
+#: ``_stream_proxy`` 对状态码类失败（554/503/429）按设计落入退避重试循环；
+#: 若上游长期不恢复，循环会无限进行、把 SSE 连接永久挂起（零字节），客户端
+#: （如 Pi Agent）超时断开 = 用户感知的「又断了」。此死线在「整轮全部失败后、
+#: 准备再次退避重试」前硬性终止循环，改走与熔断相同的失败路径
+#: （写 SSE error 事件 + ``_log_gate_failure`` 审计 + 返回），让请求快速失败
+#: 而非永久挂起。
+#:
+#: 默认 900s（15 分钟）；可用 ``ZHONGZHUAN_STREAM_HARD_DEADLINE_SECONDS`` 覆盖。
+#:
+#: 取值要 > 单次上游尝试的最大预算（``first_token_seconds`` 默认 600s），否则会在
+#: 「首轮因 ReadTimeout 等耗时 600s 才失败、本应再重试一次」时误杀合法但偏慢的
+#: 推理请求。900s 允许一次完整超时后的重试，同时把纯重试风暴（实测曾卡 19+ 分钟）
+#: 收敛到 15 分钟内。追求更快失败可下调到 300~600s。
+STREAM_HARD_DEADLINE_SECONDS: float = float(
+    os.environ.get("ZHONGZHUAN_STREAM_HARD_DEADLINE_SECONDS", "900")
+)
 
 ENV_PREFIX: str = "ZHONGZHUAN_TIMEOUT_"
 
