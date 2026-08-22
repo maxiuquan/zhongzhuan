@@ -4223,6 +4223,7 @@ class ProxyHandler:
 
         # Short circuit: no keys configured
         candidates = self._resolve_candidates(requested_model)
+        degraded_mode = False
         if not candidates:
             # 2026-08-20：全候选冷却/失效时降级放行一个冷却最短的 key 试一次，
             # 避免 "no enabled keys" 硬 503 把瞬时上游故障变成用户可见错误；
@@ -4236,6 +4237,7 @@ class ProxyHandler:
                     f"(cooldown_until={degraded.cooldown_until:.0f})"
                 )
                 candidates = [degraded]
+                degraded_mode = True
             else:
                 model_hint = f" for model {requested_model!r}" if requested_model else ""
                 _lg.warning(f"[{id(request):x}] no enabled keys{model_hint} — returning 503")
@@ -4644,6 +4646,7 @@ class ProxyHandler:
             requested_model=requested_model,
             session_key=self._session_key(request, body_obj),
             required_caps=required_caps,
+            degraded_mode=degraded_mode,
         )
 
     async def _stream_proxy(
@@ -4658,6 +4661,7 @@ class ProxyHandler:
         requested_model: str,
         session_key: str = "",
         required_caps: frozenset[str] = frozenset(),
+        degraded_mode: bool = False,
     ) -> web.StreamResponse:
         _stream_start = time.time()
         resp = web.StreamResponse(status=200)
@@ -5080,6 +5084,34 @@ class ProxyHandler:
                         requested_model,
                         502,
                         f"all keys failed with {first_exc_type}",
+                        inbound_protocol,
+                    )
+                    break
+
+                # Degraded-mode fast-fail: when every healthy candidate was on
+                # cooldown we picked the *shortest-cooldown* key to try once.
+                # If that single key also fails there is nothing useful to retry
+                # (all real candidates are still cooling), so fail immediately
+                # instead of looping until the 900s hard deadline.
+                # 2026-08-22 实证：juhe/mimo-v2.5-pro 全组冷却后降级 key 300168
+                # 持续 554，导致请求挂 15 分钟后才 504。
+                if degraded_mode:
+                    _lg.error(
+                        f"[{id(request):x}] streaming: degraded key also failed for "
+                        f"model {requested_model!r}; all candidates are cooling"
+                    )
+                    try:
+                        await resp.write(
+                            b'event: error\ndata: {"error":{"type":"upstream_error",'
+                            b'"message":"all keys cooling, please retry later"}}\n\n'
+                        )
+                    except Exception:
+                        pass
+                    self._log_gate_failure(
+                        request,
+                        requested_model,
+                        503,
+                        "degraded key failed; all candidates cooling",
                         inbound_protocol,
                     )
                     break
