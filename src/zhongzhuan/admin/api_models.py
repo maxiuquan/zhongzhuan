@@ -50,9 +50,7 @@ def register_routes(app: web.Application, ctx) -> None:
                 return web.json_response({"error": {"message": err}}, status=400)
             m = _payload_to_model(data)
         except (KeyError, TypeError, ValueError) as e:
-            return web.json_response(
-                {"error": {"message": f"invalid payload: {e}", "type": "bad_request"}}, status=400
-            )
+            return web.json_response({"error": {"message": f"invalid payload: {e}", "type": "bad_request"}}, status=400)
         m = await create_model(ctx.store, m)
         await notify_proxy_reload()
         return web.json_response(_to_dict(m), status=201)
@@ -61,9 +59,7 @@ def register_routes(app: web.Application, ctx) -> None:
         try:
             model_id = int(request.match_info["id"])
         except ValueError:
-            return web.json_response(
-                {"error": {"message": "invalid model id", "type": "bad_request"}}, status=400
-            )
+            return web.json_response({"error": {"message": "invalid model id", "type": "bad_request"}}, status=400)
         try:
             data = await request.json()
             err = _validate_payload(data)
@@ -71,9 +67,7 @@ def register_routes(app: web.Application, ctx) -> None:
                 return web.json_response({"error": {"message": err}}, status=400)
             m = _payload_to_model(data)
         except (KeyError, TypeError, ValueError) as e:
-            return web.json_response(
-                {"error": {"message": f"invalid payload: {e}", "type": "bad_request"}}, status=400
-            )
+            return web.json_response({"error": {"message": f"invalid payload: {e}", "type": "bad_request"}}, status=400)
         await update_model(ctx.store, model_id, m)
         removed_from_groups = 0
         # 连锁开关：停用模型时自动从所有分组移除
@@ -101,9 +95,7 @@ def register_routes(app: web.Application, ctx) -> None:
         try:
             model_id = int(request.match_info["id"])
         except ValueError:
-            return web.json_response(
-                {"error": {"message": "invalid model id", "type": "bad_request"}}, status=400
-            )
+            return web.json_response({"error": {"message": "invalid model id", "type": "bad_request"}}, status=400)
         await delete_model(ctx.store, model_id)
         await notify_proxy_reload()
         return web.json_response({"ok": True})

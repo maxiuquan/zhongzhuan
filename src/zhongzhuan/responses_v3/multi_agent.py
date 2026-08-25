@@ -88,6 +88,7 @@ ROLE_MODEL_MAP: dict[str, str] = {
 # 2. tool_search_output 合成
 # ---------------------------------------------------------------------------
 
+
 def _spawn_agent_description() -> str:
     """``spawn_agent`` 的工具描述。
 
@@ -426,7 +427,7 @@ class MultiAgentOrchestrator:
         if role_tag:
             prefix = f"[{role_tag}]"
             if instruction.lower().startswith(prefix):
-                args["instruction"] = instruction[len(prefix):].lstrip()
+                args["instruction"] = instruction[len(prefix) :].lstrip()
                 instruction = args["instruction"]
             model = routed_model
         if not model:
@@ -479,7 +480,9 @@ class MultiAgentOrchestrator:
         state.instruction = (state.instruction + "\n" + text).strip()
         self._log.info(f"send_input agent_id={agent_id} len={len(text)}")
         return build_function_call_output(
-            output_index=output_index, call_id=call_id, response_id="",
+            output_index=output_index,
+            call_id=call_id,
+            response_id="",
             output=json.dumps({"agent_id": agent_id, "received": True}),
         )
 
@@ -491,7 +494,9 @@ class MultiAgentOrchestrator:
         # best-effort：标记为恢复；若此前任务已结束则直接返回已有结果。
         self._log.info(f"resume_agent agent_id={agent_id}")
         return build_function_call_output(
-            output_index=output_index, call_id=call_id, response_id="",
+            output_index=output_index,
+            call_id=call_id,
+            response_id="",
             output=json.dumps({"agent_id": agent_id, "status": state.status}),
         )
 
@@ -511,11 +516,11 @@ class MultiAgentOrchestrator:
             except Exception:  # noqa: BLE001 - 任务异常已写入 state，这里只需等结束
                 pass
         out = state.result if state.status == "completed" else (state.error or "")
-        self._log.info(
-            f"wait_agent agent_id={agent_id} status={state.status} out_len={len(out)}"
-        )
+        self._log.info(f"wait_agent agent_id={agent_id} status={state.status} out_len={len(out)}")
         return build_function_call_output(
-            output_index=output_index, call_id=call_id, response_id="",
+            output_index=output_index,
+            call_id=call_id,
+            response_id="",
             output=json.dumps({"agent_id": agent_id, "status": state.status, "result": out}),
         )
 
@@ -530,7 +535,9 @@ class MultiAgentOrchestrator:
         self._agents.pop(agent_id, None)
         self._log.info(f"close_agent agent_id={agent_id}")
         return build_function_call_output(
-            output_index=output_index, call_id=call_id, response_id="",
+            output_index=output_index,
+            call_id=call_id,
+            response_id="",
             output=json.dumps({"agent_id": agent_id, "closed": True}),
         )
 
@@ -562,7 +569,9 @@ class MultiAgentOrchestrator:
 
     def _error_output(self, call_id: str, message: str, output_index: int = 0) -> dict[str, Any]:
         return build_function_call_output(
-            output_index=output_index, call_id=call_id, response_id="",
+            output_index=output_index,
+            call_id=call_id,
+            response_id="",
             output=json.dumps({"error": message}),
         )
 

@@ -39,7 +39,9 @@ async def create_group(s: Store, g: GroupData) -> GroupData:
 
 
 async def list_groups(s: Store) -> list[dict]:
-    rows = await s.fetchall("SELECT id, name, strategy, fallback_enabled, exposed, fallback_group, created_at FROM model_groups ORDER BY id")
+    rows = await s.fetchall(
+        "SELECT id, name, strategy, fallback_enabled, exposed, fallback_group, created_at FROM model_groups ORDER BY id"
+    )
     result = []
     for r in rows:
         members = await s.fetchall(

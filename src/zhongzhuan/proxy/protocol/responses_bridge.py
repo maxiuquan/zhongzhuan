@@ -419,7 +419,7 @@ class ResponsesTurnBridge:
             # Codex 26.x MCP 子代理（namespace 工具）：上游回包的 function 名是摊平名
             # ``mcp__subagents__-spawn_agent``。拆回裸名 + namespace，下游 Codex 才能把
             # 这次 function_call 路由回对应 MCP server（codex-relay #17 / Palantir 修法）。
-            ns, bare = (split_namespace_name(func_name) if func_name else ("", func_name))
+            ns, bare = split_namespace_name(func_name) if func_name else ("", func_name)
             acc = self._acc.open_tool_call(
                 call_id=new_call_id or "",
                 source_index=tc_idx,

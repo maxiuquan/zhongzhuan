@@ -15,9 +15,7 @@ def register_routes(app: web.Application, ctx) -> None:
         password = data.get("password", "")
 
         # 取当前密码哈希（主键点查）用于签发可吊销 JWT（pv 指纹）。
-        row = await ctx.store.fetchone(
-            "SELECT password_hash FROM admin_users WHERE username=?", (username,)
-        )
+        row = await ctx.store.fetchone("SELECT password_hash FROM admin_users WHERE username=?", (username,))
         if not row or not await verify_admin(ctx.store, username, password):
             return web.json_response(
                 {"error": "invalid credentials"},

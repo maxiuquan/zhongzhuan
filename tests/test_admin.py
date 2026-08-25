@@ -340,17 +340,23 @@ async def _make_group_fixture(store):
     from zhongzhuan.store.keys import ApiKey, create_key
     from zhongzhuan.store.groups import GroupData, GroupMemberData, create_group, set_group_members
 
-    m1 = await create_model(store, Model(name="am/t1", upstream_base="http://up1.example/v1",
-                                         upstream_model="t1", protocol="openai"))
-    m2 = await create_model(store, Model(name="bz/t2", upstream_base="http://up2.example/v1",
-                                         upstream_model="t2", protocol="openai"))
+    m1 = await create_model(
+        store, Model(name="am/t1", upstream_base="http://up1.example/v1", upstream_model="t1", protocol="openai")
+    )
+    m2 = await create_model(
+        store, Model(name="bz/t2", upstream_base="http://up2.example/v1", upstream_model="t2", protocol="openai")
+    )
     for m in (m1, m2):
         await create_key(store, ApiKey(id=None, model_id=m.id, label="k", key_value="sk-test123", enabled=1))
     g = await create_group(store, GroupData(name="grp-test", strategy="failover"))
-    await set_group_members(store, g.id, [
-        GroupMemberData(group_id=g.id, model_id=m1.id, weight=1, ord=0),
-        GroupMemberData(group_id=g.id, model_id=m2.id, weight=1, ord=1),
-    ])
+    await set_group_members(
+        store,
+        g.id,
+        [
+            GroupMemberData(group_id=g.id, model_id=m1.id, weight=1, ord=0),
+            GroupMemberData(group_id=g.id, model_id=m2.id, weight=1, ord=1),
+        ],
+    )
     return m1, m2, g
 
 
@@ -364,8 +370,15 @@ async def test_group_test_endpoint_runs_all_member_keys(store, monkeypatch):
     # 打桩：不发真实网络请求，直接返回可控结果
     async def fake_test(ctx, key_id, model):
         ok = key_id == key_ids[0]
-        return {"key_id": key_id, "ok": ok, "status": 200 if ok else 503,
-                "latency_ms": 5, "url": "http://stub", "model": model.name, "error": "" if ok else "boom"}
+        return {
+            "key_id": key_id,
+            "ok": ok,
+            "status": 200 if ok else 503,
+            "latency_ms": 5,
+            "url": "http://stub",
+            "model": model.name,
+            "error": "" if ok else "boom",
+        }
 
     monkeypatch.setattr(api_groups, "_test_group_key", fake_test)
 

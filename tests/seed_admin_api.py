@@ -12,8 +12,10 @@ async def main():
     # key 写死在此处并入库 git——该密钥应视为已泄露并轮换）。
     api_key = os.environ.get("AGNES_API_KEY", "").strip()
     if not api_key:
-        print("[seed] AGNES_API_KEY not set; nothing to seed. "
-              "Set it explicitly:  AGNES_API_KEY=sk-... python tests/seed_admin_api.py")
+        print(
+            "[seed] AGNES_API_KEY not set; nothing to seed. "
+            "Set it explicitly:  AGNES_API_KEY=sk-... python tests/seed_admin_api.py"
+        )
         return
     base = "http://127.0.0.1:8089"
 

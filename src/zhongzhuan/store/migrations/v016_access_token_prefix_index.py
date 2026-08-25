@@ -29,13 +29,9 @@ from __future__ import annotations
 
 from ..migration_engine import Migration, MigrationExecutor
 
-SQLITE_SQL: tuple[str, ...] = (
-    "CREATE INDEX IF NOT EXISTS idx_access_tokens_prefix ON access_tokens(token_prefix)",
-)
+SQLITE_SQL: tuple[str, ...] = ("CREATE INDEX IF NOT EXISTS idx_access_tokens_prefix ON access_tokens(token_prefix)",)
 
-MYSQL_SQL: tuple[str, ...] = (
-    "CREATE INDEX idx_access_tokens_prefix ON access_tokens(token_prefix)",
-)
+MYSQL_SQL: tuple[str, ...] = ("CREATE INDEX idx_access_tokens_prefix ON access_tokens(token_prefix)",)
 
 #: v001 列级 ``UNIQUE`` 生成的隐式索引名 = 列名（MySQL/TiDB 命名规则）。
 _LEGACY_UNIQUE_TOKEN_INDEX = "token"

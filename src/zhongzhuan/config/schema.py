@@ -366,9 +366,9 @@ class StrictConfig(BaseModel):
     storage: StorageSchema = Field(default_factory=StorageSchema)  # type: ignore[arg-type]
     windows_service: WinSvcSchema = Field(default_factory=WinSvcSchema)
     fallback: FallbackSchema = Field(default_factory=FallbackSchema)  # type: ignore[arg-type]
-    key_backoff: KeyBackoffSchema = Field(default_factory=KeyBackoffSchema)
+    key_backoff: KeyBackoffSchema = Field(default_factory=KeyBackoffSchema)  # type: ignore[arg-type]
     hosted_tools: HostedToolsSchema = Field(default_factory=HostedToolsSchema)
-    multi_agent: MultiAgentSchema = Field(default_factory=MultiAgentSchema)
+    multi_agent: MultiAgentSchema = Field(default_factory=MultiAgentSchema)  # type: ignore[arg-type]
     cors: CorsSchema = Field(default_factory=CorsSchema)
     auth: AuthSchema = Field(default_factory=AuthSchema)  # type: ignore[arg-type]
     security: SecuritySchema = Field(default_factory=SecuritySchema)  # type: ignore[arg-type]

@@ -508,9 +508,7 @@ class ResponsePipeline:
             skind = self._special_kind(name, chunk_ns)
             if skind is not None:
                 kind, norm_name = skind
-                sc = self._special_calls.setdefault(
-                    call_id, {"name": norm_name, "kind": kind, "args": ""}
-                )
+                sc = self._special_calls.setdefault(call_id, {"name": norm_name, "kind": kind, "args": ""})
                 sc["name"] = sc["name"] or norm_name
                 sc["args"] += fragment
                 return frames
@@ -759,7 +757,9 @@ class ResponsePipeline:
 
                 leader_text = "".join(self._message_text or [])
                 patched = patch_spawn_agent_arguments(
-                    sc["args"], self._last_user_text, leader_text,
+                    sc["args"],
+                    self._last_user_text,
+                    leader_text,
                 )
                 if patched is not None:
                     # 仅当真的补了参（与原始解析结果不同）才改写并记日志
@@ -767,7 +767,9 @@ class ResponsePipeline:
                     if patched != orig:
                         logger.info(
                             "[args-patch] empty-args patched call_id={} model={} execution={}",
-                            call_id, patched.get("model") or "inherit", self._spawn_execution,
+                            call_id,
+                            patched.get("model") or "inherit",
+                            self._spawn_execution,
                         )
                         patched_args = json.dumps(patched, ensure_ascii=False)
                 elif self._spawn_execution != "server":
@@ -781,8 +783,7 @@ class ResponsePipeline:
                         "call_id": call_id,
                         "output": json.dumps(
                             {
-                                "error": "spawn_agent requires a non-empty message; "
-                                         "retry with an explicit instruction",
+                                "error": "spawn_agent requires a non-empty message; retry with an explicit instruction",
                             }
                         ),
                     }
@@ -808,12 +809,14 @@ class ResponsePipeline:
                 #    传给编排器的是**补参后**的 arguments（FR-12 在两条路径一致）。
                 out_idx = self._next_output_index()
                 handle_args = (
-                    patched_args
-                    if isinstance(patched_args, str)
-                    else json.dumps(patched_args, ensure_ascii=False)
+                    patched_args if isinstance(patched_args, str) else json.dumps(patched_args, ensure_ascii=False)
                 )
                 result = await self._multi_agent.handle(
-                    MULTI_AGENT_NAMESPACE, name, call_id, handle_args, output_index=out_idx,
+                    MULTI_AGENT_NAMESPACE,
+                    name,
+                    call_id,
+                    handle_args,
+                    output_index=out_idx,
                 )
                 frames.extend(await self._emit_special_item(out_idx, result))
                 self._synthesized_items.append((out_idx, result))
@@ -948,11 +951,11 @@ class ResponsePipeline:
                     "type": "response.output_item.added",
                     "output_index": idx,
                     "item": {
-                                "id": item_id,
-                                "type": "reasoning",
-                                "status": "in_progress",
-                                "summary": [],
-                            },
+                        "id": item_id,
+                        "type": "reasoning",
+                        "status": "in_progress",
+                        "summary": [],
+                    },
                 },
             )
         )
@@ -1394,9 +1397,7 @@ class ResponsePipeline:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - 翻译层异常必须落成终态帧
-                    logger.exception(
-                        "[pipeline] chunk translation failed response_id={}", self.response_id
-                    )
+                    logger.exception("[pipeline] chunk translation failed response_id={}", self.response_id)
                     internal_error = str(exc) or type(exc).__name__
                     break
         finally:

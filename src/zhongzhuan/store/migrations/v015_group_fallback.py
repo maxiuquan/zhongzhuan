@@ -13,14 +13,10 @@ from __future__ import annotations
 from ..migration_engine import Migration
 
 #: SQLite: TEXT NOT NULL DEFAULT '' 在 ADD COLUMN 下合法(默认值是常量)。
-SQLITE_ALTERS: tuple[str, ...] = (
-    "ALTER TABLE model_groups ADD COLUMN fallback_group TEXT NOT NULL DEFAULT ''",
-)
+SQLITE_ALTERS: tuple[str, ...] = ("ALTER TABLE model_groups ADD COLUMN fallback_group TEXT NOT NULL DEFAULT ''",)
 
 #: MySQL / TiDB: VARCHAR 允许 NOT NULL DEFAULT ''。
-MYSQL_ALTERS: tuple[str, ...] = (
-    "ALTER TABLE model_groups ADD COLUMN fallback_group VARCHAR(128) NOT NULL DEFAULT ''",
-)
+MYSQL_ALTERS: tuple[str, ...] = ("ALTER TABLE model_groups ADD COLUMN fallback_group VARCHAR(128) NOT NULL DEFAULT ''",)
 
 
 MIGRATION = Migration(

@@ -142,7 +142,7 @@ class UpstreamClient:
         path_l = (path or "").lstrip("/")
         base_last = self._base_path.rsplit("/", 1)[-1] if self._base_path else ""
         if base_last and path_l.startswith(base_last + "/"):
-            path_l = path_l[len(base_last):].lstrip("/")
+            path_l = path_l[len(base_last) :].lstrip("/")
         return base_r + "/" + path_l if path_l else base_r
 
     async def stream(

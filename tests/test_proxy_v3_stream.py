@@ -1017,7 +1017,9 @@ def test_extract_usage_from_chat_stream_chunk():
         "total_tokens": 15,
     }
     # 普通文本 delta chunk 无 usage → None。
-    assert _extract_usage_from_chat_stream_chunk(b'data: {"id":"c1","choices":[{"delta":{"content":"hi"}}]}\n\n') is None
+    assert (
+        _extract_usage_from_chat_stream_chunk(b'data: {"id":"c1","choices":[{"delta":{"content":"hi"}}]}\n\n') is None
+    )
     # [DONE] 哨兵 → None。
     assert _extract_usage_from_chat_stream_chunk(b"data: [DONE]\n\n") is None
     # 无 data 前缀 / 空 chunk → None。

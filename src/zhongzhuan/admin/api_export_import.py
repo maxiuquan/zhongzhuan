@@ -138,6 +138,8 @@ def register_routes(app: web.Application, ctx) -> None:
             if models_data is not None:
                 existing = await lm(ctx.store)
                 for m in existing:
+                    if m.id is None:  # 防御：未持久化的模型行无 id 可删
+                        continue
                     await delete_model(ctx.store, m.id)
                 for md in models_data:
                     await create_model(

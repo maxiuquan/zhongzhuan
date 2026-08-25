@@ -234,8 +234,8 @@ def csrf_enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _login_key(ip: str, username: str) -> tuple[str, str]:
-    """限速键：IP + 用户名双维（单 IP 打多账号 / 单账号多 IP 都能拦）。"""
+def _login_key(ip: str | None, username: str) -> tuple[str, str]:
+    """登录限速 IP + 用户名双维键（IP 兜底账号 / 同账号多 IP 防绕过）"""
     return (ip or "unknown", (username or "").strip().lower()[:128])
 
 

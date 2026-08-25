@@ -31,9 +31,7 @@ from __future__ import annotations
 from ..migration_engine import Migration
 
 #: SQLite: INTEGER NOT NULL DEFAULT 1（1 = 支持 reasoning_effort）。
-SQLITE_ALTERS: tuple[str, ...] = (
-    "ALTER TABLE models ADD COLUMN supports_reasoning_effort INTEGER NOT NULL DEFAULT 1",
-)
+SQLITE_ALTERS: tuple[str, ...] = ("ALTER TABLE models ADD COLUMN supports_reasoning_effort INTEGER NOT NULL DEFAULT 1",)
 
 #: MySQL / TiDB: TINYINT(1) NOT NULL DEFAULT 1。
 MYSQL_ALTERS: tuple[str, ...] = (

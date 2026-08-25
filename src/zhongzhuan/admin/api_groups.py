@@ -36,8 +36,7 @@ async def _test_group_key(ctx, key_id: int, model) -> dict:
     except Exception:
         plain = None
     if not plain:
-        return {"key_id": key_id, "ok": False, "status": 0,
-                "error": "key decrypt failed", "url": "", "latency_ms": 0}
+        return {"key_id": key_id, "ok": False, "status": 0, "error": "key decrypt failed", "url": "", "latency_ms": 0}
 
     upstream_base = (model.upstream_base or "").rstrip("/")
     upstream_model = model.upstream_model or model.name
@@ -52,9 +51,7 @@ async def _test_group_key(ctx, key_id: int, model) -> dict:
         headers["Authorization"] = "Bearer " + plain
     from ..proxy.header_templates import render
 
-    for fname, fvalue in _build_fingerprint_headers(
-        model.client_preset or "", model.custom_headers or ""
-    ):
+    for fname, fvalue in _build_fingerprint_headers(model.client_preset or "", model.custom_headers or ""):
         if fname:
             headers[fname] = render(fvalue)
 
@@ -102,16 +99,22 @@ async def _test_group_key(ctx, key_id: int, model) -> dict:
         }
     except httpx.TimeoutException:
         return {
-            "key_id": key_id, "ok": False, "status": 0,
+            "key_id": key_id,
+            "ok": False,
+            "status": 0,
             "latency_ms": int((time.time() - t0) * 1000),
-            "url": url, "model": upstream_model,
+            "url": url,
+            "model": upstream_model,
             "error": "timeout (30s)",
         }
     except Exception as e:
         return {
-            "key_id": key_id, "ok": False, "status": 0,
+            "key_id": key_id,
+            "ok": False,
+            "status": 0,
             "latency_ms": int((time.time() - t0) * 1000),
-            "url": url, "model": upstream_model,
+            "url": url,
+            "model": upstream_model,
             "error": f"{type(e).__name__}: {e}",
         }
 
@@ -128,7 +131,7 @@ def register_routes(app: web.Application, ctx) -> None:
         # 成员 key 的失效标记（model_id → set(失效 key_id)）
         bad_by_model: dict[int, list[int]] = {}
         for g in groups:
-            for m in (g.get("members") or []):
+            for m in g.get("members") or []:
                 mid = m["model_id"]
                 keys = await ctx.store.fetchall(
                     "SELECT id FROM api_keys WHERE model_id=? AND enabled=1",
@@ -145,7 +148,7 @@ def register_routes(app: web.Application, ctx) -> None:
         for g in groups:
             g = dict(g)
             members = []
-            for m in (g.get("members") or []):
+            for m in g.get("members") or []:
                 m = dict(m)
                 m["bad_keys"] = bad_by_model.get(m["model_id"], [])
                 members.append(m)
@@ -164,9 +167,7 @@ def register_routes(app: web.Application, ctx) -> None:
                 fallback_group=data.get("fallback_group", "") or "",
             )
         except (KeyError, TypeError, ValueError) as e:
-            return web.json_response(
-                {"error": {"message": f"invalid payload: {e}", "type": "bad_request"}}, status=400
-            )
+            return web.json_response({"error": {"message": f"invalid payload: {e}", "type": "bad_request"}}, status=400)
         g = await create_group(ctx.store, g)
         members = data.get("members", [])
         if members:
@@ -198,9 +199,7 @@ def register_routes(app: web.Application, ctx) -> None:
                 fallback_group=data.get("fallback_group", "") or "",
             )
         except (KeyError, TypeError, ValueError) as e:
-            return web.json_response(
-                {"error": {"message": f"invalid payload: {e}", "type": "bad_request"}}, status=400
-            )
+            return web.json_response({"error": {"message": f"invalid payload: {e}", "type": "bad_request"}}, status=400)
         await update_group(ctx.store, group_id, g)
         # Only touch members when the field is explicitly provided (list, possibly empty).
         # None = leave members untouched; [] = clear all members.
@@ -226,9 +225,7 @@ def register_routes(app: web.Application, ctx) -> None:
         try:
             group_id = int(request.match_info["id"])
         except ValueError:
-            return web.json_response(
-                {"error": {"message": "invalid group id", "type": "bad_request"}}, status=400
-            )
+            return web.json_response({"error": {"message": "invalid group id", "type": "bad_request"}}, status=400)
         await delete_group(ctx.store, group_id)
         await notify_proxy_reload()
         return web.json_response({"ok": True})
@@ -243,9 +240,7 @@ def register_routes(app: web.Application, ctx) -> None:
         try:
             group_id = int(request.match_info["id"])
         except ValueError:
-            return web.json_response(
-                {"error": {"message": "invalid group id", "type": "bad_request"}}, status=400
-            )
+            return web.json_response({"error": {"message": "invalid group id", "type": "bad_request"}}, status=400)
         rows = await ctx.store.fetchall(
             "SELECT id, name, strategy, fallback_enabled, exposed, fallback_group FROM model_groups WHERE id=?",
             (group_id,),
@@ -290,36 +285,46 @@ def register_routes(app: web.Application, ctx) -> None:
             outcomes = await asyncio.gather(*(_bounded(t[1]) for t in tasks), return_exceptions=True)
             for (kid, _coro), out in zip(tasks, outcomes):
                 if isinstance(out, Exception):
-                    key_results[kid] = {"key_id": kid, "ok": False, "status": 0,
-                                        "error": f"{type(out).__name__}: {out}", "url": ""}
+                    key_results[kid] = {
+                        "key_id": kid,
+                        "ok": False,
+                        "status": 0,
+                        "error": f"{type(out).__name__}: {out}",
+                        "url": "",
+                    }
                 elif out:
                     key_results[kid] = out
 
         models_out = []
         total_ok = total_fail = total_keys = 0
         for model_id, model, key_ids, ord_ in meta:
-            per_key = [key_results.get(kid) or {
-                "key_id": kid, "ok": False, "status": 0, "error": "no result", "url": ""
-            } for kid in key_ids]
+            per_key = [
+                key_results.get(kid) or {"key_id": kid, "ok": False, "status": 0, "error": "no result", "url": ""}
+                for kid in key_ids
+            ]
             ok_n = sum(1 for k in per_key if k.get("ok"))
-            models_out.append({
-                "model_id": model_id,
-                "name": model.name or "",
-                "ord": ord_,
-                "keys": per_key,
-                "ok_count": ok_n,
-                "total": len(per_key),
-            })
+            models_out.append(
+                {
+                    "model_id": model_id,
+                    "name": model.name or "",
+                    "ord": ord_,
+                    "keys": per_key,
+                    "ok_count": ok_n,
+                    "total": len(per_key),
+                }
+            )
             total_keys += len(per_key)
             total_ok += ok_n
             total_fail += len(per_key) - ok_n
 
-        return web.json_response({
-            "ok": True,
-            "group": g[1],
-            "models": models_out,
-            "summary": {"total_keys": total_keys, "ok": total_ok, "fail": total_fail},
-        })
+        return web.json_response(
+            {
+                "ok": True,
+                "group": g[1],
+                "models": models_out,
+                "summary": {"total_keys": total_keys, "ok": total_ok, "fail": total_fail},
+            }
+        )
 
     app.router.add_get("/api/groups", list_)
     app.router.add_post("/api/groups", create)

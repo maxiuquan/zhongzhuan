@@ -138,6 +138,7 @@ def test_mixed_binding_unknown_model_returns_empty():
 # _resolve_degraded：全候选冷却时的降级放行（2026-08-20，P1）
 # ---------------------------------------------------------------------------
 
+
 def _mk_cooling(key_id: int, model_name: str, *, cooldown_secs: int, invalid: bool = False) -> KeyHealth:
     """构造一个处于冷却中（或永久失效）的 key。"""
     k = _mk(key_id, model_name, available=not invalid)

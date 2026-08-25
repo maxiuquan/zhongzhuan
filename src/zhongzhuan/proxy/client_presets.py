@@ -121,11 +121,9 @@ def needs_system_message(preset_name: str) -> bool:
 # WorkBuddy fingerprint; they scan the whole request body and reject with
 # 403 unsupported_client when any system message contains a foreign
 # marker such as "codex" (e.g. the long instructions prompt Codex CLI
-# sends). Neutralization touches system messages only, never user / 
+# sends). Neutralization touches system messages only, never user /
 # assistant / tool content.
-_FOREIGN_CLIENT_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"(?i)codex", "assistant"),
-)
+_FOREIGN_CLIENT_PATTERNS: tuple[tuple[str, str], ...] = ((r"(?i)codex", "assistant"),)
 
 
 def sanitize_system_content(content: str) -> str:

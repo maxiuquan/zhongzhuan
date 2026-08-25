@@ -41,9 +41,7 @@ async def test_no_token_returns_401(server, aiohttp_client, monkeypatch):
     async def _good(store, token):
         return _FakeToken()
 
-    monkeypatch.setattr(
-        "zhongzhuan.store.access_tokens.get_token_by_value", _good
-    )
+    monkeypatch.setattr("zhongzhuan.store.access_tokens.get_token_by_value", _good)
     client = await aiohttp_client(_make_app(server))
     for path in ("/v1/api/codex/models", "/api/codex/models"):
         resp = await client.get(path)
@@ -56,13 +54,9 @@ async def test_bad_token_returns_401(server, aiohttp_client, monkeypatch):
     async def _none(store, token):
         return None
 
-    monkeypatch.setattr(
-        "zhongzhuan.store.access_tokens.get_token_by_value", _none
-    )
+    monkeypatch.setattr("zhongzhuan.store.access_tokens.get_token_by_value", _none)
     client = await aiohttp_client(_make_app(server))
-    resp = await client.get(
-        "/v1/api/codex/models", headers={"Authorization": "Bearer wrong"}
-    )
+    resp = await client.get("/v1/api/codex/models", headers={"Authorization": "Bearer wrong"})
     assert resp.status == 401
 
 
@@ -70,9 +64,8 @@ async def test_valid_token_returns_models(server, aiohttp_client, monkeypatch):
     async def _good(store, token):
         return _FakeToken(ok=True)
 
-    monkeypatch.setattr(
-        "zhongzhuan.store.access_tokens.get_token_by_value", _good
-    )
+    monkeypatch.setattr("zhongzhuan.store.access_tokens.get_token_by_value", _good)
+
     # force a known official-model list (non-fallback)
     async def _slugs():
         return [
@@ -92,9 +85,7 @@ async def test_valid_token_returns_models(server, aiohttp_client, monkeypatch):
     assert "models" in body
     assert len(body["models"]) == 3
     # alias path identical
-    resp2 = await client.get(
-        "/v1/api/codex/models", headers={"Authorization": "Bearer zz-goodtoken"}
-    )
+    resp2 = await client.get("/v1/api/codex/models", headers={"Authorization": "Bearer zz-goodtoken"})
     assert resp2.status == 200
     assert await resp2.json() == body
 
@@ -136,16 +127,25 @@ def test_model_info_shape():
 async def test_codex_model_slugs_excludes_fallback_and_disabled(monkeypatch):
     """The live query must surface only enabled, non-fallback (official) models."""
     official = Model(
-        name="gpt-5.6-sol", upstream_base="x", upstream_model="y",
-        enabled=True, is_fallback=False,
+        name="gpt-5.6-sol",
+        upstream_base="x",
+        upstream_model="y",
+        enabled=True,
+        is_fallback=False,
     )
     fallback = Model(
-        name="oc-glm-5.2-free", upstream_base="x", upstream_model="y",
-        enabled=True, is_fallback=True,
+        name="oc-glm-5.2-free",
+        upstream_base="x",
+        upstream_model="y",
+        enabled=True,
+        is_fallback=True,
     )
     disabled_official = Model(
-        name="glm-5.2", upstream_base="x", upstream_model="y",
-        enabled=False, is_fallback=False,
+        name="glm-5.2",
+        upstream_base="x",
+        upstream_model="y",
+        enabled=False,
+        is_fallback=False,
     )
 
     async def _fake_list(_store):
@@ -162,6 +162,7 @@ async def test_codex_model_slugs_excludes_fallback_and_disabled(monkeypatch):
 # everyone else keeps the original OpenAI `{"object":"list","data":[...]}`.
 # ----------------------------------------------------------------------
 
+
 def _make_models_app(server):
     app = web.Application()
     app.router.add_get("/v1/models", server._list_models)
@@ -170,8 +171,10 @@ def _make_models_app(server):
 
 async def test_models_route_codex_ua_returns_codex_catalog(aiohttp_client, monkeypatch):
     s = ProxyServer(upstream_clients={}, store=object())
+
     async def _slugs():
         return ["gpt-5.6-sol", "glm-5.2"]
+
     monkeypatch.setattr(s, "_codex_model_slugs", _slugs)
     client = await aiohttp_client(_make_models_app(s))
 
@@ -202,9 +205,7 @@ async def test_models_route_non_codex_ua_returns_openai_list(aiohttp_client, mon
     assert [d["id"] for d in body["data"]] == ["gpt-5.6-sol", "glm-5.2"]
 
     # A normal OpenAI-compatible client UA -> OpenAI format
-    resp2 = await client.get(
-        "/v1/models", headers={"User-Agent": "OpenAI/Python 1.0"}
-    )
+    resp2 = await client.get("/v1/models", headers={"User-Agent": "OpenAI/Python 1.0"})
     assert resp2.status == 200
     assert (await resp2.json()).get("object") == "list"
 
@@ -212,6 +213,7 @@ async def test_models_route_non_codex_ua_returns_openai_list(aiohttp_client, mon
 # ----------------------------------------------------------------------
 # Codex client detection (pure predicate — no aiohttp_client fixture needed)
 # ----------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     "path, headers, expected",

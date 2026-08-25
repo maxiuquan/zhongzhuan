@@ -137,7 +137,7 @@ async def _post(port: int, body: dict, token: str) -> tuple[int, str, bytes]:
 
 def _event_types(raw: bytes) -> list[str]:
     return [
-        line[len("event:"):].strip()
+        line[len("event:") :].strip()
         for line in raw.decode("utf-8", "replace").splitlines()
         if line.startswith("event:")
     ]
@@ -150,7 +150,7 @@ def _joined_text(raw: bytes) -> str:
         if not line.startswith("data:"):
             continue
         try:
-            obj = json.loads(line[len("data:"):].strip())
+            obj = json.loads(line[len("data:") :].strip())
         except Exception:
             continue
         if isinstance(obj, dict) and obj.get("type") == "response.output_text.delta":

@@ -454,9 +454,7 @@ class BackgroundWorker:
                 if not await self._jobs.renew_lease(task_id, self._lease_seconds):
                     run = self._runs.get(task_id)
                     if run is not None:
-                        LOGGER.warning(
-                            "background job %s lost its lease; cancelling in-flight upstream", task_id
-                        )
+                        LOGGER.warning("background job %s lost its lease; cancelling in-flight upstream", task_id)
                         run.cancelled = True
                         await run.cancel_upstream()
                     return

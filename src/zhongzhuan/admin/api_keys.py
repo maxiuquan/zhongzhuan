@@ -32,7 +32,8 @@ def _chat_reasoning_candidates(level: str) -> list[tuple[str, dict]]:
     """Candidate reasoning-field shapes to blind-probe against a chat upstream."""
     s = _NORM_STR[level]
     b = _NORM_BUDGET[level]
-    cands = [
+    # 显式标注值类型为 dict：混合字面量会让 mypy 推断成 object（dict 逆变）。
+    cands: list[tuple[str, dict]] = [
         ("reasoning_effort", {"reasoning_effort": s}),
         ("reasoning_effort_obj", {"reasoning": {"effort": s}}),
         ("thinking_budget", {"thinking": {"budget_tokens": b}}),
@@ -68,7 +69,6 @@ def _probe_body_ok(resp) -> bool:
     if isinstance(data, dict) and "error" in data:
         return False
     return True
-
 
 
 def _anthropic_reasoning_candidates(level: str) -> list[tuple[str, dict]]:
@@ -149,7 +149,7 @@ def _build_upstream_url(
     base_path = urlparse(base).path.rstrip("/")
     base_last = base_path.rsplit("/", 1)[-1] if base_path else ""
     if base_last and path.startswith(base_last + "/"):
-        path = path[len(base_last):].lstrip("/")
+        path = path[len(base_last) :].lstrip("/")
     return base + "/" + path if path else base
 
 
@@ -345,12 +345,10 @@ def register_routes(app: web.Application, ctx) -> None:
 
         def _make_base():
             if protocol == "anthropic":
-                return {"model": upstream_model, "max_tokens": 16384,
-                        "messages": [{"role": "user", "content": "hi"}]}
+                return {"model": upstream_model, "max_tokens": 16384, "messages": [{"role": "user", "content": "hi"}]}
             messages = [{"role": "user", "content": "hi"}]
             if has_fingerprint:
-                messages.insert(0, {"role": "system",
-                                    "content": "This conversation is powered by " + upstream_model})
+                messages.insert(0, {"role": "system", "content": "This conversation is powered by " + upstream_model})
             return {"model": upstream_model, "max_tokens": 1, "messages": messages, "stream": False}
 
         # 思考等级探针：仅「首次」连通性测试时探测并落库到 model 行，
@@ -390,7 +388,9 @@ def register_routes(app: web.Application, ctx) -> None:
             if not ok:
                 try:
                     err_obj = ping_resp.json()
-                    err_msg = err_obj.get("error", {}).get("message") or err_obj.get("message") or str(ping_resp.status_code)
+                    err_msg = (
+                        err_obj.get("error", {}).get("message") or err_obj.get("message") or str(ping_resp.status_code)
+                    )
                 except Exception:
                     err_msg = ping_resp.text[:200] if ping_resp.text else str(ping_resp.status_code)
             return web.json_response(

@@ -143,4 +143,3 @@ async def _crypto_init_for_tests(tmp_path_factory):
     from zhongzhuan.crypto import init as crypto_init
 
     await crypto_init(tmp_path_factory.mktemp("crypto"))
-

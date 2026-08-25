@@ -37,7 +37,7 @@ async def _check_confirm(request: web.Request) -> web.Response | None:
         data = None
     if not isinstance(data, dict) or data.get("confirm") is not True:
         return web.json_response(
-            {"error": {"message": "missing {\"confirm\": true} in body", "type": "confirm_required"}},
+            {"error": {"message": 'missing {"confirm": true} in body', "type": "confirm_required"}},
             status=400,
         )
     return None

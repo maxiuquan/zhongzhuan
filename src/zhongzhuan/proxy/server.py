@@ -98,9 +98,7 @@ class ProxyServer:
 
         # T34 / R-P2-15：并发闸门接线（此前从未生效）。位于 CORS 之后、auth
         # 之前：超限请求排队等待，排队超时由中间件映射为 429 + Retry-After。
-        self._concurrency_gate = ConcurrencyGate(
-            GateConfig(global_limit=self.global_concurrent)
-        )
+        self._concurrency_gate = ConcurrencyGate(GateConfig(global_limit=self.global_concurrent))
         app.middlewares.append(make_concurrency_middleware(self._concurrency_gate))
 
         # Proxy access token auth middleware (VPS mode)
@@ -602,8 +600,7 @@ class ProxyServer:
                 rows = await _list_models_db(self.store)
                 for m in rows:
                     # 暴露给 Codex 需同时满足：启用、非兜底、且 exposed 开关打开。
-                    if not (m.enabled and not getattr(m, "is_fallback", False)
-                            and getattr(m, "exposed", True)):
+                    if not (m.enabled and not getattr(m, "is_fallback", False) and getattr(m, "exposed", True)):
                         continue
                     if m.name not in seen:
                         seen.add(m.name)
@@ -620,9 +617,7 @@ class ProxyServer:
                 try:
                     for g in await _list_groups_db(self.store):
                         gname = g.get("name", "")
-                        if (gname and gname != "mf"
-                                and g.get("exposed", True)
-                                and gname not in seen):
+                        if gname and gname != "mf" and g.get("exposed", True) and gname not in seen:
                             seen.add(gname)
                             slugs.append(gname)
                 except Exception:
@@ -649,7 +644,7 @@ class ProxyServer:
         ``supports_search_tool``、``minimal_client_version``，让 Codex 桌面端
         知道本中继支持原生子代理协议，从而走通 spawn/wait 而非退化为单兵模式。
         """
-        display = slug[len("oc-"):] if slug.startswith("oc-") else slug
+        display = slug[len("oc-") :] if slug.startswith("oc-") else slug
         info: dict[str, Any] = {
             "slug": slug,
             "display_name": display,

@@ -81,10 +81,15 @@ def register_routes(app: web.Application, ctx) -> None:
             await update_group(ctx.store, gid, gd)
 
         await notify_proxy_reload()
-        return web.json_response({"ok": True, "saved": {
-            "models": len(model_flags),
-            "groups": len(group_flags),
-        }})
+        return web.json_response(
+            {
+                "ok": True,
+                "saved": {
+                    "models": len(model_flags),
+                    "groups": len(group_flags),
+                },
+            }
+        )
 
     app.router.add_get("/api/exposure", get_)
     app.router.add_post("/api/exposure", save)

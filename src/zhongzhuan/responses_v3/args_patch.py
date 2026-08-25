@@ -35,9 +35,7 @@ ROLE_MODEL_MAP: dict[str, str] = {
 _ROLE_TAGS: tuple[str, ...] = tuple(ROLE_MODEL_MAP.keys())
 
 #: 合成 message 追加的防递归后缀（FR-12b.5 / 风险 R4）。
-_ANTI_RECURSE_SUFFIX = (
-    "\n\n(独立完成任务并直接回报结果，不要再次调用 spawn_agent 派生子代理。)"
-)
+_ANTI_RECURSE_SUFFIX = "\n\n(独立完成任务并直接回报结果，不要再次调用 spawn_agent 派生子代理。)"
 
 
 def detect_role_tag(text: str) -> tuple[str, str]:
@@ -93,7 +91,7 @@ def _strip_leading_role_tag(msg: str) -> str:
     for tag in _ROLE_TAGS:
         prefix = "[" + tag + "]"
         if low.startswith(prefix):
-            return msg[len(prefix):].lstrip()
+            return msg[len(prefix) :].lstrip()
     return msg
 
 

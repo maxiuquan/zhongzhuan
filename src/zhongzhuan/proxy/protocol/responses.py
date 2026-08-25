@@ -160,6 +160,8 @@ def _flatten_namespace_tool(tool: dict) -> list[dict]:
             # 无合法表达，与顶层 hosted drop 一致。
             continue
         fn = sub.get("function") if isinstance(sub.get("function"), dict) else sub
+        if not isinstance(fn, dict):  # mypy: sub 本身可能是 None
+            continue
         sub_name = str(fn.get("name") or "").strip()
         if not sub_name:
             continue
@@ -375,9 +377,7 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
         tc_type = tc.get("type")
         if tc_type == NAMESPACE_TOOL_TYPE:
             flat = _first_flattened_tool_name(body.get("tools"), str(tc.get("name") or ""))
-            result["tool_choice"] = (
-                {"type": "function", "function": {"name": flat}} if flat else "auto"
-            )
+            result["tool_choice"] = {"type": "function", "function": {"name": flat}} if flat else "auto"
         elif tc_type == "function" and isinstance(tc.get("function"), dict):
             result["tool_choice"] = {"type": "function", "function": {"name": str(tc["function"].get("name", ""))}}
 

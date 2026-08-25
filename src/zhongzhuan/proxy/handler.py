@@ -8,11 +8,14 @@ import threading
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import web
 
 import asyncio
+
+if TYPE_CHECKING:
+    from ..store.response_store import ResponseStore
 
 from ..store import Store
 from ..store.logs import log_request
@@ -221,6 +224,7 @@ def _ma_normalize_upstream_body(body: dict[str, Any]) -> None:
                 existing.append(t)
                 seen.add(name)
 
+
 #: V3 流式路径在把首个字节发给客户端之前，最多可切换的上游 key 次数
 #: （即最多尝试 ``_V3_STREAM_MAX_SWITCHES + 1`` 个 key）。用于「空响应自动换 key」。
 #:
@@ -353,14 +357,13 @@ def _clean_upstream_failure(status_code: int, body: bytes, headers: dict | None)
     Returns ``(status, body, content_type)`` — unchanged unless it's a
     Cloudflare block, in which case ``(502, json_bytes, "application/json")``.
     """
-    if looks_like_cloudflare_block(status_code, headers or {}, body or b"") or looks_like_proxy_block(status_code, headers or {}, body or b""):
+    if looks_like_cloudflare_block(status_code, headers or {}, body or b"") or looks_like_proxy_block(
+        status_code, headers or {}, body or b""
+    ):
         payload = json.dumps(
             {
                 "error": {
-                    "message": (
-                        "upstream endpoint is behind a Cloudflare challenge "
-                        "and could not be reached"
-                    ),
+                    "message": ("upstream endpoint is behind a Cloudflare challenge and could not be reached"),
                     "type": "upstream_blocked",
                     "code": "cloudflare_challenge",
                 }
@@ -404,9 +407,14 @@ def _strip_reasoning_effort(body_obj: dict) -> bool:
 # Canonical reasoning levels exposed to downstream clients (M013).
 _RE_LEVELS = ("none", "low", "medium", "high", "ultra")
 _RE_NORM_ALIASES = {
-    "none": "none", "off": "none", "minimal": "none",
-    "low": "low", "medium": "medium", "high": "high",
-    "ultra": "ultra", "xhigh": "ultra",
+    "none": "none",
+    "off": "none",
+    "minimal": "none",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "ultra": "ultra",
+    "xhigh": "ultra",
 }
 
 
@@ -522,9 +530,7 @@ def _response_is_empty(inbound_protocol: str, parsed: Any) -> bool:
                 return False
             elif itype == "reasoning":
                 summary = item.get("summary")
-                if isinstance(summary, list) and any(
-                    isinstance(s, dict) and s.get("text") for s in summary
-                ):
+                if isinstance(summary, list) and any(isinstance(s, dict) and s.get("text") for s in summary):
                     return False
         return True
     # chat completions / anthropic 归一化后的结构
@@ -557,7 +563,7 @@ def _v3_frame_has_content(frame: bytes) -> bool:
     for line in text.splitlines():
         if not line.startswith("data:"):
             continue
-        payload = line[len("data:"):].strip()
+        payload = line[len("data:") :].strip()
         if not payload:
             continue
         try:
@@ -1388,11 +1394,7 @@ class ProxyHandler:
         """V1 多代理是否激活：两个开关（hosted_tools.tool_search_enabled 与
         multi_agent.enabled）必须同时为真，避免「只开其一」的半残状态。"""
         ma_cfg = self._multi_agent_config()
-        return bool(
-            ma_cfg
-            and getattr(ma_cfg, "enabled", False)
-            and self._multi_agent_tool_search_enabled()
-        )
+        return bool(ma_cfg and getattr(ma_cfg, "enabled", False) and self._multi_agent_tool_search_enabled())
 
     def _agnes_classify_backoff(self) -> tuple[bool, str, int]:
         """读取 key_backoff 配置（agnes 补判开关/模型/最小间隔）。"""
@@ -1471,8 +1473,7 @@ class ProxyHandler:
             # 无 upstream_base 无法定位上游：跳过补判。不再回退到硬编码域名
             # （配置外的隐式网络行为，且该域名早已不可用）。
             _lg.debug(
-                f"[key-backoff] agnes classify skipped: key_id={getattr(key, 'key_id', '?')} "
-                f"has no upstream_base"
+                f"[key-backoff] agnes classify skipped: key_id={getattr(key, 'key_id', '?')} has no upstream_base"
             )
             return "unknown"
         native = str(getattr(key, "upstream_model", "") or model)
@@ -1498,11 +1499,13 @@ class ProxyHandler:
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         async with _aio.ClientSession() as session:
             async with session.post(
-                url, json=payload, headers=headers,
+                url,
+                json=payload,
+                headers=headers,
                 timeout=_aio.ClientTimeout(total=20),
             ) as resp:
                 data = await resp.json()
-        for item in (data.get("choices") or []):
+        for item in data.get("choices") or []:
             text = (item.get("message") or {}).get("content") or ""
             word = text.strip().lower().split()[0] if text.strip() else ""
             if word in ("permanent", "banned", "rate_limit", "transient", "no_retry"):
@@ -1584,7 +1587,7 @@ class ProxyHandler:
 
         def _sort_key(k):
             # 非 free 优先；同档内保持原顺序。
-            return (0 if _nonfree(k) else 1)
+            return 0 if _nonfree(k) else 1
 
         target_base = model.rsplit("/", 1)[-1] if model else ""
         base_pool = [
@@ -1609,10 +1612,11 @@ class ProxyHandler:
             _lg.warning("multi_agent sub-agent: no key with upstream_base/upstream_model available")
             return ""
         _lg.info(
-            "multi_agent sub-agent pool for model=" + repr(model) + ": "
+            "multi_agent sub-agent pool for model="
+            + repr(model)
+            + ": "
             + ", ".join(
-                f"{getattr(k, 'key_id', '?')}:{getattr(k, 'model_name', '')}"
-                + ("" if _nonfree(k) else "(free)")
+                f"{getattr(k, 'key_id', '?')}:{getattr(k, 'model_name', '')}" + ("" if _nonfree(k) else "(free)")
                 for k in pool[:12]
             )
         )
@@ -1653,7 +1657,9 @@ class ProxyHandler:
 
             async with _aio.ClientSession() as session:
                 async with session.post(
-                    url, json=payload, headers=headers,
+                    url,
+                    json=payload,
+                    headers=headers,
                     timeout=_aio.ClientTimeout(total=float(timeout)),
                 ) as resp:
                     data = await resp.json()
@@ -1678,7 +1684,10 @@ class ProxyHandler:
         return text
 
     async def _postprocess_multi_agent_json(
-        self, resp_obj: dict, orchestrator: Any | None, tool_search_enabled: bool,
+        self,
+        resp_obj: dict,
+        orchestrator: Any | None,
+        tool_search_enabled: bool,
         last_user_text: str = "",
     ) -> None:
         """非流路径的 V1 多代理后处理（FR-2 / FR-3）。
@@ -1734,8 +1743,10 @@ class ProxyHandler:
                     new_output.append(fco)
                     idx += 1
                 continue
-            if orchestrator is not None and itype == "function_call" and (
-                ns == MULTI_AGENT_NAMESPACE or name in MULTI_AGENT_TOOLS
+            if (
+                orchestrator is not None
+                and itype == "function_call"
+                and (ns == MULTI_AGENT_NAMESPACE or name in MULTI_AGENT_TOOLS)
             ):
                 fc_item = dict(item)
                 fc_item["status"] = "completed"
@@ -1747,7 +1758,10 @@ class ProxyHandler:
                     # client 透传时的兜底，且 FR-10 保证 fco 含子代理产物。
                     fc_item.pop("arguments", None)
                     result = await orchestrator.handle(
-                        MULTI_AGENT_NAMESPACE, name, call_id, item.get("arguments") or "{}",
+                        MULTI_AGENT_NAMESPACE,
+                        name,
+                        call_id,
+                        item.get("arguments") or "{}",
                         output_index=idx,
                     )
                     new_output.append(result)
@@ -1766,13 +1780,19 @@ class ProxyHandler:
                         for prev in new_output:
                             if isinstance(prev, dict) and prev.get("type") == "message":
                                 parts = []
-                                for c in (prev.get("content") or []):
-                                    if isinstance(c, dict) and c.get("type") in ("output_text", "text") and c.get("text"):
+                                for c in prev.get("content") or []:
+                                    if (
+                                        isinstance(c, dict)
+                                        and c.get("type") in ("output_text", "text")
+                                        and c.get("text")
+                                    ):
                                         parts.append(str(c["text"]))
                                 if parts:
                                     leader_text += " ".join(parts)
                         patched = patch_spawn_agent_arguments(
-                            item.get("arguments") or "{}", last_user_text, leader_text,
+                            item.get("arguments") or "{}",
+                            last_user_text,
+                            leader_text,
                         )
                         if patched is not None:
                             if patched != _ma_safe_json(item.get("arguments")):
@@ -1792,7 +1812,7 @@ class ProxyHandler:
                                     "output": json.dumps(
                                         {
                                             "error": "spawn_agent requires a non-empty message; "
-                                                     "retry with an explicit instruction",
+                                            "retry with an explicit instruction",
                                         }
                                     ),
                                 }
@@ -1820,6 +1840,7 @@ class ProxyHandler:
         prep, error = await self._prepare_v3_create(request, ctx, candidates)
         if error is not None:
             return error
+        assert prep is not None  # narrow for type checkers: error is None
 
         # V1 多代理（APIAADBPW-REQ-MA-001 / FR-3 / FR-4）：非流路径同样按会话取出
         # 编排器，供下方对上游返回的 ``output`` 做 namespaced 调用拦截与执行。
@@ -1830,7 +1851,6 @@ class ProxyHandler:
         orchestrator = None
         if ma_active:
             orchestrator = await self._get_or_create_orchestrator(session_key, parent_model)
-        assert prep is not None  # narrow for type checkers: error is None
 
         t0 = time.time()
         max_switches = min(len(candidates), _V3_STREAM_MAX_SWITCHES + 1)
@@ -1839,7 +1859,9 @@ class ProxyHandler:
         payload_bytes = b""
         for _attempt in range(max_switches):
             decision = self._v3_select_retry_key(
-                prep, candidates, tried,
+                prep,
+                candidates,
+                tried,
                 member_order=self._failover_member_order(ctx.requested_model or ""),
             )
             if decision is None:
@@ -2001,7 +2023,9 @@ class ProxyHandler:
         if ma_active:
             try:
                 await self._postprocess_multi_agent_json(
-                    resp_obj, orchestrator, ma_active,
+                    resp_obj,
+                    orchestrator,
+                    ma_active,
                     last_user_text=_ma_last_user_text(prep.body_obj or {}),
                 )
             except Exception as exc:  # noqa: BLE001 - 后处理失败绝不能污染上游成功响应
@@ -2014,7 +2038,7 @@ class ProxyHandler:
         # later retrieve() (T37 criterion ②).
         if prep.previous_response_id:
             resp_obj["previous_response_id"] = prep.previous_response_id
-        if prep.body_obj.get("background"):
+        if (prep.body_obj or {}).get("background"):
             resp_obj["background"] = True
         if "store" not in resp_obj:
             resp_obj["store"] = prep.store_enabled
@@ -2029,7 +2053,8 @@ class ProxyHandler:
                 output=output,
             )
         # 落请求日志（fire-and-forget）：v3 非流成功路径此前从不写 request_logs。
-        _v3_usage = resp_obj.get("usage") if isinstance(resp_obj.get("usage"), dict) else {}
+        _v3_usage_raw = resp_obj.get("usage")
+        _v3_usage: dict = _v3_usage_raw if isinstance(_v3_usage_raw, dict) else {}
         _v3_tin = int(_v3_usage.get("prompt_tokens") or _v3_usage.get("input_tokens") or 0)
         _v3_tout = int(_v3_usage.get("completion_tokens") or _v3_usage.get("output_tokens") or 0)
         self._v3_log_request(
@@ -2131,7 +2156,9 @@ class ProxyHandler:
         for _attempt in range(max_switches):
             # A6. Key / translation / headers / body -- still no network I/O.
             decision = self._v3_select_retry_key(
-                prep, candidates, tried,
+                prep,
+                candidates,
+                tried,
                 member_order=self._failover_member_order(ctx.requested_model or ""),
             )
             if decision is None:
@@ -2240,16 +2267,16 @@ class ProxyHandler:
                         # (esp. the NATIVE passthrough branch, which only
                         # re-serializes when something else mutated) carries the
                         # corrected payload, not the stale pre-strip final_body.
-                        prep.final_body = json.dumps(
-                            prep.upstream_body, ensure_ascii=False
-                        ).encode()
+                        prep.final_body = json.dumps(prep.upstream_body, ensure_ascii=False).encode()
                         _lg.warning(
                             f"[v3-stream] upstream rejected reasoning_effort "
                             f"(key_id={key.key_id}); stripping param and retrying same key once"
                         )
                         await self._aclose_quietly(upstream_gen)
                         continue
-                    _retryable, _flabel = classify_failure_labelled(key, upstream_resp.status_code, upstream_headers, error_body)
+                    _retryable, _flabel = classify_failure_labelled(
+                        key, upstream_resp.status_code, upstream_headers, error_body
+                    )
                     if _flabel == "unknown":
                         # 规则盲区：异步交给 agnes 补判（非阻塞，不影响本次路由）
                         self._maybe_agnes_classify(key.key_id, upstream_resp.status_code, error_body)
@@ -2308,21 +2335,18 @@ class ProxyHandler:
                 continue
 
             # A8. ---- Phase A 结束：从这里开始状态码是 200。 ----
+            assert call is not None  # error 非 None 的分支均已 break/continue
             adapter = UpstreamSSEChunkAdapter.for_protocol(
                 call.outbound_protocol,
                 native=not call.need_translation,
             )
             # 事件日志同样要等到「这次尝试被认领」才落库，否则被放弃的尝试会
             # 占掉 (response_id, seq) 唯一键，让重试的新 pipeline 撞约束。
-            deferred = (
-                _DeferredEventStore(prep.rs)
-                if prep.store_enabled and prep.rs is not None
-                else None
-            )
+            deferred = _DeferredEventStore(prep.rs) if prep.store_enabled and prep.rs is not None else None
             pipeline = ResponsePipeline(
                 prep.response_id,
                 workspace_id=prep.workspace_id,
-                store=deferred,
+                store=cast("ResponseStore | None", deferred),
                 multi_agent=orchestrator,
                 tool_search_enabled=ma_active,
                 tool_search_mode=self._multi_agent_tool_search_mode(),
@@ -2480,9 +2504,7 @@ class ProxyHandler:
                 pass
             return resp
 
-        if last_truncated is not None and any(
-            _v3_frame_has_content(f) for f in last_truncated[0]
-        ):
+        if last_truncated is not None and any(_v3_frame_has_content(f) for f in last_truncated[0]):
             # 至少有一次是「真的开始说话但被切断」：把最后一次尝试如实回放，
             # 客户端拿到 200 + response.incomplete/failed（原有语义不变）。
             pending, pl, pl_deferred = last_truncated
@@ -2529,11 +2551,7 @@ class ProxyHandler:
         # 的参数错误，换 key / 换形态都救不了）。这类拒绝是永久性的、与具体 key
         # 无关（重试只是浪费），把上游的真实错误体透传给客户端，Codex 才能看到
         # 确切原因，而不是被笼统的 502「空响应」误导。
-        _passthrough_4xx = (
-            last_upstream_status
-            and 400 <= last_upstream_status < 500
-            and not last_upstream_retryable
-        )
+        _passthrough_4xx = last_upstream_status and 400 <= last_upstream_status < 500 and not last_upstream_retryable
         if last_upstream_body and (last_upstream_status in (401, 403) or _passthrough_4xx):
             _lg.warning(
                 f"[v3-stream] all {len(tried)} candidate key(s) rejected with "
@@ -2557,8 +2575,7 @@ class ProxyHandler:
             # 避免「empty response」误导成 relay 没转换。
             detail += f"; last upstream status={last_upstream_status}"
         _lg.warning(
-            f"[v3-stream] all {len(tried)} candidate key(s) produced no content "
-            f"for response {prep.response_id}{detail}"
+            f"[v3-stream] all {len(tried)} candidate key(s) produced no content for response {prep.response_id}{detail}"
         )
         await self._persist_v3_stream_terminal(prep, "failed", last_reason or TerminalReason.UPSTREAM_ERROR.value)
         # 所有候选 key 首字节前全败：记 502（用最近一次尝试的 key/协议回填）。
@@ -2575,10 +2592,7 @@ class ProxyHandler:
         return web.json_response(
             {
                 "error": {
-                    "message": (
-                        f"upstream returned an empty response on all {len(tried)} candidate key(s)"
-                        f"{detail}"
-                    ),
+                    "message": (f"upstream returned an empty response on all {len(tried)} candidate key(s){detail}"),
                     "type": "upstream_error",
                     "code": code,
                 }
@@ -2687,8 +2701,7 @@ class ProxyHandler:
                 else:
                     continue
             _lg.warning(
-                f"[v3-stream] non-stream fallback OK (key_id={k.key_id}); "
-                f"replaying {prep.response_id} as buffered SSE"
+                f"[v3-stream] non-stream fallback OK (key_id={k.key_id}); replaying {prep.response_id} as buffered SSE"
             )
             # V1 多代理（APIAADBPW-REQ-MA-001 / FR-2 / FR-3）：降级路径同样要拦截
             # tool_search / multi_agent_v1 调用并就地合成/执行，否则回放给客户端的
@@ -2696,19 +2709,17 @@ class ProxyHandler:
             # 原始形态透传、无 function_call_output）。
             if self._multi_agent_active():
                 try:
-                    orch = await self._get_or_create_orchestrator(
-                        session_key, ctx.requested_model or ""
-                    )
+                    orch = await self._get_or_create_orchestrator(session_key, ctx.requested_model or "")
                     await self._postprocess_multi_agent_json(
-                        resp_obj, orch, True,
+                        resp_obj,
+                        orch,
+                        True,
                         last_user_text=_ma_last_user_text(prep.body_obj or {}),
                     )
                 except Exception:
                     _lg.exception("[v3-stream] multi_agent postprocess on fallback failed")
             try:
-                await self._persist_v3_stream_terminal(
-                    prep, "completed", "", output=resp_obj.get("output") or []
-                )
+                await self._persist_v3_stream_terminal(prep, "completed", "", output=resp_obj.get("output") or [])
             except Exception:
                 _lg.exception("[v3-stream] non-stream fallback persist failed")
             frames = self._nonstream_to_sse_frames(resp_obj, prep)
@@ -2718,7 +2729,8 @@ class ProxyHandler:
             resp_out.headers["X-Accel-Buffering"] = "no"
             resp_out.headers["Connection"] = "keep-alive"
             # 非流降级成功：记 200（带 usage token）。fire-and-forget，不阻塞回放。
-            _fb_usage = resp_obj.get("usage") if isinstance(resp_obj.get("usage"), dict) else {}
+            _fb_usage_raw = resp_obj.get("usage")
+            _fb_usage: dict = _fb_usage_raw if isinstance(_fb_usage_raw, dict) else {}
             _fb_tin = int(_fb_usage.get("prompt_tokens") or _fb_usage.get("input_tokens") or 0)
             _fb_tout = int(_fb_usage.get("completion_tokens") or _fb_usage.get("output_tokens") or 0)
             self._v3_log_request(
@@ -2741,10 +2753,7 @@ class ProxyHandler:
             except (ConnectionResetError, ConnectionError, OSError):
                 pass
             return resp_out
-        _lg.warning(
-            f"[v3-stream] non-stream fallback all failed "
-            f"(last status={last_status} body={last_body[:200]!r})"
-        )
+        _lg.warning(f"[v3-stream] non-stream fallback all failed (last status={last_status} body={last_body[:200]!r})")
         return None
 
     @staticmethod
@@ -2767,10 +2776,12 @@ class ProxyHandler:
             data["sequence_number"] = seq
             seq += 1
             frames.append(
-                ("event: {0}\ndata: {1}\n\n".format(
-                    event_type,
-                    json.dumps(data, ensure_ascii=False, separators=(",", ":")),
-                )).encode("utf-8")
+                (
+                    "event: {0}\ndata: {1}\n\n".format(
+                        event_type,
+                        json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                    )
+                ).encode("utf-8")
             )
 
         rid = prep.response_id
@@ -2858,7 +2869,9 @@ class ProxyHandler:
         frame("response.completed", {"type": "response.completed", "response": final})
         return frames
 
-    def _v3_select_retry_key(self, prep, candidates: list[KeyHealth], tried: set[int], member_order: list[int] | None = None):
+    def _v3_select_retry_key(
+        self, prep, candidates: list[KeyHealth], tried: set[int], member_order: list[int] | None = None
+    ):
         """为本轮重试挑选一个尚未尝试过的候选 key。
 
         首轮优先使用 capability 路由已经选定的 key（``prep.decision.key``）；
@@ -3535,8 +3548,7 @@ class ProxyHandler:
             ):
                 _block_reasoning_effort_for(key)
                 _lg.warning(
-                    f"[v3] upstream rejected reasoning_effort (key_id={key.key_id}); "
-                    f"stripping param and retrying once"
+                    f"[v3] upstream rejected reasoning_effort (key_id={key.key_id}); stripping param and retrying once"
                 )
                 _r, _p, _ob, _tr = await self._run_v3_nonstream(
                     request=request,
@@ -3550,9 +3562,7 @@ class ProxyHandler:
                     force_translate=force_translate,
                 )
                 return _r, _p, _ob, _tr
-            result = _V3UpstreamResult(
-                resp.status_code, data, outbound_protocol, need_translation
-            )
+            result = _V3UpstreamResult(resp.status_code, data, outbound_protocol, need_translation)
             return result, data, outbound_protocol, need_translation
 
         mark_success(key)
@@ -3594,9 +3604,12 @@ class ProxyHandler:
             except (json.JSONDecodeError, ValueError) as exc:
                 _lg.warning(f"[v3] failed to translate response: {exc}, returning raw")
 
-        return _V3UpstreamResult(
-            resp.status_code, data, outbound_protocol, need_translation
-        ), data, outbound_protocol, need_translation
+        return (
+            _V3UpstreamResult(resp.status_code, data, outbound_protocol, need_translation),
+            data,
+            outbound_protocol,
+            need_translation,
+        )
 
     def _filter_v3_candidates(
         self,
@@ -3953,9 +3966,7 @@ class ProxyHandler:
             with _REASONING_MAP_LOCK:
                 _REASONING_MAP.clear()
                 _REASONING_MAP.update(new_map)
-            _lg.info(
-                f"[reasoning_effort] blocklist rebuilt: {len(blocked)} upstream(s) reject reasoning_effort"
-            )
+            _lg.info(f"[reasoning_effort] blocklist rebuilt: {len(blocked)} upstream(s) reject reasoning_effort")
         except Exception:
             _lg.exception("rebuild reasoning_effort blocklist failed")
 
@@ -4138,9 +4149,7 @@ class ProxyHandler:
                 # 同步清理 _sticky_caps：此前只有单次查询的过期分支会删它，
                 # 批量清理循环从不碰，导致 caps 字典只增不减（内存泄漏）。
                 caps_before = len(self._sticky_caps)
-                self._sticky_caps = {
-                    s: c for s, c in self._sticky_caps.items() if s in self._sticky
-                }
+                self._sticky_caps = {s: c for s, c in self._sticky_caps.items() if s in self._sticky}
                 if cleaned > 0 or caps_before != len(self._sticky_caps):
                     _lg.debug(
                         f"sticky cleanup: removed {cleaned} expired entries, "
@@ -4149,18 +4158,12 @@ class ProxyHandler:
                 # 多代理编排器：30 分钟未活跃驱逐（空闲 TTL，防长跑泄漏）。
                 if self._multi_agent_sessions:
                     cutoff = now - _MULTI_AGENT_SESSION_IDLE_TTL
-                    stale = [
-                        s
-                        for s in self._multi_agent_sessions
-                        if self._ma_session_last_active.get(s, now) < cutoff
-                    ]
+                    stale = [s for s in self._multi_agent_sessions if self._ma_session_last_active.get(s, now) < cutoff]
                     for s in stale:
                         self._multi_agent_sessions.pop(s, None)
                         self._ma_session_last_active.pop(s, None)
                     if stale:
-                        _lg.debug(
-                            f"multi-agent cleanup: evicted {len(stale)} idle session orchestrator(s)"
-                        )
+                        _lg.debug(f"multi-agent cleanup: evicted {len(stale)} idle session orchestrator(s)")
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -4380,6 +4383,9 @@ class ProxyHandler:
             tried: set[int] = set()
             # 严格按成员顺序故障转移：failover 组返回按 ord 排的成员顺序，否则 None。
             failover_order = self._failover_member_order(requested_model)
+            # 候选选择分支（sticky/failover/pick_key）都会返回 Optional，
+            # 显式声明后由下方 `if k is None` 统一收口。
+            k: KeyHealth | None
             while True:
                 # First attempt: prefer the sticky session key (multi-turn continuity)
                 if session_key and not tried:
@@ -4610,7 +4616,9 @@ class ProxyHandler:
                     if should_retry:
                         continue
                     clean_status, clean_body, clean_ctype = _clean_upstream_failure(status, body, resp_headers)
-                    return web.Response(status=clean_status, body=clean_body, content_type=clean_ctype or "application/json")
+                    return web.Response(
+                        status=clean_status, body=clean_body, content_type=clean_ctype or "application/json"
+                    )
 
                 # Translate response body if needed
                 _process_start = time.time()
@@ -4805,6 +4813,8 @@ class ProxyHandler:
                 # the upstream is systemically unavailable — do NOT retry.
                 first_exc_type: str | None = None
                 all_same_type = True
+                # 同 __call__：候选分支返回 Optional，由 `if k is None` 收口。
+                k: KeyHealth | None
 
                 for _ in range(len(candidates)):
                     # First attempt in each round: prefer sticky session key
@@ -4977,7 +4987,9 @@ class ProxyHandler:
                                     # 丢弃（与熔断出口同因，客户端只拿到假 200 空
                                     # SSE）。必须向已提交的流写 error 帧 + [DONE]
                                     # 收尾，然后 return resp。
-                                    clean_status, clean_body, clean_ctype = _clean_upstream_failure(_st, err_body, _up_headers)
+                                    clean_status, clean_body, clean_ctype = _clean_upstream_failure(
+                                        _st, err_body, _up_headers
+                                    )
                                     _err_text = (
                                         clean_body.decode("utf-8", errors="replace")
                                         if isinstance(clean_body, bytes)
@@ -5125,7 +5137,9 @@ class ProxyHandler:
                                         f"client gone after {chunk_count} chunks delivered"
                                     )
                                 else:
-                                    _lg.info(f"[{id(request):x}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)")
+                                    _lg.info(
+                                        f"[{id(request):x}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)"
+                                    )
                                     try:
                                         record_stream_completed("completed")
                                     except Exception:
@@ -5144,9 +5158,7 @@ class ProxyHandler:
                                     _stream_tokens_out = int(_u.get("completion_tokens", 0))
                             elif _raw_stream_usage:
                                 _stream_tokens_in = int(
-                                    _raw_stream_usage.get("prompt_tokens")
-                                    or _raw_stream_usage.get("input_tokens")
-                                    or 0
+                                    _raw_stream_usage.get("prompt_tokens") or _raw_stream_usage.get("input_tokens") or 0
                                 )
                                 _stream_tokens_out = int(
                                     _raw_stream_usage.get("completion_tokens")
@@ -5192,11 +5204,7 @@ class ProxyHandler:
                                         outbound_protocol=outbound_protocol,
                                         translated=need_translation,
                                         token_id=_token_id,
-                                        error=(
-                                            "upstream stream truncated mid-response"
-                                            if upstream_broken
-                                            else ""
-                                        ),
+                                        error=("upstream stream truncated mid-response" if upstream_broken else ""),
                                     )
                                 )
                             return resp

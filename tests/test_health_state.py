@@ -220,7 +220,11 @@ class TestClassifyLabel:
         """mark_balance_depleted：STATE_ERROR + 1h 冷却，到期 is_available 自动恢复。"""
         from zhongzhuan.proxy.retry import classify_failure, mark_balance_depleted
         from zhongzhuan.proxy.ratelimit import (
-            KeyHealth, SlidingWindow, STATE_ERROR, CLASS_BALANCE, BALANCE_COOLDOWN_SECONDS,
+            KeyHealth,
+            SlidingWindow,
+            STATE_ERROR,
+            CLASS_BALANCE,
+            BALANCE_COOLDOWN_SECONDS,
         )
 
         k = KeyHealth(key_id=1, api_key="sk-x", window=SlidingWindow(60, 0))
@@ -252,7 +256,10 @@ class TestClassifyLabel:
     def test_status_code_rules(self):
         from zhongzhuan.proxy.retry import classify_label
         from zhongzhuan.proxy.ratelimit import (
-            CLASS_RATE_LIMIT, CLASS_TRANSIENT, CLASS_NO_RETRY, CLASS_UNKNOWN,
+            CLASS_RATE_LIMIT,
+            CLASS_TRANSIENT,
+            CLASS_NO_RETRY,
+            CLASS_UNKNOWN,
         )
 
         assert classify_label(429, {}, b"") == CLASS_RATE_LIMIT

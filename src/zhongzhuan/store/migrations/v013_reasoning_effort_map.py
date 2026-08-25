@@ -20,13 +20,9 @@ from ..migration_engine import Migration
 
 #: SQLite / MySQL / TiDB: TEXT 列不允许 DEFAULT, 故声明为可空、无默认值。
 #: 读取侧(_parse_reasoning_map)对 None/空 统一视为「未配置」。
-SQLITE_ALTERS: tuple[str, ...] = (
-    "ALTER TABLE models ADD COLUMN reasoning_effort_map TEXT",
-)
+SQLITE_ALTERS: tuple[str, ...] = ("ALTER TABLE models ADD COLUMN reasoning_effort_map TEXT",)
 
-MYSQL_ALTERS: tuple[str, ...] = (
-    "ALTER TABLE models ADD COLUMN reasoning_effort_map TEXT",
-)
+MYSQL_ALTERS: tuple[str, ...] = ("ALTER TABLE models ADD COLUMN reasoning_effort_map TEXT",)
 
 
 MIGRATION = Migration(

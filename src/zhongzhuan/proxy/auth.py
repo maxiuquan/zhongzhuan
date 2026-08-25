@@ -47,10 +47,7 @@ def make_proxy_auth_middleware(store) -> Middleware:
         # (the latter lives outside /v1/ and is never seen by this middleware)
         # stay behaviour-identical.  Exempt it here to avoid a second,
         # quota-bearing pass that could 401 a valid token on an empty body.
-        if (
-            request.path in ("/v1/api/codex/models", "/api/codex/models")
-            and request.method == "GET"
-        ):
+        if request.path in ("/v1/api/codex/models", "/api/codex/models") and request.method == "GET":
             return await handler(request)
 
         # Check token: prefer x-api-key (Anthropic clients), fallback Authorization: Bearer (OpenAI clients)
@@ -84,11 +81,7 @@ def make_proxy_auth_middleware(store) -> Middleware:
         if not ok:
             # revoked（已撤销）与 disabled/expired 同类：令牌身份已失效，应回
             # 403 而非 429 —— 429 意味着"稍后重试可恢复"，对撤销令牌是误导。
-            status = (
-                403
-                if any(m in reason for m in ("disabled", "expired", "whitelist", "revoked"))
-                else 429
-            )
+            status = 403 if any(m in reason for m in ("disabled", "expired", "whitelist", "revoked")) else 429
             return web.json_response(
                 {"error": {"message": reason, "type": "quota_exceeded" if status == 429 else "forbidden"}},
                 status=status,

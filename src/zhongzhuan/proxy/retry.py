@@ -67,7 +67,9 @@ def classify_label(status_code: int, headers: dict, body: bytes = b"") -> str:
     """
     if status_code == 403 or (status_code == 503 and looks_like_cloudflare_block(status_code, headers, body)):
         # CF blockpage / 代理改写块页：封禁（长冷却，自动恢复）
-        if looks_like_cloudflare_block(status_code, headers, body) or looks_like_proxy_block(status_code, headers, body):
+        if looks_like_cloudflare_block(status_code, headers, body) or looks_like_proxy_block(
+            status_code, headers, body
+        ):
             return CLASS_BANNED
     # body 关键字（欠费 / 配置缺失）优先于裸状态码
     raw = (body or b"")[:8192]
@@ -369,9 +371,7 @@ def classify_failure(k: KeyHealth, status_code: int, headers: dict, body: bytes 
     return retryable
 
 
-def classify_failure_labelled(
-    k: KeyHealth, status_code: int, headers: dict, body: bytes = b""
-) -> tuple[bool, str]:
+def classify_failure_labelled(k: KeyHealth, status_code: int, headers: dict, body: bytes = b"") -> tuple[bool, str]:
     """同 :func:`classify_failure`，但额外返回分类标签（供调用方决定 agnes 补判）。"""
     label = classify_label(status_code, headers, body)
     if label == CLASS_PERMANENT:

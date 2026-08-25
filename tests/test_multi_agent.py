@@ -35,9 +35,7 @@ from zhongzhuan.responses_v3.pipeline import ResponsePipeline
 
 
 def test_tool_search_output_shape():
-    item = build_tool_search_output(
-        output_index=2, call_id="call_t1", response_id="resp_9", query="find", limit=5
-    )
+    item = build_tool_search_output(output_index=2, call_id="call_t1", response_id="resp_9", query="find", limit=5)
     assert item["type"] == "tool_search_output"
     assert item["status"] == "completed"
     assert item["call_id"] == "call_t1"
@@ -63,8 +61,11 @@ def test_build_tool_search_call_shape():
     from zhongzhuan.responses_v3.multi_agent import build_tool_search_call
 
     item = build_tool_search_call(
-        output_index=0, call_id="call_t1", arguments='{"query":"x","limit":5}',
-        response_id="r1", execution="client",
+        output_index=0,
+        call_id="call_t1",
+        arguments='{"query":"x","limit":5}',
+        response_id="r1",
+        execution="client",
     )
     assert item["type"] == "tool_search_call"
     assert item["execution"] == "client"
@@ -75,9 +76,7 @@ def test_build_tool_search_call_shape():
 
 
 def test_function_call_output_shape():
-    item = build_function_call_output(
-        output_index=0, call_id="c1", response_id="r1", output="hello"
-    )
+    item = build_function_call_output(output_index=0, call_id="c1", response_id="r1", output="hello")
     assert item["type"] == "function_call_output"
     assert item["status"] == "completed"
     assert item["call_id"] == "c1"
@@ -127,7 +126,9 @@ async def test_orchestrator_spawn_role_tag_routes_model():
 
     orch = MultiAgentOrchestrator(runner=_fake_runner, default_model="juhe/mimo-v2.5-pro")
     spawn = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "spawn_agent", "c1",
+        MULTI_AGENT_NAMESPACE,
+        "spawn_agent",
+        "c1",
         json.dumps({"instruction": "[explorer] research the files", "model": ""}),
         output_index=0,
     )
@@ -144,7 +145,9 @@ async def test_orchestrator_spawn_role_tag_explicit_model_wins():
     orch = MultiAgentOrchestrator(runner=_fake_runner, default_model="juhe/mimo-v2.5-pro")
     # 无角色标记 + 显式 model → 用显式 model。
     spawn = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "spawn_agent", "c1",
+        MULTI_AGENT_NAMESPACE,
+        "spawn_agent",
+        "c1",
         json.dumps({"instruction": "do it", "model": "juhe/glm5.2"}),
         output_index=0,
     )
@@ -152,7 +155,9 @@ async def test_orchestrator_spawn_role_tag_explicit_model_wins():
     assert orch._agents[agent_id].model == "juhe/glm5.2"
     # 无角色标记 + 无 model → 父模型 default。
     spawn2 = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "spawn_agent", "c2",
+        MULTI_AGENT_NAMESPACE,
+        "spawn_agent",
+        "c2",
         json.dumps({"instruction": "do it again"}),
         output_index=0,
     )
@@ -164,7 +169,9 @@ async def test_orchestrator_spawn_session_fallback():
     # FR-8 / NFR-2：session_id 空时继承父请求会话（Codex 原生 spawn 不传 session_id）。
     orch = MultiAgentOrchestrator(runner=_fake_runner, default_model="m1", default_session="tok:7")
     spawn = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "spawn_agent", "c1",
+        MULTI_AGENT_NAMESPACE,
+        "spawn_agent",
+        "c1",
         json.dumps({"instruction": "do X"}),
         output_index=0,
     )
@@ -172,7 +179,9 @@ async def test_orchestrator_spawn_session_fallback():
     assert orch._agents[agent_id].session_id == "tok:7"
     # 显式 session_id 仍优先。
     spawn2 = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "spawn_agent", "c2",
+        MULTI_AGENT_NAMESPACE,
+        "spawn_agent",
+        "c2",
         json.dumps({"instruction": "do Y", "session_id": "tok:9"}),
         output_index=0,
     )
@@ -184,7 +193,9 @@ async def test_orchestrator_spawn_wait_close():
     orch = MultiAgentOrchestrator(runner=_fake_runner, default_model="m1")
     # spawn
     spawn = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "spawn_agent", "c1",
+        MULTI_AGENT_NAMESPACE,
+        "spawn_agent",
+        "c1",
         json.dumps({"instruction": "do X", "model": "", "session_id": "s1"}),
         output_index=0,
     )
@@ -193,16 +204,22 @@ async def test_orchestrator_spawn_wait_close():
     assert orch.active_count("s1") >= 1
     # wait（执行 runner 并取回结果）
     wait = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "wait_agent", "c2",
-        json.dumps({"agent_id": agent_id}), output_index=1,
+        MULTI_AGENT_NAMESPACE,
+        "wait_agent",
+        "c2",
+        json.dumps({"agent_id": agent_id}),
+        output_index=1,
     )
     out = json.loads(wait["output"])
     assert out["status"] == "completed"
     assert out["result"] == "RESULT:do X"
     # close
     close = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "close_agent", "c3",
-        json.dumps({"agent_id": agent_id}), output_index=2,
+        MULTI_AGENT_NAMESPACE,
+        "close_agent",
+        "c3",
+        json.dumps({"agent_id": agent_id}),
+        output_index=2,
     )
     assert json.loads(close["output"])["closed"] is True
     assert orch.active_count("s1") == 0
@@ -211,8 +228,11 @@ async def test_orchestrator_spawn_wait_close():
 async def test_orchestrator_unknown_agent_and_namespace():
     orch = MultiAgentOrchestrator(runner=_fake_runner)
     r = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "wait_agent", "c1",
-        json.dumps({"agent_id": "nope"}), output_index=0,
+        MULTI_AGENT_NAMESPACE,
+        "wait_agent",
+        "c1",
+        json.dumps({"agent_id": "nope"}),
+        output_index=0,
     )
     assert "error" in json.loads(r["output"])
     # 错误 namespace 直接报错。
@@ -223,14 +243,20 @@ async def test_orchestrator_unknown_agent_and_namespace():
 async def test_orchestrator_max_threads():
     orch = MultiAgentOrchestrator(runner=_fake_runner, max_threads=1)
     a = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "spawn_agent", "c1",
-        json.dumps({"instruction": "A", "session_id": "s"}), output_index=0,
+        MULTI_AGENT_NAMESPACE,
+        "spawn_agent",
+        "c1",
+        json.dumps({"instruction": "A", "session_id": "s"}),
+        output_index=0,
     )
     assert "agent_id" in json.loads(a["output"])
     # 第二个并发超过上限 → 返回 error（不创建第二个 agent）。
     b = await orch.handle(
-        MULTI_AGENT_NAMESPACE, "spawn_agent", "c2",
-        json.dumps({"instruction": "B", "session_id": "s"}), output_index=1,
+        MULTI_AGENT_NAMESPACE,
+        "spawn_agent",
+        "c2",
+        json.dumps({"instruction": "B", "session_id": "s"}),
+        output_index=1,
     )
     assert "error" in json.loads(b["output"])
     assert orch.active_count("s") == 1
@@ -241,8 +267,11 @@ async def test_orchestrator_concurrent_isolation():
     ids = []
     for i in range(3):
         r = await orch.handle(
-            MULTI_AGENT_NAMESPACE, "spawn_agent", f"c{i}",
-            json.dumps({"instruction": f"task{i}", "session_id": "s"}), output_index=i,
+            MULTI_AGENT_NAMESPACE,
+            "spawn_agent",
+            f"c{i}",
+            json.dumps({"instruction": f"task{i}", "session_id": "s"}),
+            output_index=i,
         )
         ids.append(json.loads(r["output"])["agent_id"])
     assert len(ids) == 3
@@ -270,11 +299,13 @@ async def test_pipeline_tool_search_synthesized():
     # tool_search_call(execution="client")；不返回 function_call(name=tool_search)、
     # 不返回顶级 tool_search_output。
     pipe = ResponsePipeline("resp_ts", multi_agent=None, tool_search_enabled=True)
-    frames = await _collect(pipe, [
-        {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME,
-         "arguments": '{"query": "x"}'},
-        {"type": "tool_call_done", "call_id": "t1", "arguments": '{"query": "x"}'},
-    ])
+    frames = await _collect(
+        pipe,
+        [
+            {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME, "arguments": '{"query": "x"}'},
+            {"type": "tool_call_done", "call_id": "t1", "arguments": '{"query": "x"}'},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
     # 1) tool_search_call(execution="client") 存在（FR-2.1 PASS 判据）。
     tsc = next((it for it in items if it["type"] == "tool_search_call"), None)
@@ -292,18 +323,18 @@ async def test_pipeline_tool_search_synthesized():
 
 async def test_pipeline_tool_search_server_mode():
     # FR-2.1 方案 B：tool_search_call + function_call_output 兜底。
-    pipe = ResponsePipeline("resp_tsb", multi_agent=None, tool_search_enabled=True,
-                            tool_search_mode="server")
-    frames = await _collect(pipe, [
-        {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME,
-         "arguments": '{"query": "x"}'},
-        {"type": "tool_call_done", "call_id": "t1", "arguments": '{"query": "x"}'},
-    ])
+    pipe = ResponsePipeline("resp_tsb", multi_agent=None, tool_search_enabled=True, tool_search_mode="server")
+    frames = await _collect(
+        pipe,
+        [
+            {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME, "arguments": '{"query": "x"}'},
+            {"type": "tool_call_done", "call_id": "t1", "arguments": '{"query": "x"}'},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
     tsc = next((it for it in items if it["type"] == "tool_search_call"), None)
     assert tsc is not None and tsc["execution"] == "client"
-    fco = next((it for it in items if it["type"] == "function_call_output"
-                and it.get("call_id") == "t1"), None)
+    fco = next((it for it in items if it["type"] == "function_call_output" and it.get("call_id") == "t1"), None)
     assert fco is not None, "expected function_call_output in server mode"
     payload = json.loads(fco["output"])
     assert payload["tools"][0]["name"] == MULTI_AGENT_NAMESPACE
@@ -312,11 +343,13 @@ async def test_pipeline_tool_search_server_mode():
 async def test_pipeline_tool_search_disabled_passthrough():
     # 关闭时：tool_search 透传为普通 function_call（不合成 tool_search_output）。
     pipe = ResponsePipeline("resp_off", multi_agent=None, tool_search_enabled=False)
-    frames = await _collect(pipe, [
-        {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME,
-         "arguments": '{"query": "x"}'},
-        {"type": "tool_call_done", "call_id": "t1", "arguments": '{"query": "x"}'},
-    ])
+    frames = await _collect(
+        pipe,
+        [
+            {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME, "arguments": '{"query": "x"}'},
+            {"type": "tool_call_done", "call_id": "t1", "arguments": '{"query": "x"}'},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
     assert all(it["type"] != "tool_search_output" for it in items)
     assert all(it["type"] != "function_call_output" for it in items)
@@ -327,18 +360,26 @@ async def test_pipeline_tool_search_disabled_passthrough():
 async def test_pipeline_multi_agent_executed():
     # server 模式（方案 B 兜底）：中继代执行并内联 fco。
     orch = MultiAgentOrchestrator(runner=_fake_runner, default_model="m1")
-    pipe = ResponsePipeline("resp_ma", multi_agent=orch, tool_search_enabled=False,
-                            spawn_execution="server")
+    pipe = ResponsePipeline("resp_ma", multi_agent=orch, tool_search_enabled=False, spawn_execution="server")
     args = json.dumps({"instruction": "sub", "model": "", "session_id": "s1"})
-    frames = await _collect(pipe, [
-        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
-         "namespace": MULTI_AGENT_NAMESPACE, "arguments": args},
-        {"type": "tool_call_done", "call_id": "c1", "arguments": args},
-    ])
+    frames = await _collect(
+        pipe,
+        [
+            {
+                "type": "tool_call",
+                "call_id": "c1",
+                "name": "spawn_agent",
+                "namespace": MULTI_AGENT_NAMESPACE,
+                "arguments": args,
+            },
+            {"type": "tool_call_done", "call_id": "c1", "arguments": args},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
     # 回显的 function_call（带 namespace）存在。
-    fc = next((it for it in items if it["type"] == "function_call"
-               and it.get("namespace") == MULTI_AGENT_NAMESPACE), None)
+    fc = next(
+        (it for it in items if it["type"] == "function_call" and it.get("namespace") == MULTI_AGENT_NAMESPACE), None
+    )
     assert fc is not None
     # 编排器回传的 function_call_output 存在（spawn 返回 running，结果由后续
     # wait_agent 取回，这是 V1 协议的正确行为）。
@@ -351,18 +392,26 @@ async def test_pipeline_multi_agent_client_passthrough_no_fco():
     # client 模式（方案 A，FR-9 推荐，默认）：中继不代执行、不内联 fco——
     # function_call 原样透传，等客户端本地 SpawnAgentHandler 执行后回贴。
     orch = MultiAgentOrchestrator(runner=_fake_runner)
-    pipe = ResponsePipeline("resp_ma_c", multi_agent=orch, tool_search_enabled=False,
-                            spawn_execution="client")
+    pipe = ResponsePipeline("resp_ma_c", multi_agent=orch, tool_search_enabled=False, spawn_execution="client")
     args = json.dumps({"instruction": "sub", "session_id": "s1"})
-    frames = await _collect(pipe, [
-        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
-         "namespace": MULTI_AGENT_NAMESPACE, "arguments": args},
-        {"type": "tool_call_done", "call_id": "c1", "arguments": args},
-    ])
+    frames = await _collect(
+        pipe,
+        [
+            {
+                "type": "tool_call",
+                "call_id": "c1",
+                "name": "spawn_agent",
+                "namespace": MULTI_AGENT_NAMESPACE,
+                "arguments": args,
+            },
+            {"type": "tool_call_done", "call_id": "c1", "arguments": args},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
     # 回显 function_call（带 namespace + arguments，客户端据此执行）。
-    fc = next((it for it in items if it["type"] == "function_call"
-               and it.get("namespace") == MULTI_AGENT_NAMESPACE), None)
+    fc = next(
+        (it for it in items if it["type"] == "function_call" and it.get("namespace") == MULTI_AGENT_NAMESPACE), None
+    )
     assert fc is not None
     assert fc.get("arguments") is not None  # 透传必须保留参数
     # 绝无内联 function_call_output（内联会让客户端报 unexpected tool output）。
@@ -372,14 +421,15 @@ async def test_pipeline_multi_agent_client_passthrough_no_fco():
 async def test_pipeline_multi_agent_namespaced_flat_name():
     # 摊平风格名字 mcp__multi_agent_v1__-spawn_agent 也能被识别。
     orch = MultiAgentOrchestrator(runner=_fake_runner)
-    pipe = ResponsePipeline("resp_flat", multi_agent=orch, tool_search_enabled=False,
-                            spawn_execution="server")
+    pipe = ResponsePipeline("resp_flat", multi_agent=orch, tool_search_enabled=False, spawn_execution="server")
     args = json.dumps({"instruction": "sub", "session_id": "s1"})
-    frames = await _collect(pipe, [
-        {"type": "tool_call", "call_id": "c1", "name": "mcp__multi_agent_v1__-spawn_agent",
-         "arguments": args},
-        {"type": "tool_call_done", "call_id": "c1", "arguments": args},
-    ])
+    frames = await _collect(
+        pipe,
+        [
+            {"type": "tool_call", "call_id": "c1", "name": "mcp__multi_agent_v1__-spawn_agent", "arguments": args},
+            {"type": "tool_call_done", "call_id": "c1", "arguments": args},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
     fco = next((it for it in items if it["type"] == "function_call_output"), None)
     assert fco is not None
@@ -389,14 +439,15 @@ async def test_pipeline_multi_agent_upstream_flattened_name():
     # 上游自行摊平的形态 multi_agent_v1-spawn_agent 也要被识别并执行
     # （2026-08-15 流式探针 P2 实证：部分上游把 namespace 摊平成 {ns}-{subtool} 命名）。
     orch = MultiAgentOrchestrator(runner=_fake_runner)
-    pipe = ResponsePipeline("resp_upflat", multi_agent=orch, tool_search_enabled=False,
-                            spawn_execution="server")
+    pipe = ResponsePipeline("resp_upflat", multi_agent=orch, tool_search_enabled=False, spawn_execution="server")
     args = json.dumps({"instruction": "sub", "session_id": "s1"})
-    frames = await _collect(pipe, [
-        {"type": "tool_call", "call_id": "c1", "name": "multi_agent_v1-spawn_agent",
-         "arguments": args},
-        {"type": "tool_call_done", "call_id": "c1", "arguments": args},
-    ])
+    frames = await _collect(
+        pipe,
+        [
+            {"type": "tool_call", "call_id": "c1", "name": "multi_agent_v1-spawn_agent", "arguments": args},
+            {"type": "tool_call_done", "call_id": "c1", "arguments": args},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
     fc = next((it for it in items if it["type"] == "function_call"), None)
     assert fc is not None
@@ -413,15 +464,18 @@ def test_pipeline_output_items_include_synthesized():
 
     async def _run():
         orch = MultiAgentOrchestrator(runner=_fake_runner)
-        pipe = ResponsePipeline("resp_out", multi_agent=orch, tool_search_enabled=True,
-                                spawn_execution="server")
+        pipe = ResponsePipeline("resp_out", multi_agent=orch, tool_search_enabled=True, spawn_execution="server")
         args = json.dumps({"instruction": "sub", "session_id": "s1"})
         for chunk in [
-            {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME,
-             "arguments": "{}"},
+            {"type": "tool_call", "call_id": "t1", "name": TOOL_SEARCH_NAME, "arguments": "{}"},
             {"type": "tool_call_done", "call_id": "t1", "arguments": "{}"},
-            {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
-             "namespace": MULTI_AGENT_NAMESPACE, "arguments": args},
+            {
+                "type": "tool_call",
+                "call_id": "c1",
+                "name": "spawn_agent",
+                "namespace": MULTI_AGENT_NAMESPACE,
+                "arguments": args,
+            },
             {"type": "tool_call_done", "call_id": "c1", "arguments": args},
         ]:
             list(await pipe._translate_chunk(chunk))
@@ -430,9 +484,9 @@ def test_pipeline_output_items_include_synthesized():
     items = asyncio.run(_run())
     types = [it["type"] for it in items]
     assert "tool_search_output" not in types  # 26.803 不认顶级形态（C.7）
-    assert "tool_search_call" in types        # FR-2.1：tool_search 改写形态
-    assert "function_call" in types           # spawn 回显
-    assert "function_call_output" in types    # spawn 的 fco（server 模式代执行）
+    assert "tool_search_call" in types  # FR-2.1：tool_search 改写形态
+    assert "function_call" in types  # spawn 回显
+    assert "function_call_output" in types  # spawn 的 fco（server 模式代执行）
 
 
 # ---------------------------------------------------------------------------
@@ -458,9 +512,7 @@ def test_emulated_caps_includes_tool_search_when_enabled():
     from zhongzhuan.responses_v3.hosted_tools import hosted_tool_emulated_capabilities
 
     # 两个开关必须同时为真（避免半残状态：暴露 namespace 却无法执行）。
-    caps = hosted_tool_emulated_capabilities(
-        _make_cfg(tool_search_enabled=True, ma_enabled=True)
-    )
+    caps = hosted_tool_emulated_capabilities(_make_cfg(tool_search_enabled=True, ma_enabled=True))
     assert Capability.TOOL_SEARCH in caps
 
 
@@ -480,9 +532,11 @@ def test_emulated_caps_excludes_tool_search_when_only_one_flag():
 def test_codex_model_info_declares_multi_agent_when_enabled(monkeypatch):
     import zhongzhuan.config as pconfig
 
-    ma = type("MA", (), {"enabled": True, "max_threads": 4,
-                         "job_max_runtime_seconds": 1800,
-                         "minimal_client_version": "0.144.0"})()
+    ma = type(
+        "MA",
+        (),
+        {"enabled": True, "max_threads": 4, "job_max_runtime_seconds": 1800, "minimal_client_version": "0.144.0"},
+    )()
     ht = type("HT", (), {"tool_search_enabled": True, "mcp_enabled": False})()
 
     class FakeCfg:
@@ -552,9 +606,11 @@ def test_capability_router_wires_emulated_tool_search(monkeypatch):
     from zhongzhuan.proxy.handler import ProxyHandler
     from zhongzhuan.proxy.protocol.responses_models import Capability
 
-    ma = type("MA", (), {"enabled": True, "max_threads": 4,
-                         "job_max_runtime_seconds": 1800,
-                         "minimal_client_version": "0.144.0"})()
+    ma = type(
+        "MA",
+        (),
+        {"enabled": True, "max_threads": 4, "job_max_runtime_seconds": 1800, "minimal_client_version": "0.144.0"},
+    )()
     ht = type("HT", (), {"tool_search_enabled": True, "mcp_enabled": False})()
 
     class FakeCfg:
@@ -602,8 +658,12 @@ def test_ma_flatten_tools_hosted_tool_search_and_namespace():
             "type": "namespace",
             "name": "multi_agent_v1",
             "tools": [
-                {"type": "function", "name": "spawn_agent", "description": "Spawn",
-                 "parameters": {"type": "object", "properties": {}}},
+                {
+                    "type": "function",
+                    "name": "spawn_agent",
+                    "description": "Spawn",
+                    "parameters": {"type": "object", "properties": {}},
+                },
                 {"type": "function", "name": "wait_agent", "description": "Wait"},
             ],
         },
@@ -663,17 +723,30 @@ def test_ma_normalize_upstream_body_including_additional_tools():
 async def test_pipeline_client_empty_args_patched():
     """client 透传 + 空参 spawn_agent → 合成 message 注入 arguments 后透传，无内联 fco。"""
     orch = MultiAgentOrchestrator(runner=_fake_runner)
-    pipe = ResponsePipeline("resp_patch", multi_agent=orch, tool_search_enabled=False,
-                            spawn_execution="client",
-                            last_user_text="read the three config files and summarize")
-    frames = await _collect(pipe, [
-        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
-         "namespace": MULTI_AGENT_NAMESPACE, "arguments": "{}"},
-        {"type": "tool_call_done", "call_id": "c1", "arguments": "{}"},
-    ])
+    pipe = ResponsePipeline(
+        "resp_patch",
+        multi_agent=orch,
+        tool_search_enabled=False,
+        spawn_execution="client",
+        last_user_text="read the three config files and summarize",
+    )
+    frames = await _collect(
+        pipe,
+        [
+            {
+                "type": "tool_call",
+                "call_id": "c1",
+                "name": "spawn_agent",
+                "namespace": MULTI_AGENT_NAMESPACE,
+                "arguments": "{}",
+            },
+            {"type": "tool_call_done", "call_id": "c1", "arguments": "{}"},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
-    fc = next((it for it in items if it["type"] == "function_call"
-               and it.get("namespace") == MULTI_AGENT_NAMESPACE), None)
+    fc = next(
+        (it for it in items if it["type"] == "function_call" and it.get("namespace") == MULTI_AGENT_NAMESPACE), None
+    )
     assert fc is not None
     # 补参后的 message 非空 + 防递归后缀存在
     args = json.loads(fc["arguments"])
@@ -688,20 +761,33 @@ async def test_pipeline_client_empty_args_patched():
 async def test_pipeline_client_empty_args_with_role_injects_model():
     """空参 + leader 文本带角色标记 → 注入角色模型 + 剥前缀 + 防递归。"""
     orch = MultiAgentOrchestrator(runner=_fake_runner)
-    pipe = ResponsePipeline("resp_patch_role", multi_agent=orch, tool_search_enabled=False,
-                            spawn_execution="client",
-                            last_user_text="read the files")
+    pipe = ResponsePipeline(
+        "resp_patch_role",
+        multi_agent=orch,
+        tool_search_enabled=False,
+        spawn_execution="client",
+        last_user_text="read the files",
+    )
     # 模拟团长先输出带 [explorer] 的文本，再 spawn
     frames = []
     frames += await _collect(pipe, [{"type": "text", "delta": "I will delegate to [explorer] to read"}])
-    frames += await _collect(pipe, [
-        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
-         "namespace": MULTI_AGENT_NAMESPACE, "arguments": "{}"},
-        {"type": "tool_call_done", "call_id": "c1", "arguments": "{}"},
-    ])
+    frames += await _collect(
+        pipe,
+        [
+            {
+                "type": "tool_call",
+                "call_id": "c1",
+                "name": "spawn_agent",
+                "namespace": MULTI_AGENT_NAMESPACE,
+                "arguments": "{}",
+            },
+            {"type": "tool_call_done", "call_id": "c1", "arguments": "{}"},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
-    fc = next((it for it in items if it["type"] == "function_call"
-               and it.get("namespace") == MULTI_AGENT_NAMESPACE), None)
+    fc = next(
+        (it for it in items if it["type"] == "function_call" and it.get("namespace") == MULTI_AGENT_NAMESPACE), None
+    )
     assert fc is not None
     args = json.loads(fc["arguments"])
     assert args.get("model") == "juhe/deepseek-v4-flash"  # [explorer] → explorer 模型
@@ -711,17 +797,31 @@ async def test_pipeline_client_empty_args_with_role_injects_model():
 async def test_pipeline_client_nonempty_args_untouched():
     """非空参 spawn_agent（FR-12d）：原样透传，不改写。"""
     orch = MultiAgentOrchestrator(runner=_fake_runner)
-    pipe = ResponsePipeline("resp_no_patch", multi_agent=orch, tool_search_enabled=False,
-                            spawn_execution="client", last_user_text="whatever")
+    pipe = ResponsePipeline(
+        "resp_no_patch",
+        multi_agent=orch,
+        tool_search_enabled=False,
+        spawn_execution="client",
+        last_user_text="whatever",
+    )
     args = json.dumps({"message": "read file x carefully", "model": "juhe/glm-5.2"})
-    frames = await _collect(pipe, [
-        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
-         "namespace": MULTI_AGENT_NAMESPACE, "arguments": args},
-        {"type": "tool_call_done", "call_id": "c1", "arguments": args},
-    ])
+    frames = await _collect(
+        pipe,
+        [
+            {
+                "type": "tool_call",
+                "call_id": "c1",
+                "name": "spawn_agent",
+                "namespace": MULTI_AGENT_NAMESPACE,
+                "arguments": args,
+            },
+            {"type": "tool_call_done", "call_id": "c1", "arguments": args},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
-    fc = next((it for it in items if it["type"] == "function_call"
-               and it.get("namespace") == MULTI_AGENT_NAMESPACE), None)
+    fc = next(
+        (it for it in items if it["type"] == "function_call" and it.get("namespace") == MULTI_AGENT_NAMESPACE), None
+    )
     assert fc is not None
     assert json.loads(fc["arguments"]) == json.loads(args)  # 完全一致
 
@@ -729,13 +829,22 @@ async def test_pipeline_client_nonempty_args_untouched():
 async def test_pipeline_client_empty_args_no_context_rejected():
     """空参 + 无上下文（FR-12c）：返回错误 fco 拒绝重试。"""
     orch = MultiAgentOrchestrator(runner=_fake_runner)
-    pipe = ResponsePipeline("resp_reject", multi_agent=orch, tool_search_enabled=False,
-                            spawn_execution="client", last_user_text="")
-    frames = await _collect(pipe, [
-        {"type": "tool_call", "call_id": "c1", "name": "spawn_agent",
-         "namespace": MULTI_AGENT_NAMESPACE, "arguments": "{}"},
-        {"type": "tool_call_done", "call_id": "c1", "arguments": "{}"},
-    ])
+    pipe = ResponsePipeline(
+        "resp_reject", multi_agent=orch, tool_search_enabled=False, spawn_execution="client", last_user_text=""
+    )
+    frames = await _collect(
+        pipe,
+        [
+            {
+                "type": "tool_call",
+                "call_id": "c1",
+                "name": "spawn_agent",
+                "namespace": MULTI_AGENT_NAMESPACE,
+                "arguments": "{}",
+            },
+            {"type": "tool_call_done", "call_id": "c1", "arguments": "{}"},
+        ],
+    )
     items = [f["item"] for f in frames if f.get("type") == "response.output_item.added"]
     fco = next((it for it in items if it["type"] == "function_call_output"), None)
     assert fco is not None
@@ -760,20 +869,42 @@ async def test_nonstream_postprocess_client_preserves_args_and_patches():
         return resp_obj
 
     # 1) 非空参 → arguments 保留 + 无 fco
-    r1 = await run({"output": [
-        {"id": "fc_a", "type": "function_call", "call_id": "c1", "name": "spawn_agent",
-         "namespace": "multi_agent_v1", "arguments": '{"message": "read AGENTS.md"}'}
-    ]}, "user task")
+    r1 = await run(
+        {
+            "output": [
+                {
+                    "id": "fc_a",
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "spawn_agent",
+                    "namespace": "multi_agent_v1",
+                    "arguments": '{"message": "read AGENTS.md"}',
+                }
+            ]
+        },
+        "user task",
+    )
     out1 = r1["output"]
     fc1 = out1[0]
     assert fc1["arguments"] == '{"message": "read AGENTS.md"}'  # 保留原样（FR-12d）
     assert all(i["type"] != "function_call_output" for i in out1)
 
     # 2) 空参 + 上下文 → 合成补参 + 无 fco
-    r2 = await run({"output": [
-        {"id": "fc_b", "type": "function_call", "call_id": "c2", "name": "spawn_agent",
-         "namespace": "multi_agent_v1", "arguments": "{}"}
-    ]}, "read the three config files")
+    r2 = await run(
+        {
+            "output": [
+                {
+                    "id": "fc_b",
+                    "type": "function_call",
+                    "call_id": "c2",
+                    "name": "spawn_agent",
+                    "namespace": "multi_agent_v1",
+                    "arguments": "{}",
+                }
+            ]
+        },
+        "read the three config files",
+    )
     out2 = r2["output"]
     fc2 = out2[0]
     args2 = json.loads(fc2["arguments"])

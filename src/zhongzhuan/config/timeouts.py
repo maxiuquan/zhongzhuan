@@ -82,9 +82,7 @@ MIN_READ_IDLE_SECONDS: float = 300.0
 #: 「首轮因 ReadTimeout 等耗时 600s 才失败、本应再重试一次」时误杀合法但偏慢的
 #: 推理请求。900s 允许一次完整超时后的重试，同时把纯重试风暴（实测曾卡 19+ 分钟）
 #: 收敛到 15 分钟内。追求更快失败可下调到 300~600s。
-STREAM_HARD_DEADLINE_SECONDS: float = float(
-    os.environ.get("ZHONGZHUAN_STREAM_HARD_DEADLINE_SECONDS", "900")
-)
+STREAM_HARD_DEADLINE_SECONDS: float = float(os.environ.get("ZHONGZHUAN_STREAM_HARD_DEADLINE_SECONDS", "900"))
 
 ENV_PREFIX: str = "ZHONGZHUAN_TIMEOUT_"
 
