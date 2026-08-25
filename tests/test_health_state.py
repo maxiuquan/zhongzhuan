@@ -12,6 +12,7 @@ from zhongzhuan.proxy.ratelimit import (
 )
 from zhongzhuan.proxy.retry import (
     mark_auth_failure,
+    mark_banned,
     mark_rate_limited,
     mark_server_error,
     mark_network_failure,
@@ -263,20 +264,23 @@ class TestClassifyLabel:
 
 
 class TestBackoffLevels:
+    """经 retry.mark_* 驱动状态机（KeyHealth.record_failure 双实现已删除，
+    mark_* 是唯一权威写入路径——审查 P3 项的去重整改）。"""
+
     def test_transient_escalates_and_success_degrades(self):
         k = _kh()
-        k.record_failure("transient")
+        mark_network_failure(k)
         assert k.backoff_level == 1
         assert k.cooldown_until > time.time()
-        k.record_failure("transient")
+        mark_network_failure(k)
         assert k.backoff_level == 2
-        k.record_success()
+        mark_success(k)
         assert k.backoff_level == 1  # 成功降一级
         assert k.status == STATE_HEALTHY
 
     def test_permanent_invalid_requires_reactivate(self):
         k = _kh()
-        k.record_failure("permanent")
+        mark_auth_failure(k)
         assert k.status == STATE_INVALID
         assert not k.is_available()
         assert k.cooldown_until == 0.0  # 不自动到期
@@ -287,7 +291,7 @@ class TestBackoffLevels:
 
     def test_banned_uses_max_backoff_and_reactivate_clears(self):
         k = _kh()
-        k.record_failure("banned")
+        mark_banned(k)
         assert k.status == STATE_ERROR
         assert k.backoff_level == 3  # 600s 档
         assert k.cooldown_until > time.time() + 500
@@ -297,7 +301,7 @@ class TestBackoffLevels:
 
     def test_rate_limit_respects_retry_after(self):
         k = _kh()
-        k.record_failure("rate_limit", retry_after="3")
+        mark_rate_limited(k, retry_after=3.0)
         assert k.status == STATE_RATE_LIMITED
         assert k.cooldown_until > time.time() + 1
         assert k.cooldown_until <= time.time() + 10  # 尊重 Retry-After，不超 600s

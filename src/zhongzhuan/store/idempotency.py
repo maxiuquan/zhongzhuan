@@ -45,6 +45,7 @@ TTL 感知视图，不改它们的行为。
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from typing import Any
 
@@ -61,6 +62,24 @@ STATE_CONFLICT: str = "conflict"
 #: 阻断二次执行的状态集合。``conflict`` 不在其中：它表示同键异体，调用方要看到
 #: 的是一个显式冲突错误，而不是「静默当作已执行」。
 BLOCKING_STATES: frozenset[str] = frozenset({STATE_IN_FLIGHT, STATE_DONE})
+
+
+def _is_duplicate_key_error(exc: BaseException) -> bool:
+    """判断 *exc* 是否为主键 / 唯一约束冲突。
+
+    覆盖三种来源：
+
+    * SQLite（aiosqlite 原样抛 ``sqlite3.IntegrityError``）；
+    * MySQL / TiDB（pymysql 系错误 ``args[0] == 1062`` ER_DUP_ENTRY）；
+    * 兜底的消息匹配（轻量测试替身可能用任意驱动模拟）。
+    """
+    if isinstance(exc, sqlite3.IntegrityError):
+        return True
+    args = getattr(exc, "args", ())
+    if args and isinstance(args[0], int) and args[0] == 1062:
+        return True
+    text = str(exc).lower()
+    return "unique constraint failed" in text or "duplicate entry" in text
 
 
 class IdempotencyStore:
@@ -131,29 +150,6 @@ class IdempotencyStore:
 
     # -- 写入 ----------------------------------------------------------------
 
-    async def mark_executed(
-        self,
-        key: str,
-        *,
-        workspace_id: str = "",
-        response_id: str = "",
-        status_code: int = 200,
-        request_digest: str = "",
-        ttl_seconds: int = DEFAULT_TTL_SECONDS,
-        now: int | None = None,
-    ) -> None:
-        """记录「这个键已经执行过了」，之后 :meth:`seen` 返回 ``True``。"""
-        await self._write(
-            key,
-            workspace_id=workspace_id,
-            state=STATE_DONE,
-            response_id=response_id,
-            status_code=status_code,
-            request_digest=request_digest,
-            ttl_seconds=ttl_seconds,
-            now=now,
-        )
-
     async def reserve(
         self,
         key: str,
@@ -167,22 +163,98 @@ class IdempotencyStore:
         """占位：键未被占用时写入 ``in_flight`` 并返回 ``True``。
 
         返回 ``False`` 表示已有人占住 —— 调用方**不要**执行。
+
+        原子性（TOCTOU 修复）：旧实现是「先 ``seen()`` 检查、再
+        ``INSERT OR REPLACE`` 写入」两步，两个并发请求可以同时通过检查、然后
+        双双 REPLACE 落库 —— 正是幂等要防的「至多执行一次」被打破。现在改为
+        **直接普通 INSERT** 占位行，把判定下沉到数据库主键上：同一时刻只有一
+        个 INSERT 能成功，输家收到主键冲突（SQLite IntegrityError / MySQL
+        errno 1062）返回 ``False``。
+
+        过期接管：主键被一条**已过期**（``0 < expires_at <= now``）的旧行占住
+        时，冲突后用条件 UPDATE 原子接管该行（与 :meth:`seen` 忽略过期行的
+        TTL 语义对齐，过期键不会被永久挡死）；``expires_at = 0``（永不过期）
+        的行不可接管。
         """
         if not key:
             return True
-        if await self.seen(key, workspace_id=workspace_id, now=now):
-            return False
+        ts = int(time.time()) if now is None else int(now)
+        expires_at = ts + int(ttl_seconds) if ttl_seconds > 0 else 0
+        try:
+            await self._store.execute(
+                "INSERT INTO idempotency_records "
+                "(workspace_id, idempotency_key, request_digest, response_id, "
+                " status_code, state, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
+                (workspace_id, key, request_digest, response_id, STATE_IN_FLIGHT, ts, expires_at),
+            )
+            return True
+        except Exception as exc:
+            if not _is_duplicate_key_error(exc):
+                raise
+        # 主键冲突：唯一可能是已有占位行。若该行已过期则原子接管，否则失败。
+        reclaimed = await self._store.execute_rowcount(
+            "UPDATE idempotency_records "
+            "SET request_digest = ?, response_id = ?, status_code = 0, "
+            " state = ?, created_at = ?, expires_at = ? "
+            "WHERE workspace_id = ? AND idempotency_key = ? "
+            "AND expires_at > 0 AND expires_at <= ?",
+            (request_digest, response_id, STATE_IN_FLIGHT, ts, expires_at, workspace_id, key, ts),
+        )
+        return reclaimed > 0
+
+    async def mark_executed(
+        self,
+        key: str,
+        *,
+        workspace_id: str = "",
+        response_id: str = "",
+        status_code: int = 200,
+        request_digest: str = "",
+        ttl_seconds: int = DEFAULT_TTL_SECONDS,
+        now: int | None = None,
+    ) -> None:
+        """记录「这个键已经执行过了」，之后 :meth:`seen` 返回 ``True``。
+
+        终态写入用条件 UPDATE（``WHERE state='in_flight'``）：只有仍处于本执
+        行者占位状态的行才会被翻成 ``done``。没有命中（例如调用方未经
+        :meth:`reserve` 直接记终态的历史路径）时退回旧的整行 upsert，保持对外
+        API 行为不变。
+        """
+        if not key:
+            return
+        ts = int(time.time()) if now is None else int(now)
+        expires_at = ts + int(ttl_seconds) if ttl_seconds > 0 else 0
+        flipped = await self._store.execute_rowcount(
+            "UPDATE idempotency_records "
+            "SET response_id = ?, status_code = ?, state = ?, "
+            " request_digest = CASE WHEN ? != '' THEN ? ELSE request_digest END, "
+            " expires_at = ? "
+            "WHERE workspace_id = ? AND idempotency_key = ? AND state = ?",
+            (
+                response_id,
+                int(status_code),
+                STATE_DONE,
+                request_digest,
+                request_digest,
+                expires_at,
+                workspace_id,
+                key,
+                STATE_IN_FLIGHT,
+            ),
+        )
+        if flipped > 0:
+            return
         await self._write(
             key,
             workspace_id=workspace_id,
-            state=STATE_IN_FLIGHT,
+            state=STATE_DONE,
             response_id=response_id,
-            status_code=0,
+            status_code=status_code,
             request_digest=request_digest,
             ttl_seconds=ttl_seconds,
             now=now,
         )
-        return True
 
     async def _write(
         self,

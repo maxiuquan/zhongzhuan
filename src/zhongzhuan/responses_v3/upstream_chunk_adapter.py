@@ -48,6 +48,8 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterable, AsyncIterator
 
+from loguru import logger
+
 from ..proxy.protocol.sse_parser import SseFrame, SSEParser
 
 #: The three wire dialects this adapter understands.
@@ -89,7 +91,7 @@ class UpstreamSSEChunkAdapter:
     response, matching the lifetime of the :class:`SSEParser` it owns.
     """
 
-    __slots__ = ("_protocol", "_parser", "_finished", "_open_tools", "_closed_tools", "_usage")
+    __slots__ = ("_protocol", "_parser", "_finished", "_open_tools", "_closed_tools", "_usage", "_dropped_events")
 
     def __init__(self, protocol: str = PROTOCOL_OPENAI) -> None:
         self._protocol: str = (protocol or PROTOCOL_OPENAI).strip().lower()
@@ -107,6 +109,8 @@ class UpstreamSSEChunkAdapter:
         #: by :meth:`_capture_usage`, read by the caller after the stream is
         #: consumed so request_logs gets real token counts (was always 0/0).
         self._usage: dict[str, Any] = {}
+        #: NATIVE 模式下被丢弃的未知事件类型计数（debug 可观测性，v3.2）。
+        self._dropped_events: dict[str, int] = {}
 
     # -- construction ------------------------------------------------------
 
@@ -388,11 +392,49 @@ class UpstreamSSEChunkAdapter:
         response id and the persistence, so payload events are re-derived and
         the upstream's own ``response.created``/``completed`` bookends are
         dropped -- the pipeline emits exactly one lifecycle (铁律 3).
+
+        v3.2 整改（P1）：此前本方法只认 text / function_call 两类事件，NATIVE
+        上游的 **reasoning 生命周期**与 **hosted tool 输出**（web_search_call /
+        mcp_call 等非 message/function item）被整段丢弃——客户端看到的是一条
+        缺推理、缺工具产物的残缺流。现在：
+
+        * ``response.output_item.added`` / ``.done`` —— 原始 item 透传（重编
+          ``output_index``，保持本代理对序号的独占权），item 类型原样保留；
+        * ``response.reasoning_summary_text.delta`` —— 映射为词汇表里的
+          ``reasoning`` 文本增量（pipeline 会合成完整 reasoning 生命周期）；
+        * 其余未知类型：debug 计数后仍丢弃（绝不猜造内容，铁律 2）。
         """
         etype = str(payload.get("type") or event or "")
         if etype == "response.output_text.delta":
             delta = str(payload.get("delta") or "")
             return [{"type": "text", "delta": delta}] if delta else []
+        if etype == "response.output_item.added" or etype == "response.output_item.done":
+            item = payload.get("item")
+            if not isinstance(item, dict):
+                self._drop_unsupported(etype)
+                return []
+            itype = str(item.get("type") or "")
+            if itype in ("message", "function_call"):
+                # 这两类由 text / function_call_arguments.delta 分支重建，透传
+                # 原始 item 反而会产出重复的 output_index 序列。
+                self._drop_unsupported(etype + ":" + itype)
+                return []
+            # reasoning / web_search_call / mcp_call / file_search_call 等：
+            # 重编 output_index 后原样透传（hosted tool 的产物不允许静默丢失）。
+            source_index = _int_or(payload.get("output_index"), 0)
+            forwarded = dict(item)
+            forwarded["output_index"] = source_index
+            return [
+                {
+                    "type": "raw_output_item",
+                    "event": etype,
+                    "output_index": source_index,
+                    "item": forwarded,
+                }
+            ]
+        if etype == "response.reasoning_summary_text.delta":
+            delta = str(payload.get("delta") or "")
+            return [{"type": "reasoning", "delta": delta}] if delta else []
         if etype == "response.function_call_arguments.delta":
             source_index = _int_or(payload.get("output_index"), 0)
             call_id = str(payload.get("call_id") or payload.get("item_id") or "")
@@ -421,7 +463,17 @@ class UpstreamSSEChunkAdapter:
             # the caller can write real tokens into request_logs instead of 0/0.
             self._capture_usage(payload)
             return self._finish()
+        self._drop_unsupported(etype)
         return []
+
+    def _drop_unsupported(self, etype: str) -> None:
+        """Count one dropped native event kind (debug visibility, never fatal)."""
+        self._dropped_events[etype] = self._dropped_events.get(etype, 0) + 1
+        logger.debug(
+            "[upstream-adapter] native event dropped (no mapping): {} (total={})",
+            etype,
+            self._dropped_events[etype],
+        )
 
 
 __all__ = [

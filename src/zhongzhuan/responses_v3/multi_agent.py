@@ -34,6 +34,8 @@ from typing import Any, Awaitable, Callable
 
 from loguru import logger as _loguru
 
+from .args_patch import detect_role_tag
+
 #: stdlib logger 仅作类型/兜底；默认走 loguru（zhongzhuan 的落盘通道，NFR-4
 #: 可观测性——2026-08-15 排查确认 stdlib logging 未被 setup_logging 接管，
 #: thread_spawn 等记录在生产日志里完全看不到）。
@@ -400,19 +402,33 @@ class MultiAgentOrchestrator:
     # -- 5 个子工具 -----------------------------------------------------------
 
     async def _spawn(self, call_id: str, args: dict[str, Any], output_index: int = 0) -> dict[str, Any]:
-        instruction = str(args.get("instruction") or "")
+        # v3.1 字段统一：V1 handler 的权威字段是 ``message``（args_patch 补参
+        # 结果写的就是它）；``instruction`` 是编排器的历史入口名。两者都空才是
+        # 真的没给指令。
+        instruction = str(args.get("instruction") or args.get("message") or "").strip()
+        if not instruction:
+            # v3.2 整改（FR-12c 风格）：空 instruction 此前会静默标记 completed
+            # （result=""），团长把空气当真产物直接汇总——现在返回显式错误
+            # result，让模型有机会带上明确指令重试。在注册 agent **之前**返回，
+            # 避免给 registry 留一个占并发额度的孤儿。
+            return build_function_call_output(
+                output_index=output_index,
+                call_id=call_id,
+                response_id="",
+                output=json.dumps({"error": "spawn_agent called without instruction"}),
+            )
         # FR-8 / 附录 C.12.4（方案 A.1）：Codex 26.803 原生 spawn_agent 不转发
         # per-child `model` 参数（子代理一律继承父模型）。用角色标记前缀确定
         # 子代理模型，剥除前缀后再下发 instruction。优先级：角色标记 > 显式
         # model 字段（MCP 桥接等路径会填）> 父模型 default。
         model = ""
-        for tag, mdl in ROLE_MODEL_MAP.items():
-            prefix = f"[{tag}]"
-            if instruction.startswith(prefix):
+        role_tag, routed_model = detect_role_tag(instruction)
+        if role_tag:
+            prefix = f"[{role_tag}]"
+            if instruction.lower().startswith(prefix):
                 args["instruction"] = instruction[len(prefix):].lstrip()
                 instruction = args["instruction"]
-                model = mdl
-                break
+            model = routed_model
         if not model:
             model = str(args.get("model") or "")
         if not model:
@@ -435,14 +451,15 @@ class MultiAgentOrchestrator:
             )
             self._agents[agent_id] = state
         # fire-and-forget rollout；wait_agent 才真正 await 结果。
-        if self._runner is not None and instruction:
+        if self._runner is not None:
             state.status = "running"
             state.task = asyncio.create_task(self._run_agent(state))
             self._log.info(
                 f"thread_spawn agent_id={agent_id} model={model} session={session_id} instruction_len={len(instruction)}"
             )
         else:
-            # 无 runner（纯占位）：直接标记完成，避免 wait 永久挂起。
+            # 无 runner（纯占位）：直接标记完成，避免 wait 永久挂起。空 instruction
+            # 的情形已在函数入口显式报错返回，不会再走到这里假 completed。
             state.status = "completed"
             state.result = ""
         return build_function_call_output(
@@ -486,6 +503,11 @@ class MultiAgentOrchestrator:
         if state.task is not None and not state.task.done():
             try:
                 await state.task
+            except asyncio.CancelledError:
+                # v3.2 整改：任务被 close/cancel 打断时 CancelledError（BaseException）
+                # 会冲穿本编排调用链，父代理只看到断流而不是结果。转成显式
+                # ``closed`` 状态收束输出。
+                state.status = "closed"
             except Exception:  # noqa: BLE001 - 任务异常已写入 state，这里只需等结束
                 pass
         out = state.result if state.status == "completed" else (state.error or "")

@@ -61,6 +61,7 @@ HONEST STUB
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping
 
 from ..proxy.protocol.responses_errors import to_incomplete_details
@@ -82,6 +83,8 @@ from .capability import (
     UPSTREAM_FORWARDED_CAPABILITIES,
     CapabilityError,
 )
+
+LOGGER = logging.getLogger("zhongzhuan.responses_v3.hosted_tools")
 
 # ---------------------------------------------------------------------------
 # 1. 常量
@@ -155,11 +158,23 @@ def resolve_mcp_executor(cfg: Any | None = None) -> Any | None:
     开关关闭 -> ``None``（请求携带 ``mcp`` tool 时由 validator 判 400
     ``unsupported_tool``）；开关打开 -> 返回一个 T27 的 :class:`~.mcp_client.McpClient`
     （惰性导入，避免把 store 依赖拖进本模块的静态导入图）。
+
+    ⚠️ v3.2 显著提示：本工厂**没有**注入审计（``tool_executions``）与幂等
+    （``idempotency``）store——构造出的 McpClient 只发事件不落库，审批持久态
+    回读与幂等去重在生产里都会失效。签名保持不变是为兼容既有调用方；生产
+    部署必须自行构造 ``McpClient(executions=..., idempotency=...)`` 注入，
+    否则每次启动这里都会打 WARNING。
     """
     if Capability.REMOTE_MCP not in hosted_tool_emulated_capabilities(cfg):
         return None
     from .mcp_client import McpClient  # noqa: PLC0415 - 惰性导入防循环
 
+    LOGGER.warning(
+        "resolve_mcp_executor() built an McpClient WITHOUT audit/idempotency stores: "
+        "approval persistence and idempotent replay are DISABLED in this process. "
+        "Production must inject McpClient(executions=ToolExecutionStore, idempotency=IdempotencyStore) "
+        "instead of relying on this factory."
+    )
     return McpClient()
 
 

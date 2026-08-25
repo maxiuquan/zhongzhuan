@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 
 from .ratelimit import KeyHealth, STATE_HEALTHY, STATE_RATE_LIMITED, STATE_ERROR
@@ -24,9 +25,9 @@ def score(k: KeyHealth) -> float:
     - TPM 窗口余量（10%）：当前分钟 token 配额剩余比例
     - 状态权重：healthy=1.0, rate_limited=0.5, error=0.3
     - 兜底降权：is_fallback 的 key 总分 ×fallback_penalty（可配置，默认 0.1）
+    - has_key（15%）：api_key 非空的 key +0.15（无凭据兜底 key 降权）
     - 随机扰动（5%）：避免相同分数时总选同一个
     """
-    import random
 
     if not k.is_available():
         return -1.0

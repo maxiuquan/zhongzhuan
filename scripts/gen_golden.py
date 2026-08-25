@@ -18,7 +18,6 @@ byte-for-byte reproducible on any machine.
 from __future__ import annotations
 
 import asyncio
-import json
 import socket
 import sys
 from pathlib import Path

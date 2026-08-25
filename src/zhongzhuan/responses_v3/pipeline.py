@@ -54,7 +54,6 @@ from ..responses_v3.multi_agent import (
     MULTI_AGENT_NAMESPACE,
     MULTI_AGENT_TOOLS,
     TOOL_SEARCH_NAME,
-    build_function_call_output,
     build_tool_search_call,
     build_tool_search_function_call_output,
 )
@@ -114,8 +113,10 @@ class PipelineConfig:
     read_idle_seconds: float = 300.0
     total_seconds: float = 900.0
     connect_seconds: float = 15.0
-    #: Criterion ⑤ (R-P1-27): heartbeat arrival gap must never exceed this.
-    max_heartbeat_gap_seconds: float = 16.0
+    #: NOTE（R-P1-27 判据⑤ 未实现）：「心跳到达间隔不得超过 16s」这一判据在
+    #: 本管线中**没有任何执行点**——旧字段 ``max_heartbeat_gap_seconds`` 是一个
+    #: 从未被读取的死配置，2026-08-25 整改时删除而非假装旋钮存在。当前只有
+    #: ``heartbeat_seconds`` 的发送节奏是真的；判据⑤留待真正的到达间隔监控落地。
     #: Codex 26.x "Concurrent reasoning summaries"（请求带
     #: ``reasoning.summary='detailed'``）期望每个响应都有 reasoning 生命周期
     #: 事件；上游对 gpt-5.6-sol 在真实请求下不回 reasoning_content（2026-08-07
@@ -271,9 +272,16 @@ class ResponsePipeline:
         #: 这些调用不进入 ``_tools``（不产生普通 function_call item），由本模块
         #: 自行合成 tool_search_output / function_call_output。
         self._special_calls: dict[str, dict[str, Any]] = {}
+        #: NATIVE 上游透传的非 message/function_call item（reasoning 已由
+        #: ``_open_reasoning`` 承载；web_search_call / mcp_call 等 hosted tool
+        #: 产物），key 为本代理重编的 output_index。截断时由
+        #: ``_close_open_items`` 补发 ``incomplete`` 收尾，避免悬空的 added。
+        self._open_raw_items: dict[int, dict[str, Any]] = {}
         #: 已合成的 tool_search_output / function_call_output item，供
         #: ``output_items()`` 重建 retrieve() 用的 output 数组（与已发帧一致）。
-        self._synthesized_items: list[dict[str, Any]] = []
+        #: 元素为 ``(output_index, item)`` 二元组——历史注解误标为
+        #: ``list[dict]``，引发 mypy 对下方排序/解包的连锁误报。
+        self._synthesized_items: list[tuple[int, dict[str, Any]]] = []
         self._open_message: dict[str, Any] | None = None
         #: The assistant message as it was streamed, kept so the terminal row
         #: can be persisted with a real ``output`` array (a retrieve() after a
@@ -342,6 +350,34 @@ class ResponsePipeline:
         if not isinstance(chunk, dict):
             return frames
         kind = str(chunk.get("type") or "")
+
+        # -- NATIVE 上游透传项（reasoning 之外的 hosted tool 产物等）----------
+        if kind == "raw_output_item":
+            item = dict(chunk.get("item") or {})
+            idx = self._next_output_index()
+            # 重编 output_index：本代理拥有序号空间，与 message / function_call
+            # 共享同一条单调序列（铁律 3 的顺序一致性）。
+            item["output_index"] = idx
+            event_name = (
+                "response.output_item.done"
+                if str(chunk.get("event") or "").endswith(".done")
+                else "response.output_item.added"
+            )
+            frames.append(
+                await self._emit(
+                    event_name,
+                    {"type": event_name, "output_index": idx, "item": item},
+                )
+            )
+            if event_name == "response.output_item.added":
+                self._open_raw_items[idx] = item
+            else:
+                self._open_raw_items.pop(idx, None)
+            # retrieve()/output_items 与已发帧保持同一份事实。
+            self._synthesized_items = [(i, it) for i, it in self._synthesized_items if i != idx]
+            self._synthesized_items.append((idx, item))
+            self.state = "streaming"
+            return frames
 
         # -- V1 多代理：特殊调用的收尾（FR-2 / FR-3）--
         if kind == "tool_call_done":
@@ -714,13 +750,11 @@ class ResponsePipeline:
             # 1) 回显父代理发起的 function_call（带 namespace），让客户端看到调用。
             # FR-12（v3.0）空参补丁：mimo 团长稳定发 spawn_agent({})，本地 handler
             # 拒执行。**emit 之前**先做补丁（emit 会序列化 item，事后改 dict 无效）。
+            # v3.2 整改：server 代执行模式同样必须先补参——否则方案 B 兜底路径
+            # 会绕过 FR-12，把空参原样交给编排器执行出零产物子代理。
             patched_args: Any = sc["args"]
             reject_fco: dict[str, Any] | None = None
-            if (
-                self._spawn_execution != "server"
-                and name == "spawn_agent"
-                and self._multi_agent is not None
-            ):
+            if name == "spawn_agent":
                 from .args_patch import patch_spawn_agent_arguments
 
                 leader_text = "".join(self._message_text or [])
@@ -732,12 +766,14 @@ class ResponsePipeline:
                     orig = _parse_args(sc["args"])
                     if patched != orig:
                         logger.info(
-                            "[args-patch] empty-args patched call_id={} model={}",
-                            call_id, patched.get("model") or "inherit",
+                            "[args-patch] empty-args patched call_id={} model={} execution={}",
+                            call_id, patched.get("model") or "inherit", self._spawn_execution,
                         )
                         patched_args = json.dumps(patched, ensure_ascii=False)
-                else:
-                    # FR-12c：上下文不足以合成 → 拒绝重试（错误 fco 告知模型）。
+                elif self._spawn_execution != "server":
+                    # FR-12c：上下文不足以合成 → client 模式直接拒绝重试（错误 fco
+                    # 告知模型）。server 模式不在此拒绝：交给编排器显式报错，
+                    # 让两条路径的失败语义各自收口。
                     logger.info("[args-patch] empty-args rejected call_id={} (no context)", call_id)
                     reject_fco = {
                         "id": make_function_call_item_id(call_id) + "-err",
@@ -769,9 +805,15 @@ class ResponsePipeline:
             if self._spawn_execution == "server":
                 # 2) 方案 B（server 代执行兜底，FR-9 兜底路径）：中继执行子代理
                 #    生命周期并回传 function_call_output（FR-10 保证含子代理产物）。
+                #    传给编排器的是**补参后**的 arguments（FR-12 在两条路径一致）。
                 out_idx = self._next_output_index()
+                handle_args = (
+                    patched_args
+                    if isinstance(patched_args, str)
+                    else json.dumps(patched_args, ensure_ascii=False)
+                )
                 result = await self._multi_agent.handle(
-                    MULTI_AGENT_NAMESPACE, name, call_id, sc["args"], output_index=out_idx,
+                    MULTI_AGENT_NAMESPACE, name, call_id, handle_args, output_index=out_idx,
                 )
                 frames.extend(await self._emit_special_item(out_idx, result))
                 self._synthesized_items.append((out_idx, result))
@@ -1024,6 +1066,22 @@ class ResponsePipeline:
                     )
                 )
                 acc.mark_item_done()
+        for idx, item in list(self._open_raw_items.items()):
+            # NATIVE 透传项被截断：补一个 incomplete 的 done，绝不让 added 悬空
+            # （铁律 3 / R-P1-22）。
+            closed = dict(item)
+            closed["status"] = "incomplete"
+            frames.append(
+                await self._emit(
+                    "response.output_item.done",
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": idx,
+                        "item": closed,
+                    },
+                )
+            )
+            self._open_raw_items.pop(idx, None)
         return frames
 
     # -- terminal helpers ---------------------------------------------------
@@ -1142,6 +1200,33 @@ class ResponsePipeline:
         self.state = "completed"
         return frames
 
+    async def _internal_failed_frames(self, message: str) -> list[bytes]:
+        """内部异常的 ``response.failed`` 终态帧（带 ``error.message``）。
+
+        与截断终态的区别：状态恒为 ``failed``（strict/compat 都不洗白——管线
+        自身故障不是「上游说完了」），并显式携带 error 对象让客户端知道失败
+        原因，而不是渲染一个空气泡。
+        """
+        frames = await self._close_open_items(incomplete=True)
+        reason = TerminalReason.UPSTREAM_ERROR
+        frames.append(
+            await self._emit(
+                "response.failed",
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": self.response_id,
+                        "status": "failed",
+                        "error": {"type": "server_error", "message": message},
+                        "terminal_reason": reason.value,
+                    },
+                },
+            )
+        )
+        self.state = "failed"
+        self.stats.terminal_reason = reason.value
+        return frames
+
     # -- the run loop -------------------------------------------------------
 
     async def run(
@@ -1173,6 +1258,21 @@ class ResponsePipeline:
         clock = clock or time.monotonic
         sleep = sleep or asyncio.sleep
 
+        # -- run() 可重入：全部流式状态字段必须在**首个事件发出之前**重置，
+        # 否则第二次 run 会继承上一次的 finish 标记 / 累积文本 / 序号，产出
+        # 错乱的生命周期帧（seq 撞 UNIQUE 约束、created 出现两次等）。
+        self._done = False
+        self._seq = 0
+        self._open_message = None
+        self._output_index = 0
+        self._saw_provider_finish = False
+        self._had_invalid_tool_args = False
+        self._message_text = []
+        self._tools = ToolCallCollection(response_id=self.response_id)
+        self._special_calls = {}
+        self._open_raw_items = {}
+        self._synthesized_items = []
+
         yield await self._emit(
             "response.created",
             {"type": "response.created", "response": {"id": self.response_id, "status": "in_progress"}},
@@ -1182,9 +1282,6 @@ class ResponsePipeline:
             {"type": "response.in_progress", "response": {"id": self.response_id, "status": "in_progress"}},
         )
         self.state = "in_progress"
-        self._done = False
-        self._open_message = None
-        self._output_index = 0
 
         source = upstream() if callable(upstream) else upstream
         queue: asyncio.Queue = asyncio.Queue()
@@ -1255,36 +1352,52 @@ class ResponsePipeline:
             producers.append(asyncio.create_task(_watch_cancel()))
 
         terminal_reason: TerminalReason | None = None
+        #: 消费循环内部异常（``_translate_chunk`` / event_log.append_event 等）
+        #: 的兜底出口：捕获后合成 ``response.failed`` 终态帧并正常收尾，绝不把
+        #: 异常冲出生成器——否则 SSE 无终态帧断流、response 行永久卡
+        #: ``in_progress``（2026-08-25 P1 整改）。
+        internal_error: str = ""
         try:
             while True:
-                kind, payload = await queue.get()
-                if kind == "chunk":
-                    for frame in await self._translate_chunk(payload):
-                        yield frame
-                elif kind == "heartbeat":
-                    yield SSE_HEARTBEAT_FRAME
-                elif kind == "client_cancel":
-                    # Client is gone: close the upstream (already done by the
-                    # watcher), count the disconnect, and stop -- no terminal
-                    # event (nobody reads it) and NO health mutation (R-P1-25).
-                    self.stats.client_disconnects += 1
-                    break
-                elif kind == "timeout":
-                    terminal_reason = payload
-                    break
-                elif kind == "upstream_error":
-                    terminal_reason = TerminalReason.UPSTREAM_TRUNCATED if produced else TerminalReason.UPSTREAM_CONNECT
-                    break
-                elif kind == "upstream_end":
-                    # P0-2: the criterion for a clean EOF is that the upstream
-                    # gave an explicit finish signal -- NOT that chunks were
-                    # produced.  "Produced chunks then EOF" is the single most
-                    # common *successful* completion, and the old criterion
-                    # mislabelled every one of them as a truncation.
-                    if not self._saw_provider_finish:
+                try:
+                    kind, payload = await queue.get()
+                    if kind == "chunk":
+                        for frame in await self._translate_chunk(payload):
+                            yield frame
+                    elif kind == "heartbeat":
+                        yield SSE_HEARTBEAT_FRAME
+                    elif kind == "client_cancel":
+                        # Client is gone: close the upstream (already done by the
+                        # watcher), count the disconnect, and stop -- no terminal
+                        # event (nobody reads it) and NO health mutation (R-P1-25).
+                        self.stats.client_disconnects += 1
+                        break
+                    elif kind == "timeout":
+                        terminal_reason = payload
+                        break
+                    elif kind == "upstream_error":
                         terminal_reason = (
                             TerminalReason.UPSTREAM_TRUNCATED if produced else TerminalReason.UPSTREAM_CONNECT
                         )
+                        break
+                    elif kind == "upstream_end":
+                        # P0-2: the criterion for a clean EOF is that the upstream
+                        # gave an explicit finish signal -- NOT that chunks were
+                        # produced.  "Produced chunks then EOF" is the single most
+                        # common *successful* completion, and the old criterion
+                        # mislabelled every one of them as a truncation.
+                        if not self._saw_provider_finish:
+                            terminal_reason = (
+                                TerminalReason.UPSTREAM_TRUNCATED if produced else TerminalReason.UPSTREAM_CONNECT
+                            )
+                        break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - 翻译层异常必须落成终态帧
+                    logger.exception(
+                        "[pipeline] chunk translation failed response_id={}", self.response_id
+                    )
+                    internal_error = str(exc) or type(exc).__name__
                     break
         finally:
             self._done = True
@@ -1302,7 +1415,12 @@ class ResponsePipeline:
         # whose arguments the provider declared final and which did not parse.
         # A client that treats such a response as successful executes a mangled
         # tool call -- strictly worse than a visible failure.
-        if self._had_invalid_tool_args:
+        if internal_error:
+            # 消费循环内部异常优先：置终态原因后发 failed 帧，保证 handler 的
+            # persist 与本生成器的收尾路径（finally 已在上面走通）完整落地。
+            for frame in await self._internal_failed_frames(internal_error):
+                yield frame
+        elif self._had_invalid_tool_args:
             for frame in await self._terminal_frames(
                 reason=terminal_reason or TerminalReason.INVALID_TOOL_ARGUMENTS,
                 strict=True,

@@ -95,21 +95,22 @@ async def test_liveness_fields_and_status():
 
 
 @pytest.mark.asyncio
-async def test_readiness_fields_and_503_when_migration_incomplete(store):
-    """readiness：迁移未完成（无 store）→ 503；字段含 status/checks 三层子项。"""
+async def test_readiness_storeless_lightweight_mode_ready():
+    """readiness：store=None 轻量模式 → 迁移检查 not_applicable，不阻断 ready。"""
     base, runner, upstream = await _start_proxy(store=None)
     try:
         async with ClientSession() as sess:
             async with sess.get(f"{base}/healthz/ready") as resp:
-                assert resp.status == 503
+                assert resp.status == 200
                 body = await resp.json()
     finally:
         await runner.cleanup()
         await upstream.close()
-    assert body["status"] == "not_ready"
+    assert body["status"] == "ready"
     assert set(body) == {"status", "checks"}
     assert set(body["checks"]) == {"migration", "routes", "worker"}
-    assert body["checks"]["migration"]["ok"] is False
+    assert body["checks"]["migration"]["ok"] is True
+    assert "not_applicable" in body["checks"]["migration"]["detail"]
 
 
 @pytest.mark.asyncio
@@ -202,13 +203,46 @@ async def test_migration_status_complete_returns_true():
 
 
 @pytest.mark.asyncio
-async def test_migration_status_no_store_or_error():
-    """store=None 或查询异常 → 未就绪（绝不抛异常）。"""
+async def test_migration_status_no_store_is_not_applicable():
+    """store=None（轻量模式）→ not_applicable，不阻断 ready。"""
     ok, detail = await migration_status(None)
-    assert ok is False
-    assert "store unavailable" in detail
+    assert ok is True
+    assert "not_applicable" in detail
+
+
+@pytest.mark.asyncio
+async def test_migration_status_error_returns_false():
+    """查询异常 → 未就绪（绝不抛异常）。"""
     ok2, detail2 = await migration_status(_FakeStore(error=True))
     assert ok2 is False
+    assert "migration check failed" in detail2
+
+
+# ---------------------------------------------------------------------------
+# 判据① 单元：dependency 聚合 —— optional 失败不整体 degraded
+# ---------------------------------------------------------------------------
+
+
+def test_dependency_optional_unavailable_keeps_overall_ok():
+    """optional 项失败 → 状态 optional_unavailable，但整体仍 ok。"""
+    deps = [
+        dependency_item("store", True, "migrations complete"),
+        dependency_item("upstream", True, "ok"),
+        dependency_item("tool_executor", False, "no tool executor configured", optional=True),
+    ]
+    payload = build_dependency_status(deps)
+    assert payload["status"] == "ok"
+    assert payload["dependencies"][2]["status"] == "optional_unavailable"
+
+
+def test_dependency_required_down_degrades_overall():
+    """必选项 down → 整体 degraded。"""
+    deps = [
+        dependency_item("store", True, "ok"),
+        dependency_item("upstream", False, "no upstream clients configured"),
+    ]
+    payload = build_dependency_status(deps)
+    assert payload["status"] == "degraded"
 
 
 # ---------------------------------------------------------------------------

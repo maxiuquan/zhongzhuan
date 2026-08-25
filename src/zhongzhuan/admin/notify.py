@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 # Reload target configured by AdminServer at startup.
 # Defaults reflect the most common VPS setup (TLS proxy on 8443).
 _RELOAD_PORT: int = 8443
@@ -13,6 +15,12 @@ def configure_reload_target(port: int, use_tls: bool) -> None:
     global _RELOAD_PORT, _RELOAD_USE_TLS
     _RELOAD_PORT = port
     _RELOAD_USE_TLS = use_tls
+
+
+def _internal_headers() -> dict[str, str]:
+    """内部令牌头：设置了 ZHONGZHUAN_INTERNAL_TOKEN 时附带（proxy 侧 compare_digest 校验）。"""
+    token = os.getenv("ZHONGZHUAN_INTERNAL_TOKEN", "")
+    return {"X-Internal-Token": token} if token else {}
 
 
 async def notify_proxy_reload() -> None:
@@ -34,6 +42,7 @@ async def notify_proxy_reload() -> None:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     url,
+                    headers=_internal_headers(),
                     ssl=ssl_arg,
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
@@ -66,6 +75,7 @@ async def notify_proxy_reactivate(key_id: int) -> bool:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     url,
+                    headers=_internal_headers(),
                     ssl=ssl_arg,
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
@@ -99,6 +109,7 @@ async def fetch_proxy_key_health() -> list[dict]:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     url,
+                    headers=_internal_headers(),
                     ssl=ssl_arg,
                     timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:

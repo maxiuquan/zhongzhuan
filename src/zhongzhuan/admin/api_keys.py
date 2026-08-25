@@ -177,9 +177,15 @@ def _build_fingerprint_headers(client_preset: str, custom_headers: str) -> list[
 
 
 def register_routes(app: web.Application, ctx) -> None:
+    def _bad(message: str) -> web.Response:
+        return web.json_response({"error": {"message": message, "type": "bad_request"}}, status=400)
+
     async def list_(request):
         model_id = request.query.get("model_id")
-        rows = await list_keys(ctx.store, int(model_id) if model_id else None)
+        try:
+            rows = await list_keys(ctx.store, int(model_id) if model_id else None)
+        except ValueError:
+            return _bad("model_id 必须是整数")
         # 拉取 proxy 内存健康状态（2026-08-15 v1：展示失效原因/冷却，供「确认恢复」）
         try:
             health = await fetch_proxy_key_health()
@@ -206,15 +212,18 @@ def register_routes(app: web.Application, ctx) -> None:
         )
 
     async def create(request):
-        data = await request.json()
-        k = ApiKey(
-            id=None,
-            model_id=int(data["model_id"]),
-            label=data.get("label", ""),
-            key_value=data["key_value"],
-            enabled=bool(data.get("enabled", True)),
-            priority=int(data.get("priority", 0)),
-        )
+        try:
+            data = await request.json()
+            k = ApiKey(
+                id=None,
+                model_id=int(data["model_id"]),
+                label=data.get("label", ""),
+                key_value=data["key_value"],
+                enabled=bool(data.get("enabled", True)),
+                priority=int(data.get("priority", 0)),
+            )
+        except (KeyError, TypeError, ValueError) as e:
+            return _bad(f"invalid payload: {e}")
         k = await create_key(ctx.store, k)
         await notify_proxy_reload()
         return web.json_response(
@@ -231,13 +240,19 @@ def register_routes(app: web.Application, ctx) -> None:
         )
 
     async def delete(request):
-        key_id = int(request.match_info["id"])
+        try:
+            key_id = int(request.match_info["id"])
+        except ValueError:
+            return _bad("invalid key id")
         await delete_key(ctx.store, key_id)
         await notify_proxy_reload()
         return web.json_response({"ok": True})
 
     async def update(request):
-        key_id = int(request.match_info["id"])
+        try:
+            key_id = int(request.match_info["id"])
+        except ValueError:
+            return _bad("invalid key id")
         data = await request.json()
         await update_key(
             ctx.store,
@@ -251,7 +266,10 @@ def register_routes(app: web.Application, ctx) -> None:
 
     async def test(request):
         """测试单个 Key 的连通性：向其上游发一个 max_tokens=1 的极简 chat 请求。"""
-        key_id = int(request.match_info["id"])
+        try:
+            key_id = int(request.match_info["id"])
+        except ValueError:
+            return _bad("invalid key id")
         plain = await get_key_cipher(ctx.store, key_id)
         if not plain:
             return web.json_response({"ok": False, "error": "key not found or decrypt failed"}, status=404)
@@ -422,7 +440,10 @@ def register_routes(app: web.Application, ctx) -> None:
         permanent（欠费/配置已修）与 banned（封禁解除）都走这里；成功后
         key 回到分组原 ord/weight 排名参与 failover。
         """
-        key_id = int(request.match_info["id"])
+        try:
+            key_id = int(request.match_info["id"])
+        except ValueError:
+            return _bad("invalid key id")
         ok = await notify_proxy_reactivate(key_id)
         if not ok:
             return web.json_response(

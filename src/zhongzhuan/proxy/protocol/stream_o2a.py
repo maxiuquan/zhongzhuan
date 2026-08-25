@@ -15,13 +15,23 @@ from loguru import logger
 
 
 # OpenAI finish_reason -> Anthropic stop_reason
+# （与 translate_a2o.MAP_FINISH_REASON_O2A、translate_o2a.MAP_STOP_REASON_A2O
+# 是同一张方向表的三个拷贝：改一处必须同步其余两处，注释互指防漂移。
+# refusal/pause_turn 是 Anthropic 侧的 stop_reason 值，出现在本表说明上游把
+# Anthropic 语义混进了 OpenAI 流 —— 安全降级为 end_turn，绝不静默丢 key。）
 MAP_FINISH_REASON_O2A: dict[str, str] = {
     "stop": "end_turn",
     "length": "max_tokens",
     "tool_calls": "tool_use",
     "content_filter": "end_turn",
     "function_call": "tool_use",
+    "refusal": "end_turn",
+    "pause_turn": "end_turn",
 }
+
+#: SSE 事件缓冲的字节上限（对齐 sse_parser.DEFAULT_MAX_EVENT_BYTES 的 8MB 阀门）。
+#: 超过上限仍凑不出完整事件边界，说明上游失控/恶意，丢弃缓冲并计数，防内存膨胀。
+_MAX_BUFFER: int = 8 * 1024 * 1024
 
 # State constants
 INIT = "INIT"  # message_start not yet emitted
@@ -79,6 +89,11 @@ class StreamO2A:
         self._reasoning_chars: int = 0
         self._content_chars: int = 0
         self._tool_call_count: int = 0
+        # 上游真实 usage（include_usage 尾帧或随 finish_reason 附带的 usage）。
+        # None 表示尚未捕获 —— 收尾时才降级为 chars//4 估算。
+        self._upstream_completion_tokens: int | None = None
+        # 缓冲超限被丢弃的次数（诊断计数，见 _MAX_BUFFER）。
+        self._buffer_overflows: int = 0
 
     def done(self) -> bool:
         """Whether the stream is finished (after emitting message_stop)."""
@@ -118,6 +133,10 @@ class StreamO2A:
 
         out: list[bytes] = []
         self._buffer += chunk
+        # CRLF 归一化：部分上游用 ``\r\n\r\n`` 分隔事件、``\r\n`` 结尾行。
+        # JSON 载荷里的控制字符必然已被转义，线上不会出现裸 \r，因此在字节层
+        # 统一归一为 \n 是安全的（分帧前处理，避免事件边界漏切）。
+        self._buffer = self._buffer.replace(b"\r\n", b"\n")
         # Split on \n\n (SSE event boundary). Anything after the last \n\n is
         # a partial event — keep it in the buffer until the next chunk.
         while b"\n\n" in self._buffer:
@@ -146,14 +165,41 @@ class StreamO2A:
                 logger.warning("StreamO2A: failed to parse SSE event: {}", data_str[:200])
                 continue
             out.extend(self._handle_openai_chunk(data))
+        # 内存安全阀：残留缓冲（凑不出事件边界的部分事件）超过上限，说明上游
+        # 失控。整体丢弃并计数，绝不让缓冲无界增长。
+        if len(self._buffer) > _MAX_BUFFER:
+            self._buffer_overflows += 1
+            logger.warning(
+                "StreamO2A: SSE buffer exceeded {} bytes without an event "
+                "boundary; dropping {} buffered bytes (overflow #{})",
+                _MAX_BUFFER,
+                len(self._buffer),
+                self._buffer_overflows,
+            )
+            self._buffer = b""
         return out
 
     def _handle_openai_chunk(self, data: dict) -> list[bytes]:
         """Process one parsed OpenAI chunk dict. Returns Anthropic SSE bytes."""
         out: list[bytes] = []
+        # Capture upstream real usage (include_usage tail chunk carries usage
+        # with no choices; some providers attach it to the finish_reason chunk).
+        # Must run before the empty-choices gate, otherwise the tail frame's
+        # real token counts are silently dropped.
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            ct = usage.get("completion_tokens")
+            if isinstance(ct, (int, float)) and ct > 0:
+                self._upstream_completion_tokens = int(ct)
+        # A mid-stream {"error": {...}} event means the upstream failed —
+        # surface it to the Anthropic client instead of silently swallowing it
+        # (which made the client treat a failure as a successful empty reply).
+        err = data.get("error")
+        if isinstance(err, dict) and err:
+            return self._finish_with_error(err)
         choices = data.get("choices") or []
         if not choices:
-            # Could be a usage-only chunk; ignore for now.
+            # Usage-only chunk (already captured above); nothing else to emit.
             return out
         choice = choices[0]
         delta = choice.get("delta") or {}
@@ -392,14 +438,54 @@ class StreamO2A:
             stop_reason = "end_turn"
         else:
             stop_reason = MAP_FINISH_REASON_O2A.get(finish_reason, "end_turn")
-        # Rough output token estimate: chars / 4.
-        output_tokens = max(1, self._output_chars // 4)
+        # Prefer the real completion_tokens captured from upstream usage
+        # (include_usage tail frame / finish chunk); only fall back to the
+        # chars//4 estimate when no real value was seen.
+        output_tokens = self._upstream_completion_tokens or max(1, self._output_chars // 4)
         out.append(
             _sse_event(
                 "message_delta",
                 {
                     "delta": {"stop_reason": stop_reason, "stop_sequence": None},
                     "usage": {"output_tokens": output_tokens},
+                },
+            )
+        )
+        out.append(_sse_event("message_stop", {}))
+        self.state = DONE
+        self._finished = True
+        return out
+
+    def _finish_with_error(self, err: dict) -> list[bytes]:
+        """Emit an error-semantic closing sequence for a mid-stream error event.
+
+        Mirrors :meth:`StreamA2O._finish_with_error` (stream_a2o.py): the client
+        must never mistake an upstream failure for a successful empty reply.
+        Emits, in order: message_start/ping if nothing was sent yet, the open
+        content_block_stop (if any), the Anthropic-style ``error`` event, then a
+        ``message_delta`` carrying ``stop_reason="error"`` + ``message_stop`` so
+        the SSE framing stays well-formed and clients see an explicit failure
+        signal even if they ignore the error event.
+        """
+        if self._finished:
+            return []
+        msg = err.get("message") or "upstream stream error"
+        logger.warning("StreamO2A: upstream error event: {}", msg)
+        out: list[bytes] = []
+        if self.state == INIT:
+            out.extend(self._emit_message_start({}))
+            out.append(_sse_event("ping", {}))
+            self.state = STARTED
+        if self.state in (TEXT_BLOCK, TOOL_BLOCK):
+            out.append(_sse_event("content_block_stop", {"index": self._current_index}))
+            self.state = STARTED
+        out.append(_sse_event("error", {"error": err}))
+        out.append(
+            _sse_event(
+                "message_delta",
+                {
+                    "delta": {"stop_reason": "error", "stop_sequence": None},
+                    "usage": {"output_tokens": self._upstream_completion_tokens or 0},
                 },
             )
         )

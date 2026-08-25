@@ -21,15 +21,21 @@ from loguru import logger
 
 @runtime_checkable
 class StreamTranslator(Protocol):
-    """流翻译器统一接口（用于类型标注，运行时可选）。"""
+    """流翻译器统一接口（用于类型标注，运行时可选）。
+
+    ``done`` 统一为**方法调用语义**：实现方必须定义 ``def done(self) -> bool``，
+    消费方必须显式调用 ``tr.done()``。历史上协议声明 ``@property done`` 而部分
+    实现（StreamA2O / StreamO2A）是普通方法，导致属性式消费（``if tr.done``）
+    在方法实现上拿到恒真的 bound method —— 流从未"结束"，截断兜底永不触发
+    （恒真埋雷）。统一为方法后该歧义消除。
+    """
 
     async def feed(self, chunk: bytes) -> list[bytes]:
         """喂入一个原始字节块，返回需要发送给下游的字节列表。"""
         ...
 
-    @property
     def done(self) -> bool:
-        """流是否已结束（已发出终态事件）。"""
+        """流是否已结束（已发出终态事件）。必须以 ``done()`` 方法调用。"""
         ...
 
     @property

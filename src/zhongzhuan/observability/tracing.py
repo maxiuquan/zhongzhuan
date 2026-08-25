@@ -21,8 +21,13 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
+
+#: 内存 recorder 的 span 缓冲上限（环形裁剪）：超出的最老 span 被丢弃，
+#: 防止长驻进程 ``_spans`` 无界增长。
+SPAN_BUFFER_MAX: int = 512
 
 #: span 属性键（5 类，R-P2-09 原文）。
 ATTR_TTFT: str = "ttft_ms"
@@ -49,9 +54,14 @@ def _load_otel():
 
 @dataclass
 class Span:
-    """一次 span 的内存表示（OTel 未装时的 recorder 形态，也用于测试断言）。"""
+    """一次 span 的内存表示（OTel 未装时的 recorder 形态，也用于测试断言）。
+
+    ``span_id`` 是 tracer 内的自增序号：并发下同名 span 靠它区分生命周期，
+    不再以名字作活跃表键。
+    """
 
     name: str
+    span_id: int = 0
     attributes: dict[str, Any] = field(default_factory=dict)
     start_ns: int = 0
     end_ns: int = 0
@@ -76,8 +86,9 @@ class Tracer:
     def __init__(self, service_name: str = "zhongzhuan") -> None:
         self._service_name = service_name
         self._lock = threading.Lock()
-        self._spans: list[Span] = []
-        self._active: dict[str, Span] = {}
+        self._spans: deque[Span] = deque(maxlen=SPAN_BUFFER_MAX)
+        # 活跃表以自增 span_id 为键（span 名字会并发重复，作键会互相覆盖）。
+        self._active: dict[int, Span] = {}
         self._seq = 0
         self._otel = None
         self._otel_provider = None
@@ -105,28 +116,32 @@ class Tracer:
     # -- span 生命周期 ------------------------------------------------------
 
     def start_span(self, name: str, **attributes: Any) -> Span:
-        span = Span(
-            name=name,
-            attributes=dict(attributes),
-            start_ns=time.time_ns(),
-            parent_id=self._active_id(),
-        )
         with self._lock:
+            parent_id = self._active_id()
             self._seq += 1
+            span = Span(
+                name=name,
+                span_id=self._seq,
+                attributes=dict(attributes),
+                start_ns=time.time_ns(),
+                parent_id=parent_id,
+            )
             self._spans.append(span)
-            self._active[name] = span
+            self._active[span.span_id] = span
         return span
 
     def end_span(self, span: Span, *, status: str = "ok") -> None:
         span.end_ns = time.time_ns()
         span.status = status
         with self._lock:
-            self._active.pop(span.name, None)
+            self._active.pop(span.span_id, None)
 
     def _active_id(self) -> str:
+        """最近一个未结束 span 的 id。**必须在持锁状态下调用**（旧实现
+        在锁外读 ``_active``，与并发 ``start_span`` 竞争会错乱父子关系）。"""
         if not self._active:
             return ""
-        return f"{self._seq}-{next(reversed(self._active))}"
+        return str(next(reversed(self._active)))
 
     # -- 只读 / 测试 --------------------------------------------------------
 
@@ -176,6 +191,7 @@ def record_breaker_reason(span: Span, reason: str) -> None:
 
 
 __all__ = [
+    "SPAN_BUFFER_MAX",
     "ATTR_TTFT",
     "ATTR_EVENT",
     "ATTR_EVENT_DELAY",

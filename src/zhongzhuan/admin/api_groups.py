@@ -144,22 +144,29 @@ def register_routes(app: web.Application, ctx) -> None:
         out = []
         for g in groups:
             g = dict(g)
+            members = []
             for m in (g.get("members") or []):
                 m = dict(m)
                 m["bad_keys"] = bad_by_model.get(m["model_id"], [])
-            g["members"] = g.get("members") or []
+                members.append(m)
+            g["members"] = members
             out.append(g)
         return web.json_response({"data": out})
 
     async def create(request):
-        data = await request.json()
-        g = GroupData(
-            name=data["name"],
-            strategy=data["strategy"],
-            fallback_enabled=bool(data.get("fallback_enabled", True)),
-            exposed=bool(data.get("exposed", True)),
-            fallback_group=data.get("fallback_group", "") or "",
-        )
+        try:
+            data = await request.json()
+            g = GroupData(
+                name=data["name"],
+                strategy=data["strategy"],
+                fallback_enabled=bool(data.get("fallback_enabled", True)),
+                exposed=bool(data.get("exposed", True)),
+                fallback_group=data.get("fallback_group", "") or "",
+            )
+        except (KeyError, TypeError, ValueError) as e:
+            return web.json_response(
+                {"error": {"message": f"invalid payload: {e}", "type": "bad_request"}}, status=400
+            )
         g = await create_group(ctx.store, g)
         members = data.get("members", [])
         if members:
@@ -180,15 +187,20 @@ def register_routes(app: web.Application, ctx) -> None:
         return web.json_response(await get_group(ctx.store, g.name), status=201)
 
     async def update(request):
-        group_id = int(request.match_info["id"])
-        data = await request.json()
-        g = GroupData(
-            name=data["name"],
-            strategy=data["strategy"],
-            fallback_enabled=bool(data.get("fallback_enabled", True)),
-            exposed=bool(data.get("exposed", True)),
-            fallback_group=data.get("fallback_group", "") or "",
-        )
+        try:
+            group_id = int(request.match_info["id"])
+            data = await request.json()
+            g = GroupData(
+                name=data["name"],
+                strategy=data["strategy"],
+                fallback_enabled=bool(data.get("fallback_enabled", True)),
+                exposed=bool(data.get("exposed", True)),
+                fallback_group=data.get("fallback_group", "") or "",
+            )
+        except (KeyError, TypeError, ValueError) as e:
+            return web.json_response(
+                {"error": {"message": f"invalid payload: {e}", "type": "bad_request"}}, status=400
+            )
         await update_group(ctx.store, group_id, g)
         # Only touch members when the field is explicitly provided (list, possibly empty).
         # None = leave members untouched; [] = clear all members.
@@ -211,7 +223,12 @@ def register_routes(app: web.Application, ctx) -> None:
         return web.json_response({"ok": True})
 
     async def delete(request):
-        group_id = int(request.match_info["id"])
+        try:
+            group_id = int(request.match_info["id"])
+        except ValueError:
+            return web.json_response(
+                {"error": {"message": "invalid group id", "type": "bad_request"}}, status=400
+            )
         await delete_group(ctx.store, group_id)
         await notify_proxy_reload()
         return web.json_response({"ok": True})
@@ -223,7 +240,12 @@ def register_routes(app: web.Application, ctx) -> None:
         纯 ping（不触发 M013 探测、不改写模型配置），与单 key 测试共用 URL
         规范化和指纹头，保证与代理主流程打到同一个上游 URL。
         """
-        group_id = int(request.match_info["id"])
+        try:
+            group_id = int(request.match_info["id"])
+        except ValueError:
+            return web.json_response(
+                {"error": {"message": "invalid group id", "type": "bad_request"}}, status=400
+            )
         rows = await ctx.store.fetchall(
             "SELECT id, name, strategy, fallback_enabled, exposed, fallback_group FROM model_groups WHERE id=?",
             (group_id,),
@@ -256,10 +278,16 @@ def register_routes(app: web.Application, ctx) -> None:
             for kid in key_ids:
                 tasks.append((kid, _test_group_key(ctx, kid, model)))
 
-        # 并发执行（限制并发避免打爆上游），失败隔离不波及同组其他 key
+        # 并发执行（信号量限流避免打爆上游），失败隔离不波及同组其他 key
         key_results: dict[int, dict] = {}
         if tasks:
-            outcomes = await asyncio.gather(*(t[1] for t in tasks), return_exceptions=True)
+            sem = asyncio.Semaphore(8)
+
+            async def _bounded(coro):
+                async with sem:
+                    return await coro
+
+            outcomes = await asyncio.gather(*(_bounded(t[1]) for t in tasks), return_exceptions=True)
             for (kid, _coro), out in zip(tasks, outcomes):
                 if isinstance(out, Exception):
                     key_results[kid] = {"key_id": kid, "ok": False, "status": 0,

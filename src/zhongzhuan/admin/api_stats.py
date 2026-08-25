@@ -9,12 +9,19 @@ from ..store.logs import get_stats, get_usage_stats
 
 def register_routes(app: web.Application, ctx) -> None:
     async def stats(request):
-        range_h = int(request.query.get("range", "1").rstrip("h"))
+        try:
+            range_h = int(str(request.query.get("range", "1")).rstrip("h"))
+        except (TypeError, ValueError):
+            range_h = 1
+        range_h = min(720, max(1, range_h))
         s = await get_stats(ctx.store, range_hours=range_h)
         return web.json_response(s)
 
     async def usage(request):
-        days = int(request.query.get("days", "7"))
+        try:
+            days = int(request.query.get("days", "7"))
+        except (TypeError, ValueError):
+            days = 7
         if days < 1:
             days = 1
         if days > 90:

@@ -171,11 +171,17 @@ class ToolExecutionStore:
         response_id: str,
         tool_seq: int,
         decision: str,
+        *,
+        workspace_id: str = "",
     ) -> None:
         """把一条记录的审批状态置为 ``approved`` / ``rejected``（往返的后半程）。
 
         不存在的记录是静默 no-op：UPDATE 影响 0 行。调用方要区分「批了」和
         「批了个不存在的东西」时，用 :meth:`get_for_response` 复核。
+
+        v3.2 整改：UPDATE 追加 ``workspace_id`` 条件（传入非空时）——审批决定
+        是租户敏感操作，缺租户条件时另一 workspace 撞了相同
+        ``(response_id, tool_seq)`` 会被越权改写。省略参数保持向后兼容。
         """
         if decision not in APPROVAL_STATES:
             raise ValueError(
@@ -184,6 +190,13 @@ class ToolExecutionStore:
                     sorted(APPROVAL_STATES),
                 )
             )
+        if workspace_id:
+            await self._store.execute(
+                "UPDATE tool_executions SET approval = ?, updated_at = ? "
+                "WHERE response_id = ? AND tool_seq = ? AND workspace_id = ?",
+                (decision, int(time.time()), response_id, int(tool_seq), workspace_id),
+            )
+            return
         await self._store.execute(
             "UPDATE tool_executions SET approval = ?, updated_at = ? WHERE response_id = ? AND tool_seq = ?",
             (decision, int(time.time()), response_id, int(tool_seq)),

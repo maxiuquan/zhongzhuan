@@ -141,6 +141,49 @@ def test_histogram_buckets_are_cumulative():
 
 
 # ---------------------------------------------------------------------------
+# 基数保护：超过 max_series 的新 label 组合归并进保留桶
+# ---------------------------------------------------------------------------
+
+
+def test_counter_overflow_merges_into_reserved_bucket():
+    """series 数达到 max_series 后，新组合统一累加到 {label="_overflow_"}。"""
+    c = m.Counter("test_cardinality_total", "help.", labelnames=("field",), max_series=3)
+    for name in ("a", "b", "c"):
+        c.inc(field=name)
+    c.inc(field="d")  # 超限 → 归并
+    c.inc(field="e")
+    c.inc(field="d")  # 已归并的键继续累加同一保留桶
+    lines = "\n".join(c.render())
+    assert 'test_cardinality_total{field="_overflow_"} 3' in lines
+    assert '{field="a"} 1' in lines and '{field="c"} 1' in lines
+    # 溢出键不会各立系列。
+    assert '{field="d"}' not in lines and '{field="e"}' not in lines
+
+
+def test_counter_existing_series_keep_increasing_past_cap():
+    """已存在的 series 在超限后继续正常累加，不受基数保护影响。"""
+    c = m.Counter("test_existing_total", "help.", labelnames=("field",), max_series=2)
+    c.inc(field="a")
+    c.inc(field="b")
+    c.inc(field="c")  # 触发溢出桶
+    c.inc(field="a")  # 存量 series 正常累加
+    lines = "\n".join(c.render())
+    assert '{field="a"} 2' in lines
+    assert 'test_existing_total{field="_overflow_"} 1' in lines
+
+
+def test_counter_unlimited_labels_within_cap_unaffected():
+    """未超限时行为与旧版完全一致（record_unknown_param 等 API 不变）。"""
+    _reset()
+    m.record_unknown_param("foo")
+    m.record_unknown_param("foo")
+    m.record_unknown_param("bar")
+    text = m.render_metrics()
+    assert 'responses_unknown_params_dropped_total{field="foo"} 2' in text
+    assert 'responses_unknown_params_dropped_total{field="bar"} 1' in text
+
+
+# ---------------------------------------------------------------------------
 # ⑤ criterion ⑤ -- 10 circuit-breaker reasons + 14 error classes each
 #    trigger once, and metric <-> terminal_reason are reverse-lookable
 # ---------------------------------------------------------------------------

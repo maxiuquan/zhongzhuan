@@ -469,15 +469,40 @@ async def _aiohttp_post(
 
 
 def _parse_sse_jsonrpc(payload: bytes) -> dict[str, Any]:
-    """从 ``text/event-stream`` 响应体里取出那一条 JSON-RPC 响应。"""
+    """从 ``text/event-stream`` 响应体里取出那一条 JSON-RPC 响应。
+
+    v3.2 整改：按 SSE 规范以**事件块**为单位解析——一个事件可由多行
+    ``data:`` 组成（长响应会被 server 按行切分），聚合（``\\n`` 连接）后再
+    ``json.loads``。旧实现逐行解析，多行 data 的 JSON 永远拼不回去，整条响应
+    被静默丢成 ``no JSON-RPC payload found``。``event:`` / ``id:`` / 注释行照
+    规范忽略。
+    """
+    blocks: list[str] = []
+    data_lines: list[str] = []
+
+    def _flush() -> None:
+        if data_lines:
+            blocks.append("\n".join(data_lines))
+            data_lines.clear()
+
     for line in payload.decode("utf-8", "replace").splitlines():
-        if not line.startswith("data:"):
-            continue
-        chunk = line[len("data:") :].strip()
-        if not chunk or chunk == "[DONE]":
+        if line.startswith("data:"):
+            chunk = line[len("data:") :]
+            if chunk.startswith(" "):
+                chunk = chunk[1:]
+            data_lines.append(chunk)
+        elif not line.strip():
+            # 空行 = 事件块边界（SSE spec）。
+            _flush()
+        # 其余（event:/id:/retry:/注释）与 JSON-RPC 提取无关，忽略。
+    _flush()
+
+    for block in blocks:
+        text = block.strip()
+        if not text or text == "[DONE]":
             continue
         try:
-            decoded = json.loads(chunk)
+            decoded = json.loads(text)
         except ValueError:
             continue
         if isinstance(decoded, Mapping) and ("result" in decoded or "error" in decoded):
@@ -1059,7 +1084,12 @@ class McpClient:
         reason = str(item.get("reason") or "")
         decision = APPROVAL_APPROVED if approved else APPROVAL_REJECTED
         if self._executions is not None:
-            await self._executions.set_approval(response_id, tool_seq, decision)
+            await self._executions.set_approval(
+                response_id,
+                tool_seq,
+                decision,
+                workspace_id=workspace_id,
+            )
         return ApprovalDecision(
             response_id=response_id,
             tool_seq=tool_seq,
@@ -1071,6 +1101,26 @@ class McpClient:
             ),
             reason=reason,
         )
+
+    # -- 内部：审批持久态回读（v3.2 整改）---------------------------------
+
+    async def _persisted_approval(self, response_id: str, tool_seq: int, workspace_id: str) -> str:
+        """回读一条 hosted tool 记录的 ``approval`` 持久态。
+
+        库不可用 / 无记录 / ``tool_seq`` 对不上时按 :data:`APPROVAL_NONE` 处理
+        （fail closed：拿不到「已批」的书面证据就当作没批）。纯协议层单测
+        （未注入 executions store）不经过本方法。
+        """
+        if self._executions is None:
+            return APPROVAL_APPROVED
+        try:
+            rows = await self._executions.get_for_response(response_id, workspace_id=workspace_id)
+        except Exception:  # noqa: BLE001 - 审批层故障必须偏向拒绝
+            return APPROVAL_NONE
+        for row in rows:
+            if int(row.get("tool_seq", -1)) == int(tool_seq):
+                return str(row.get("approval_state") or APPROVAL_NONE)
+        return APPROVAL_NONE
 
     # -- mcp_call ---------------------------------------------------------
 
@@ -1121,6 +1171,14 @@ class McpClient:
             )
 
         needs_approval = config.approval_required(name)
+        if needs_approval and approved and tool_seq >= 0:
+            # v3.2 整改：``approved`` 布尔此前被完全信任——调用方（或任何能构造
+            # 该调用的代码）说批了就算批了。现在回读 ``tool_executions.approval``
+            # 持久态：不是 ``approved`` 一律退回审批等待，伪造/误传的布尔到不了
+            # 副作用工具。
+            persisted = await self._persisted_approval(response_id, tool_seq, workspace_id)
+            if persisted != APPROVAL_APPROVED:
+                approved = None
         if needs_approval and approved is None:
             return await self.request_approval(
                 config,

@@ -93,6 +93,10 @@ class ResponsesEventEmitter:
         self._done_emitted = False
         self._completed_emitted = False
         self._open_items: set[str] = set()
+        # id -> 已通告的 OutputItem（真实 output_index / type / call_id / name）。
+        # terminate() 强关仍打开的 item 时用它回填真实字段，避免产出
+        # output_index=0、缺 type 的坏帧。
+        self._announced_items: dict[str, OutputItem] = {}
         self._done_items: set[str] = set()
         self._illegal: list[str] = []
 
@@ -172,6 +176,7 @@ class ResponsesEventEmitter:
             return []
         self._transition(EmitterState.STREAMING)
         self._open_items.add(item.id)
+        self._announced_items[item.id] = item
         self.stats.items_added += 1
         return [
             self._frame(
@@ -194,6 +199,7 @@ class ResponsesEventEmitter:
             return []
         wire = self._item_wire(item, status=status)
         self._open_items.discard(item.id)
+        self._announced_items.pop(item.id, None)
         self._done_items.add(item.id)
         self.stats.items_done += 1
         return [
@@ -297,17 +303,32 @@ class ResponsesEventEmitter:
         return frames
 
     def _close_open_item(self, item_id: str) -> list[bytes]:
-        """Best-effort close of an item left open at termination."""
+        """Best-effort close of an item left open at termination.
+
+        Uses the announced :class:`OutputItem` (recorded in ``open_item``) to
+        backfill the real ``output_index`` / ``type`` / ``call_id`` / ``name``
+        into the wire frame — a bare ``{"id", "status"}`` object with a hardcoded
+        ``output_index=0`` is not a well-formed Responses item.
+        """
         self._done_items.add(item_id)
         self._open_items.discard(item_id)
+        announced = self._announced_items.pop(item_id, None)
         self.stats.items_done += 1
+        if announced is not None:
+            wire = self._item_wire(announced, status="incomplete")
+            output_index = announced.output_index
+        else:
+            # Fallback for items opened before tracking existed — keep the
+            # historical minimal shape rather than fabricating fields.
+            wire = {"id": item_id, "status": "incomplete"}
+            output_index = 0
         return [
             self._frame(
                 "response.output_item.done",
                 {
                     "type": "response.output_item.done",
-                    "output_index": 0,
-                    "item": {"id": item_id, "status": "incomplete"},
+                    "output_index": output_index,
+                    "item": wire,
                 },
             )
         ]

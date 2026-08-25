@@ -341,8 +341,10 @@ async def test_gzip_still_compresses_json_control():
 
 def test_heartbeat_gap_cap():
     cfg = PipelineConfig()
-    # Default heartbeat interval (15s) must stay under the 16s cap.
-    assert cfg.heartbeat_seconds <= cfg.max_heartbeat_gap_seconds
+    # 2026-08-25 整改注明：原断言 ``cfg.heartbeat_seconds <= cfg.max_heartbeat_gap_seconds``
+    # 钉住的是一个从未被任何执行点读取的死配置字段（R-P1-27 判据⑤「心跳到达
+    # 间隔 <=16s」在 pipeline 内并未实现）。死字段 max_heartbeat_gap_seconds 已
+    # 从 PipelineConfig 删除，本用例改为只断言默认心跳发送节奏本身不超 16s。
     assert cfg.heartbeat_seconds <= 16.0
 
 

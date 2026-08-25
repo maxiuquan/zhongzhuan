@@ -20,6 +20,7 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.hypothesis/
 .env
 src/secret.key
 

@@ -22,13 +22,18 @@ process restart:
 
 Why the CAS is written read-then-guarded-write
 ----------------------------------------------
-:meth:`Store.execute` returns ``lastrowid``, not ``rowcount`` -- there is no
-portable affected-row count across the SQLite and TiDB backends.  The claim is
-therefore: read the candidate under a per-store :class:`asyncio.Lock`, then
-issue an ``UPDATE`` whose ``WHERE`` still re-states the full precondition
-(``attempt`` + ``lease_until``).  The lock makes the decision exact for the
-in-process worker pool; the SQL guard keeps a *second process* from stealing a
-lease it did not win.
+:meth:`Store.execute` returns ``lastrowid``, not ``rowcount`` -- historically
+there was no portable affected-row count across the SQLite and TiDB backends.
+The claim was therefore: read the candidate under a per-store
+:class:`asyncio.Lock`, then issue an ``UPDATE`` whose ``WHERE`` still re-states
+the full precondition (``attempt`` + ``lease_until``).  The lock makes the
+decision exact for the in-process worker pool; the SQL guard keeps a *second
+process* from stealing a lease it did not win.
+
+The guard UPDATE itself is now verified through :meth:`Store.execute_rowcount`
+(the portable rowcount channel): if it reports 0 affected rows, another process
+won the race between our SELECT and UPDATE, and we report "nothing claimed"
+(``None``) instead of silently co-owning the job.
 
 DEVIATION (T24 spec): ``renew_lease`` also accepts a job whose ``lease_until``
 is ``0`` (never leased).  A strict "only renew what you already hold" guard
@@ -183,13 +188,18 @@ class BackgroundJobStore:
                 await self._reap_exhausted(ts, task_id=task_id)
                 return None
             claimed_id, attempt = str(row[0]), int(row[1])
-            await self._store.execute(
+            # 认领是条件 UPDATE：WHERE 复述完整前置（attempt 未变 + 租约已过
+            # 期）。进程内由 self._lock() 串行化，这里 rowcount == 0 只可能
+            # 是**另一个进程**在 SELECT 与 UPDATE 之间抢走了租约 —— 此时绝不
+            # 能把 claimed_id 当成自己的活儿返回，否则两个进程会同时执行同一
+            # 个任务。返回 None 让调用方走「没抢到」分支。
+            affected = await self._store.execute_rowcount(
                 "UPDATE background_jobs SET status = 'in_progress', "
                 "lease_until = ?, attempt = ?, updated_at = ? "
                 "WHERE task_id = ? AND attempt = ? AND lease_until < ?",
                 (ts + int(lease_seconds), attempt + 1, ts, claimed_id, attempt, ts),
             )
-            return claimed_id
+            return claimed_id if affected > 0 else None
 
     async def _reap_exhausted(self, now: int, *, task_id: str | None = None) -> None:
         """Mark every attempt-exhausted, lease-expired job ``failed``.
@@ -333,9 +343,14 @@ class BackgroundJobStore:
         *,
         workspace_id: str = "",
     ) -> dict[str, Any] | None:
-        """Return the whole row as a dict, scoped to ``workspace_id``."""
+        """Return the whole row as a dict, scoped to ``workspace_id``.
+
+        列清单显式列出（顺序 = v004 DDL = :data:`JOB_COLUMNS`），不用
+        ``SELECT *``：迁移一旦追加新列，``dict(zip(JOB_COLUMNS, row))`` 会
+        静默错位/截断。
+        """
         row = await self._store.fetchone(
-            "SELECT * FROM background_jobs WHERE task_id = ? AND workspace_id = ?",
+            f"SELECT {', '.join(JOB_COLUMNS)} FROM background_jobs WHERE task_id = ? AND workspace_id = ?",
             (task_id, workspace_id),
         )
         if row is None:
@@ -345,7 +360,7 @@ class BackgroundJobStore:
     async def get_job_any_tenant(self, task_id: str) -> dict[str, Any] | None:
         """Tenant-agnostic read for the worker itself (it owns every tenant)."""
         row = await self._store.fetchone(
-            "SELECT * FROM background_jobs WHERE task_id = ?",
+            f"SELECT {', '.join(JOB_COLUMNS)} FROM background_jobs WHERE task_id = ?",
             (task_id,),
         )
         if row is None:

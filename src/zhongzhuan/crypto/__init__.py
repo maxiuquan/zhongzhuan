@@ -24,8 +24,13 @@ async def init(data_dir: Path, store_get_key=None) -> None:
             if key_hex:
                 _aes_key = bytes.fromhex(key_hex)
                 return
-        except Exception:
-            pass
+        except Exception as exc:
+            # 查询失败（网络抖动/库暂不可用）≠「查无此钥」。静默降级到本地
+            # 生成会覆盖旧密钥，导致已加密的 API key 永久不可解密——fail-closed。
+            raise RuntimeError(
+                f"failed to read secret_key from store: {exc!r}; "
+                "refusing to fall back to a fresh local key (would orphan existing ciphertext)"
+            ) from exc
 
     # Try local key file
     key_file = data_dir / "secret.key"
@@ -33,11 +38,28 @@ async def init(data_dir: Path, store_get_key=None) -> None:
         _aes_key = key_file.read_bytes()
         if len(_aes_key) == 32:
             return
+        # 密钥文件存在但非法（截断/损坏/误编辑）。绝不能重新生成覆盖——那会让
+        # 库里所有 AES: 密文永久丢失。保留原文件并中止启动，由人工恢复。
+        raise RuntimeError(
+            f"secret key file {key_file} exists but is invalid "
+            f"({len(_aes_key)} bytes, expected 32); "
+            "refusing to overwrite it. Restore the file from backup or fix it manually."
+        )
 
     # Generate new key
     _aes_key = aes_generate_key()
     key_file.parent.mkdir(parents=True, exist_ok=True)
-    key_file.write_bytes(_aes_key)
+    import os
+
+    fd = os.open(str(key_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, _aes_key)
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(key_file, 0o600)
+    except OSError:
+        pass
 
 
 def _get_key() -> bytes:

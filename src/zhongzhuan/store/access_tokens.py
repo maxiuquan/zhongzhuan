@@ -552,16 +552,20 @@ async def rotate_token(s: Store, token_id: int, rotated_by: str = "") -> AccessT
     )
     if not row:
         return None
-    fresh = await create_token(
-        s,
-        label=row[0] or "",
-        quota_tokens=row[1] if row[1] is not None else -1,
-        model_whitelist=row[2] or "",
-        expires_at=row[3] or 0,
-        created_by=rotated_by,
-        rotation_of=token_id,
-    )
-    await revoke_token(s, token_id, revoked_by=rotated_by)
+    # 先建新、后吊销旧，两段写包进同一个事务：吊销失败时若没有事务，
+    # 会留下「新旧两个 token 同时有效」的窗口（旧凭据本应作废却仍能认证）。
+    # 回滚保证轮换要么完成、要么原 token 原样可用。
+    async with s.transaction():
+        fresh = await create_token(
+            s,
+            label=row[0] or "",
+            quota_tokens=row[1] if row[1] is not None else -1,
+            model_whitelist=row[2] or "",
+            expires_at=row[3] or 0,
+            created_by=rotated_by,
+            rotation_of=token_id,
+        )
+        await revoke_token(s, token_id, revoked_by=rotated_by)
     return fresh
 
 

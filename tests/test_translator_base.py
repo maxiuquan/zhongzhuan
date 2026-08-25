@@ -167,7 +167,9 @@ class TestCompositeFinish:
         )
         composite = CompositeStreamTranslator(StreamA2O(model="claude-3-5"), ResponsesStreamTranslator(model="gpt-4o"))
         await composite.feed(anthropic_partial)
-        assert composite.done is False
+        # done 统一为方法调用语义（translator_base 协议修复）：旧的属性式
+        # 访问在方法实现上会拿到恒真 bound method（恒真埋雷），断言随之更新。
+        assert composite.done() is False
         closing = await finish_translator(composite)
         text = b"".join(closing).decode()
         assert "response.completed" in _event_names(text)
@@ -203,7 +205,8 @@ class TestAcceptanceTruncatedStream:
         tr = ResponsesStreamTranslator(model="gpt-4o")
         # 喂入内容但无 finish_reason。
         await tr.feed(_sse({"id": "c1", "choices": [{"index": 0, "delta": {"content": "partial"}}]}))
-        assert tr.done is False
+        # 方法调用语义（同上，修复恒真埋雷后的断言形式）。
+        assert tr.done() is False
         closing = await finish_translator(tr)
         text = b"".join(closing).decode()
         assert "response.completed" in _event_names(text)

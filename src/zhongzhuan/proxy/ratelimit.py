@@ -205,59 +205,10 @@ class KeyHealth:
                 return False
         return True
 
-    def record_failure(self, failure_class: str, *, retry_after: str | None = None) -> None:
-        """记录一次上游失败，按分类更新健康状态与退避等级。
-
-        * ``permanent``：标记 invalid，不参与 failover，等待管理端确认恢复。
-        * ``banned``：长冷却（600s 档），自动恢复，也可手动提前恢复。
-        * ``balance``：余额耗尽（402 欠费），长冷却（1h 档）自动恢复——
-          免费 key 签到/充值可恢复，不应永久封禁。
-        * ``rate_limit`` / ``transient``：逐级退避（level 0→3），成功降级。
-        * ``no_retry``：不标记（当前请求直接 break，不换 key）。
-        * ``unknown``：按 transient 降级处理（当前请求继续 failover），
-          分类结论交给 agnes 异步补判（不阻塞）。
-        """
-        now = time.time()
-        self.total_failures += 1
-        self.consecutive_failures += 1
-        self.last_failure_at = now
-        self.failure_class = failure_class
-
-        if failure_class == CLASS_PERMANENT:
-            self.status = STATE_INVALID
-            self.cooldown_until = 0.0
-            return
-        if failure_class == CLASS_BALANCE:
-            # 余额耗尽：固定 1h 长冷却，到期自动恢复。不抬 backoff_level——
-            # 与上游故障（逐级退避）不同，余额是配额问题，充值/签到后应
-            # 立即回到正常排名，不残留健康分惩罚。
-            self.status = STATE_ERROR
-            self.cooldown_until = now + BALANCE_COOLDOWN_SECONDS
-            return
-        if failure_class == CLASS_BANNED:
-            # 封禁：直接长冷却档（不再逐级），到期自动恢复。
-            self.status = STATE_ERROR
-            self.backoff_level = BACKOFF_MAX_LEVEL
-            self.cooldown_until = now + backoff_seconds(BACKOFF_MAX_LEVEL)
-            return
-        if failure_class == CLASS_RATE_LIMIT:
-            # 429：尊重上游 Retry-After（若合法），否则逐级退避。
-            self.status = STATE_RATE_LIMITED
-            if retry_after:
-                try:
-                    ra = max(1, int(float(retry_after)))
-                    self.backoff_level = min(BACKOFF_MAX_LEVEL, self.backoff_level + 1)
-                    self.cooldown_until = now + min(ra, backoff_seconds(BACKOFF_MAX_LEVEL))
-                    return
-                except (TypeError, ValueError):
-                    pass
-            self.backoff_level = min(BACKOFF_MAX_LEVEL, self.backoff_level + 1)
-            self.cooldown_until = now + backoff_seconds(self.backoff_level)
-            return
-        # transient / unknown：逐级退避
-        self.status = STATE_ERROR
-        self.backoff_level = min(BACKOFF_MAX_LEVEL, self.backoff_level + 1)
-        self.cooldown_until = now + backoff_seconds(self.backoff_level)
+    # 注：record_failure() 双实现已删除（2026-08 审查 P3 整改）。健康状态的
+    # 唯一权威写入路径是 proxy/retry.py 的 mark_* 函数族——它们与本类并行
+    # 维护了同一套状态机两年，误用会造成双份失败计数。需要新失败分类时在
+    # retry.py 增 mark_xxx，不要在本类上重新长出写入方法。
 
     def record_success(self) -> None:
         """记录一次成功：连续失败清零；退避等级降一级（半开探测，成功即降）。"""

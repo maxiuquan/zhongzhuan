@@ -14,7 +14,17 @@ from ..store.response_store import ResponseRecord
 
 
 def to_response_object(record: ResponseRecord, *, stored: bool = True) -> dict[str, Any]:
-    """Map a :class:`ResponseRecord` to the official ``response`` object."""
+    """Map a :class:`ResponseRecord` to the official ``response`` object.
+
+    v3.2 整改：``instructions`` / ``metadata`` / ``tools`` 此前硬编码为
+    ``null`` / ``{}`` / ``[]``——而 endpoints.create 落库时把整个请求体（含
+    这三个字段）存进了 ``responses.request``。回包从存储行如实回显，客户端
+    （Codex 会校验 metadata 往返）才不会看到「写进去的和读出来的不一样」。
+    """
+    request = record.request if isinstance(record.request, dict) else {}
+    instructions = request.get("instructions")
+    metadata = request.get("metadata")
+    tools = request.get("tools")
     obj: dict[str, Any] = {
         "id": record.response_id,
         "object": "response",
@@ -25,11 +35,13 @@ def to_response_object(record: ResponseRecord, *, stored: bool = True) -> dict[s
         "usage": record.usage,
         "error": record.error or None,
         "incomplete_details": record.incomplete_details or None,
-        "instructions": None,
-        "metadata": {},
+        # R-P1-31: instructions 是 per-request 的，这里只是**回显本行落库值**，
+        # 与链式继承无关（继承语义在 ChainResolver / 上游注入层）。
+        "instructions": instructions if instructions is not None else None,
+        "metadata": metadata if isinstance(metadata, dict) else {},
         "previous_response_id": record.previous_response_id or None,
         "background": bool(record.background),
-        "tools": [],
+        "tools": tools if isinstance(tools, list) else [],
         "tool_choice": "auto",
         "parallel_tool_calls": True,
         "temperature": None,

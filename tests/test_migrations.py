@@ -74,24 +74,19 @@ def test_mysql_lob_columns_do_not_declare_defaults():
 
 
 def test_migrations_apply_in_order(tmp_db):
-    """v001, v003, v004 apply in order; schema_migrations records all."""
+    """Migrations apply in registry order; schema_migrations records all.
+
+    期望列表从 MIGRATIONS 动态推导而不是硬编码：此前硬编码 [1..10]，注册表
+    扩到 v011-v015 后本用例在修复前就已经失败。动态推导锁住的仍是本用例的
+    本意 —— 「注册表里的每个版本都被记录、且严格按升序应用」。
+    """
     db, ex = _executor(tmp_db)
     try:
         _run(run_migrations_or_exit(ex, MIGRATIONS, sqlite_db_path=tmp_db))
         rows = _run(db.execute_fetchall("SELECT version FROM schema_migrations ORDER BY version"))
         names = _run(db.execute_fetchall("SELECT name FROM schema_migrations ORDER BY version"))
-        assert [v for (v,) in rows] == [1, 3, 4, 5, 6, 7, 8, 9, 10]
-        assert [n for (n,) in names] == [
-            "baseline",
-            "token_hash",
-            "response_store",
-            "model_capabilities",
-            "tool_executions",
-            "schema_realign",
-            "route_bindings",
-            "client_fingerprint",
-            "token_cipher",
-        ]
+        assert [v for (v,) in rows] == [m.version for m in MIGRATIONS]
+        assert [n for (n,) in names] == [m.name for m in MIGRATIONS]
     finally:
         _run(db.close())
 

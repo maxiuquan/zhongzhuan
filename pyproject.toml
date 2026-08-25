@@ -53,9 +53,9 @@ metrics = [
 test = [
     "pytest>=7.4",
     "pytest-asyncio>=0.23",
+    "pytest-aiohttp>=1.0",                          # test_codex_models.py 的 aiohttp_client fixture
     "pytest-cov>=4.1",
     "hypothesis>=6.98",                             # R-P1-68 SSE 分片属性测试
-    "respx>=0.21",                                  # R-P2-19 httpx 层 mock 上游
     "openai>=1.40",                                 # R-P1-49 T37 Python SDK contract tests
     "psutil>=5.9",                                  # T31 nightly soak RSS sampling
 ]
@@ -75,7 +75,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = ["-m", "not soak"]
+addopts = ["-m", "not live and not soak"]
 markers = [
     "asyncio: marks tests as async",
     "golden: 旧协议字节级 golden 基线对比",

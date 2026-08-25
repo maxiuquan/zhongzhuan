@@ -26,6 +26,22 @@ class Store(ABC):
         """Execute a write statement. Returns lastrowid."""
         ...
 
+    async def execute_rowcount(self, sql: str, params: tuple | None = None) -> int:
+        """Execute a write statement and return the **affected row count**.
+
+        :meth:`execute` returns ``cursor.lastrowid``（自增主键），**不是**影响
+        行数 —— 把它当 rowcount 用会把「删了 3 行」误判成「删了 47 行」。
+        需要「这条写语句到底动了几行」的调用方（DELETE 的存在性判断、CAS 式
+        UPDATE 是否抢到、retention 计数）必须走本方法。
+
+        具体后端用 ``cursor.rowcount`` 覆盖本方法；这里提供的默认实现只是为
+        了不破坏轻量测试替身（它们直接继承 ``Store`` 且只实现了三个抽象方法，
+        其 ``execute`` 恰好已返回受影响行数）而做的尽力委托，负值一律钳到 0。
+        生产后端不得依赖该默认路径。
+        """
+        affected = await self.execute(sql, params)
+        return affected if affected > 0 else 0
+
     @abstractmethod
     async def fetchone(self, sql: str, params: tuple | None = None) -> tuple | None: ...
 

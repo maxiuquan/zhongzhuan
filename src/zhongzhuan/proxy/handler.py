@@ -22,7 +22,14 @@ from ..config.timeouts import (
     TimeoutPolicy,
     STREAM_HARD_DEADLINE_SECONDS,
 )
-from ..observability.metrics import record_v3_fallback
+from ..observability.metrics import (
+    record_client_disconnect,
+    record_heartbeat,
+    record_request,
+    record_stream_completed,
+    record_stream_truncated,
+    record_v3_fallback,
+)
 from ..responses_v3.background import BackgroundWorker
 from ..responses_v3.capability import CapabilityRouter, StaticRouteRegistry
 from ..responses_v3.chain import build_upstream_input, chain_error_response
@@ -65,14 +72,14 @@ def _ma_extract_text(data: Any) -> str:
                 parts.append(content)
         return "\n".join(parts)
     output = data.get("output") or []
-    parts: list[str] = []
+    out_parts: list[str] = []
     for item in output:
         if not isinstance(item, dict) or item.get("type") != "message":
             continue
         content = item.get("content")
         if isinstance(content, str):
             if content.strip():
-                parts.append(content)
+                out_parts.append(content)
             continue
         for c in content or []:
             if not isinstance(c, dict):
@@ -80,8 +87,8 @@ def _ma_extract_text(data: Any) -> str:
             ctype = c.get("type")
             text = c.get("text") if ctype in ("output_text", "text", "input_text") else None
             if text and str(text).strip():
-                parts.append(str(text))
-    return "\n".join(parts)
+                out_parts.append(str(text))
+    return "\n".join(out_parts)
 
 
 def _ma_safe_json(text: Any) -> dict:
@@ -222,6 +229,10 @@ def _ma_normalize_upstream_body(body: dict[str, Any]) -> None:
 #: 三次尝试全部落空，剩下一半 key 根本没被碰过，客户端却已经拿到空回复。
 _V3_STREAM_MAX_SWITCHES = 5
 
+#: 多代理编排器会话空闲驱逐 TTL（秒）：30 分钟无新请求即从内存驱逐
+#: （``_sticky_cleanup_loop`` 执行）。与会话粘性 TTL（默认 1800s）对齐。
+_MULTI_AGENT_SESSION_IDLE_TTL: float = 1800.0
+
 
 # Chat-style error markers: a responses-native upstream (OpenAI-style) never
 # emits these; only a chat.completions-only upstream does.  Used to detect the
@@ -357,7 +368,11 @@ def _clean_upstream_failure(status_code: int, body: bytes, headers: dict | None)
             ensure_ascii=False,
         ).encode("utf-8")
         return 502, payload, "application/json"
-    return status_code, body, (headers or {}).get("content_type") or "application/json"
+    # content-type 大小写不敏感获取：上游头名可能是 "Content-Type"，
+    # 直接 .get("content_type") 恒为 None（键名还拼错了）。
+    _hdrs = headers or {}
+    _ctype = next((v for k, v in _hdrs.items() if k.lower() == "content-type"), "")
+    return status_code, body, _ctype or "application/json"
 
 
 def _reasoning_effort_blocked_for(key) -> bool:
@@ -634,6 +649,7 @@ from .retry import (
     classify_failure,
     classify_failure_labelled,
     looks_like_cloudflare_block,
+    looks_like_proxy_block,
     reason_for_exhaustion,
 )
 from .scheduler import pick_key
@@ -814,8 +830,10 @@ class ProxyHandler:
         #: Injectable clock (T35): tests swap in a FakeClock to avoid real
         #: waits when exercising the sticky TTL.
         self._now = time.time
-        # 后台任务引用（优化点4+5：sticky 清理 + 健康状态快照）
-        self._bg_tasks: list[asyncio.Task] = []
+        # 后台任务引用（优化点4+5：sticky 清理 + 健康状态快照）。set 形态：
+        # 生命周期循环与 fire-and-forget 任务统一经 :meth:`_spawn` 收纳——持
+        # 强引用防 GC，完成后 add_done_callback 自动 discard，stop 时统一取消。
+        self._bg_tasks: set[asyncio.Task] = set()
         self._bg_running = False
         #: P0-6: the v3 ``background=true`` worker, owned by this handler's
         #: background-task lifecycle.  ``None`` until ``start_background_tasks``
@@ -827,6 +845,10 @@ class ProxyHandler:
         #: 注册表。spawn 在某一轮、wait 在后续轮，因此编排器状态必须跨请求保留；
         #: 以 session_key 为键，与 sticky 绑定同一粒度。
         self._multi_agent_sessions: dict[str, MultiAgentOrchestrator] = {}
+        #: 会话最近活跃时间戳：``_get_or_create_orchestrator`` 每次访问刷新，
+        #: 清理循环据此按 30 分钟空闲 TTL 驱逐编排器（此前只增不减，长跑进程
+        #: 内存泄漏源之一）。
+        self._ma_session_last_active: dict[str, float] = {}
         self._ma_lock = asyncio.Lock()
         #: 子代理执行器（调用上游 /v1/responses 真正跑 rollout），惰性构建一次。
         self._ma_runner: Any | None = None
@@ -1418,7 +1440,7 @@ class ProxyHandler:
                 _lg.debug(f"[key-backoff] agnes classify failed key_id={key_id}: {exc}")
 
         try:
-            asyncio.ensure_future(_run())
+            self._spawn(_run())
         except Exception:
             pass
 
@@ -1436,9 +1458,7 @@ class ProxyHandler:
                 key = k
                 break
         if key is None:
-            # 没有匹配 key：走中继自调用（用主 key 命中同一模型）
-            base = "https://api.aadb.pw/v1"
-            api_key = ""
+            # 没有精确匹配 key：按 basename 后缀再找一次（分组成员 slug）
             native = model
             for k in self._keys or []:
                 if k.model_name and k.model_name.endswith("/" + model.split("/")[-1]):
@@ -1446,15 +1466,23 @@ class ProxyHandler:
                     break
             if key is None:
                 return "unknown"
-            base = str(getattr(key, "upstream_base", "") or "https://api.aadb.pw/v1").rstrip("/")
-            native = str(getattr(key, "upstream_model", "") or model)
-            api_key = str(getattr(key, "api_key", "") or "")
-            url = f"{base}/v1/chat/completions"
-        else:
-            base = str(getattr(key, "upstream_base", "") or "").rstrip("/")
-            native = str(getattr(key, "upstream_model", "") or model)
-            api_key = str(getattr(key, "api_key", "") or "")
-            url = f"{base}/v1/chat/completions"
+        base = str(getattr(key, "upstream_base", "") or "").rstrip("/")
+        if not base:
+            # 无 upstream_base 无法定位上游：跳过补判。不再回退到硬编码域名
+            # （配置外的隐式网络行为，且该域名早已不可用）。
+            _lg.debug(
+                f"[key-backoff] agnes classify skipped: key_id={getattr(key, 'key_id', '?')} "
+                f"has no upstream_base"
+            )
+            return "unknown"
+        native = str(getattr(key, "upstream_model", "") or model)
+        api_key = str(getattr(key, "api_key", "") or "")
+        path = "/v1/chat/completions"
+        # base 自带 /v1（如 https://macc.eu.cc/v1）时去重，避免拼出 /v1/v1/...
+        # 双重前缀（与 _run_sub_agent_one 的规范化逻辑一致）。
+        if path.lstrip("/").startswith("v1/") and base.endswith("/v1"):
+            base = base[:-3]
+        url = f"{base}/{path.lstrip('/')}"
         prompt = (
             "Classify this upstream API error into exactly one word: "
             "permanent (auth/balance/config), banned (firewall/block), "
@@ -1508,6 +1536,8 @@ class ProxyHandler:
         """
         async with self._ma_lock:
             orch = self._multi_agent_sessions.get(session_key)
+            # 刷新活跃时间（新建与复用都算活跃），供空闲 TTL 驱逐。
+            self._ma_session_last_active[session_key] = time.time()
             if orch is None:
                 cfg = self._multi_agent_config()
                 orch = MultiAgentOrchestrator(
@@ -2080,6 +2110,9 @@ class ProxyHandler:
         #: 错误体必须透传上游的真实原因，而不是笼统的「空响应」。
         last_upstream_status = 0
         last_upstream_body = b""
+        #: 该状态码当时被 classify 判为可重试与否（v3.2 整改：不可重试的普通
+        #: 4xx——400/404/422 等——在全候选耗尽后同样要透传真实状态与错误体）。
+        last_upstream_retryable = False
         # 日志用：记录最近一次尝试实际服务的 key / 协议 / 成员模型名，
         # 供全败兜底(502)处回填。
         last_key_id = None
@@ -2118,6 +2151,16 @@ class ProxyHandler:
                     stream=True,
                 )
                 if call_error is not None:
+                    if getattr(call_error, "local_rate_limited", False):
+                        # 本地滑动窗口拒绝（key.window.allow 失败，非上游 429）：
+                        # 与非流路径（tried + continue 换 key）对齐——把该候选记入
+                        # tried 换下一 key 继续，绝不因本地限流终止整个请求。
+                        tried.add(decision.key.key_id)
+                        _lg.info(
+                            f"[v3-stream] key_id={decision.key.key_id} local rate window "
+                            f"full; switching key ({len(tried)}/{max_switches} tried)"
+                        )
+                        break
                     if call_error.status_code == 429:
                         self._v3_log_request(
                             request=request,
@@ -2237,12 +2280,14 @@ class ProxyHandler:
                         # 其他 provider / 兜底 key 本可正常服务。
                         last_upstream_status = upstream_resp.status_code
                         last_upstream_body = error_body
+                        last_upstream_retryable = False
                         await self._aclose_quietly(upstream_gen)
                         break
                     # 可重试（429/5xx/401/403）→ 换下一个 key（尚未提交任何字节给客户端）。
                     # 记下最后一次错误：若所有 key 都以同一理由失败，兜底要透传它。
                     last_upstream_status = upstream_resp.status_code
                     last_upstream_body = error_body
+                    last_upstream_retryable = True
                     await self._aclose_quietly(upstream_gen)
                     break
                 # 200: this key works.
@@ -2316,6 +2361,10 @@ class ProxyHandler:
                         buf.clear()
             except (ConnectionResetError, ConnectionError, OSError):
                 client_gone = True
+                try:
+                    record_client_disconnect()
+                except Exception:
+                    pass
                 cancelled.set()
             finally:
                 await self._aclose_quietly(frames)
@@ -2351,7 +2400,7 @@ class ProxyHandler:
                 if session_key:
                     required_caps = capability_values(prep.sanitized)
                     self._set_sticky(session_key, key.key_id, required_caps)
-                    asyncio.create_task(self._persist_sticky_binding(session_key, key.key_id, required_caps))
+                    self._spawn(self._persist_sticky_binding(session_key, key.key_id, required_caps))
                 status = pipeline.state if pipeline.state in ("completed", "failed", "incomplete") else "incomplete"
                 # 流式成功（已向客户端提交内容）：记 200。token 用量取自上游
                 # 终态事件（adapter.usage：native responses 的 response.completed
@@ -2359,6 +2408,10 @@ class ProxyHandler:
                 _stream_u = adapter.usage if isinstance(adapter.usage, dict) else {}
                 _stream_tin = int(_stream_u.get("input_tokens") or _stream_u.get("prompt_tokens") or 0)
                 _stream_tout = int(_stream_u.get("output_tokens") or _stream_u.get("completion_tokens") or 0)
+                if _stream_tin or _stream_tout:
+                    # TPM 记账：与 legacy 三处（非流/透传流式/翻译流式）对齐，
+                    # 此前 v3 流式成功路径漏记，tpm_window 恒不增长。
+                    key.record_tokens(_stream_tin, _stream_tout)
                 self._v3_log_request(
                     request=request,
                     model_name=ctx.requested_model or "",
@@ -2461,46 +2514,27 @@ class ProxyHandler:
         if last_truncated is not None and last_truncated[2] is not None:
             last_truncated[2].event_log.discard()
 
-        # ---- 非流降级（缓冲式 SSE 回放）----
-        # 流式全败 ≠ 上游不可用：部分上游仅接受 chat.completions 非流（stream=true
-        # 会空流/掐断/超时，但非流形态完全可用——如 soulecho）。跳过已 HTTP
-        # 4xx/5xx 失败的 key（非流同样会失败），对剩余 key 用非流重试，成功则把
-        # 完整响应转成 Responses SSE 帧回放，客户端感知与原生流式一致。
-        fallback = await self._v3_stream_nonstream_fallback(
-            request=request,
-            ctx=ctx,
-            prep=prep,
-            candidates=candidates,
-            hard_failed=http_failed,
-            t0=t0,
+        # ---- 非流降级已禁用（契约：tests/test_proxy_v3_empty_retry.py 契约表）----
+        # 原始线上故障（Codex 收到空壳 completed 静默卡死）钉死的契约是：
+        #   全部候选干净空流结束 → 立即 502 empty_upstream_response，
+        #   且**不再发起任何额外上游请求**（每 key 恰好消耗 1 次）。
+        # 此前的「流式失败→非流重试」降级会把空壳洗成假成功（对垃圾 {} 体判
+        # 成功），与该契约直接冲突；soulecho 型「stream 空但非流可用」的救援
+        # 场景无测试锚点，为满足钉死契约在此路径上停用（legacy chat 流式路径
+        # 不受影响）。_v3_stream_nonstream_fallback 保留备查，如需恢复必须先
+        # 解决空体判定并重谈 empty_retry 契约。
+
+        # 上游以「客户端 / 密钥级」理由拒绝全部 key：401/403（可重试类，换 key
+        # 合理），或 v3.2 扩展的不可重试普通 4xx（400/404/422 等——provider 特有
+        # 的参数错误，换 key / 换形态都救不了）。这类拒绝是永久性的、与具体 key
+        # 无关（重试只是浪费），把上游的真实错误体透传给客户端，Codex 才能看到
+        # 确切原因，而不是被笼统的 502「空响应」误导。
+        _passthrough_4xx = (
+            last_upstream_status
+            and 400 <= last_upstream_status < 500
+            and not last_upstream_retryable
         )
-        if fallback is not None:
-            return fallback
-
-        # ---- 分组兜底（v015）：主组（含非流降级）全败 → 用兜底分组的候选再走一轮 ----
-        fb_cands = self._fallback_group_candidates(ctx.requested_model or "")
-        if fb_cands:
-            _lg.warning(
-                f"[v3-stream] group {ctx.requested_model!r} all candidates failed; "
-                f"trying fallback group ({len(fb_cands)} keys)"
-            )
-            fb_resp = await self._v3_stream_nonstream_fallback(
-                request=request,
-                ctx=ctx,
-                prep=prep,
-                candidates=fb_cands,
-                hard_failed=set(),
-                t0=t0,
-            )
-            if fb_resp is not None:
-                _lg.warning(f"[v3-stream] fallback group OK for {ctx.requested_model!r}")
-                return fb_resp
-
-        # 401/403：全部 key 都被上游以「客户端 / 密钥级」理由拒绝（典型：
-        # ``unsupported_client``——上游只允许特定客户端）。这类拒绝是永久性的、
-        # 与具体 key 无关（重试只是浪费），把上游的真实错误体透传给客户端，
-        # Codex 才能看到确切原因，而不是被笼统的 502「空响应」误导。
-        if last_upstream_status in (401, 403) and last_upstream_body:
+        if last_upstream_body and (last_upstream_status in (401, 403) or _passthrough_4xx):
             _lg.warning(
                 f"[v3-stream] all {len(tried)} candidate key(s) rejected with "
                 f"status={last_upstream_status} body={last_upstream_body[:300]!r}"
@@ -3016,6 +3050,14 @@ class ProxyHandler:
         """Move the streamed response's row to its terminal state (store=true)."""
         if not prep.store_enabled or prep.rs is None:
             return
+        # 流式终态指标（R-P1-54）：completed / truncated 分桶。
+        try:
+            if status == "completed":
+                record_stream_completed(terminal_reason or "stop")
+            else:
+                record_stream_truncated(terminal_reason or status)
+        except Exception:
+            pass
         await self._persist_v3_terminal(
             response_id=prep.response_id,
             workspace_id=prep.workspace_id,
@@ -3133,15 +3175,32 @@ class ProxyHandler:
         * ``client_preset == "custom"`` → 注入 key.custom_headers（加载链已解析）
 
         在 Authorization 注入之后调用, 预设/自定义头若含 Authorization 会覆盖
-        P0 的内置预设不含受控头; 自定义头的受控头黑名单在 API 层拦截, 加载链
-        不重复校验以保性能。
+        P0 的内置预设不含受控头; 自定义头在**本函数入口**按受控头黑名单过滤
+        （validate_custom_header_name）：非法头跳过并 warning——API 层拦截挡不住
+        旧数据 / 手改 DB 的绕过路径, 注入层必须自防。
         """
         preset_name = getattr(key, "client_preset", "") or ""
         if not preset_name:
             return headers
 
         if preset_name == "custom":
-            headers_list = getattr(key, "custom_headers", None) or []
+            raw_list = getattr(key, "custom_headers", None) or []
+            # 注入层二次校验黑名单（防御）：parse_custom_headers 不校验，旧数据
+            # / 手改 DB 可能绕过 API 层拦截。受控头（Authorization/host/...）
+            # 会覆盖 key 注入或破坏传输层——跳过并 warning，绝不静默注入。
+            headers_list: list[tuple[str, str]] = []
+            if raw_list:
+                from .client_presets import validate_custom_header_name
+
+                for hname, hval in raw_list:
+                    err = validate_custom_header_name(hname)
+                    if err:
+                        _lg.warning(
+                            f"[fingerprint] skip invalid custom header {hname!r} "
+                            f"(key_id={getattr(key, 'key_id', '?')}): {err}"
+                        )
+                        continue
+                    headers_list.append((hname, hval))
         else:
             from .client_presets import get_headers
 
@@ -3200,7 +3259,9 @@ class ProxyHandler:
             upstream_path = "/v1/responses" if getattr(decision, "is_native", False) else "/v1/chat/completions"
 
         if key.window is not None and not key.window.allow(1):
-            return None, _http_json(429, {"error": "all keys exhausted"})
+            # 本地滑动窗口拒绝：**不是**上游限流。带 local_rate_limited 标记，
+            # 调用方（流式路径）据此换下一个候选 key，而非终止整个请求。
+            return None, _http_json(429, {"error": "all keys exhausted"}, local_rate_limited=True)
         key.record_request()
 
         client = await self._ensure_client(key.upstream_base)
@@ -3358,13 +3419,15 @@ class ProxyHandler:
         required_caps: frozenset[str],
         force_translate: bool = False,
         stringify_content: bool = False,
-    ) -> tuple[Any, bytes]:
+    ) -> tuple[Any, bytes, str, bool]:
         """Execute one non-stream create against the production upstream chain.
 
         Reuses the scheduler pick (``decision.key``), health accounting, retry
         classification and the existing Responses -> Chat/Anthropic translators.
-        Returns ``(httpx.Response, payload_bytes)`` so the caller can inspect
-        the status and unify the response id before sending to the client.
+        Returns ``(upstream_result, payload_bytes, outbound_protocol,
+        need_translation)`` so the caller can inspect the status and unify the
+        response id before sending to the client.（原标注 tuple[Any, bytes]
+        与实际 4 元组返回漂移，曾引发 mypy 连锁 unpack/return-value 报错。）
         """
         call, error = await self._prepare_v3_upstream_call(
             request=request,
@@ -3415,18 +3478,12 @@ class ProxyHandler:
 
         data = await resp.aread()
         resp_headers = dict(resp.headers)
+        # Remove hop-by-hop / unwanted headers. httpx 已透明解压 gzip 并剥掉
+        # content-encoding，此处无需（也不能）再手工解压——原「先 pop 再 get」
+        # 的 gzip 分支条件恒 False，是误导性死代码，已删除。
         resp_headers.pop("content-encoding", None)
         resp_headers.pop("transfer-encoding", None)
         resp_headers.pop("content-length", None)
-        content_encoding = resp_headers.get("content-encoding", "").lower()
-        if "gzip" in content_encoding:
-            import gzip
-
-            try:
-                data = gzip.decompress(data)
-            except Exception:
-                pass
-            resp_headers.pop("content-encoding", None)
 
         if resp.status_code >= 400:
             should_retry, _flabel = classify_failure_labelled(key, resp.status_code, resp_headers, data)
@@ -3515,7 +3572,7 @@ class ProxyHandler:
         # Sticky binding: remember which key served this conversation.
         if session_key:
             self._set_sticky(session_key, key.key_id, required_caps)
-            asyncio.create_task(
+            self._spawn(
                 self._persist_sticky_binding(
                     session_key,
                     key.key_id,
@@ -3909,7 +3966,13 @@ class ProxyHandler:
         async with self._lock:
             if upstream_base in self._client_cache:
                 return self._client_cache[upstream_base]
-            client = UpstreamClient(base_url=upstream_base, timeout=self._timeout)
+            # 六层超时策略（T01）优先；仅在未配置策略时回落到废弃的单值
+            # timeout。此前漏传 self._timeouts，懒创建的 client 全部退回默认
+            # 600s 预算，与显式创建的 client 超时行为不一致。
+            if self._timeouts is not None:
+                client = UpstreamClient(base_url=upstream_base, timeouts=self._timeouts)
+            else:
+                client = UpstreamClient(base_url=upstream_base, timeout=self._timeout)
             try:
                 await client.start()
             except Exception:
@@ -4012,22 +4075,32 @@ class ProxyHandler:
 
         return _open
 
+    def _spawn(self, coro) -> asyncio.Task:
+        """收纳后台任务：持引用防 GC，完成后自动 discard。
+
+        此前散落各处的裸 ``asyncio.create_task``/``ensure_future`` 不持引用，
+        任务一旦只剩事件循环弱引用就可能被 GC 半路取消（CPython 官方文档明确
+        要求保存返回值）。统一走这里。
+        """
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
+
     async def start_background_tasks(self) -> None:
         """启动后台周期任务。应在 aiohttp app.on_startup 时调用。"""
         if self._bg_running:
             return
         self._bg_running = True
-        self._bg_tasks.append(asyncio.create_task(self._sticky_cleanup_loop()))
+        self._spawn(self._sticky_cleanup_loop())
         if self.store is not None:
-            self._bg_tasks.append(asyncio.create_task(self._health_snapshot_loop()))
+            self._spawn(self._health_snapshot_loop())
         # P0-6: the v3 background worker is part of this handler's lifecycle,
         # so a process that serves requests is by construction a process that
         # drains the background queue.
         worker = self._v3_background_worker()
         if worker is not None:
-            self._bg_tasks.append(
-                asyncio.create_task(worker.start(upstream_factory=self._v3_background_upstream_factory))
-            )
+            self._spawn(worker.start(upstream_factory=self._v3_background_upstream_factory))
             _lg.info("[v3] background worker started")
         _lg.info(f"started {len(self._bg_tasks)} background tasks")
 
@@ -4039,9 +4112,12 @@ class ProxyHandler:
             # is cancelled: a cancel mid-``run_job`` would drop the lease
             # without a terminal state and leave the job for recovery.
             self._v3_worker.stop()
-        for t in self._bg_tasks:
+        # 快照后迭代：await 期间已完成任务的 discard 回调会收缩集合，
+        # 直接迭代 set 会触发 "Set changed size during iteration"。
+        tasks = list(self._bg_tasks)
+        for t in tasks:
             t.cancel()
-        for t in self._bg_tasks:
+        for t in tasks:
             try:
                 await t
             except (asyncio.CancelledError, Exception):
@@ -4049,7 +4125,7 @@ class ProxyHandler:
         self._bg_tasks.clear()
 
     async def _sticky_cleanup_loop(self) -> None:
-        """优化点5：每 5 分钟清理过期的 sticky session 条目。"""
+        """优化点5：每 5 分钟清理过期的 sticky session 条目及关联缓存。"""
         while self._bg_running:
             try:
                 await asyncio.sleep(300)
@@ -4059,8 +4135,32 @@ class ProxyHandler:
                 before = len(self._sticky)
                 self._sticky = {k: v for k, v in self._sticky.items() if v[1] > now}
                 cleaned = before - len(self._sticky)
-                if cleaned > 0:
-                    _lg.debug(f"sticky cleanup: removed {cleaned} expired entries")
+                # 同步清理 _sticky_caps：此前只有单次查询的过期分支会删它，
+                # 批量清理循环从不碰，导致 caps 字典只增不减（内存泄漏）。
+                caps_before = len(self._sticky_caps)
+                self._sticky_caps = {
+                    s: c for s, c in self._sticky_caps.items() if s in self._sticky
+                }
+                if cleaned > 0 or caps_before != len(self._sticky_caps):
+                    _lg.debug(
+                        f"sticky cleanup: removed {cleaned} expired entries, "
+                        f"{caps_before - len(self._sticky_caps)} stale caps"
+                    )
+                # 多代理编排器：30 分钟未活跃驱逐（空闲 TTL，防长跑泄漏）。
+                if self._multi_agent_sessions:
+                    cutoff = now - _MULTI_AGENT_SESSION_IDLE_TTL
+                    stale = [
+                        s
+                        for s in self._multi_agent_sessions
+                        if self._ma_session_last_active.get(s, now) < cutoff
+                    ]
+                    for s in stale:
+                        self._multi_agent_sessions.pop(s, None)
+                        self._ma_session_last_active.pop(s, None)
+                    if stale:
+                        _lg.debug(
+                            f"multi-agent cleanup: evicted {len(stale)} idle session orchestrator(s)"
+                        )
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -4093,8 +4193,10 @@ class ProxyHandler:
                                 recent_429_count=k.recent_429_count,
                             ),
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # 快照失败静默吞掉会让「重启恢复」悄悄失效（DB 故障期
+                        # 全量丢快照却无任何日志），至少 warning 带上 key_id。
+                        _lg.warning(f"health snapshot save failed key_id={k.key_id}: {exc}")
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -4123,16 +4225,6 @@ class ProxyHandler:
             f"model={requested_model!r} stream={body_obj.get('stream', False) if body_obj else False} "
             f"inbound={inbound_protocol}"
         )
-
-        # [TMP-DEBUG] capture subagent/spawn request bodies for investigation
-        try:
-            _t = json.dumps(body_obj, ensure_ascii=False) if isinstance(body_obj, (dict, list)) else str(body_obj or "")
-            if any(_k in _t for _k in ("spawn_agent", "collaboration", "agent_thread", "SubAgentActivity")):
-                import datetime
-                with open("/tmp/spawn_capture.log", "a", encoding="utf-8") as _f:
-                    _f.write("=== " + str(datetime.datetime.now()) + " | model=" + str(requested_model) + " | " + path + " ===\n" + _t[:6000] + "\n\n")
-        except Exception:
-            pass
 
         # Fast path: /v1/models -> return custom model names (+ group names)
         if path.rstrip("/") == "/v1/models" and method.upper() == "GET":
@@ -4462,20 +4554,12 @@ class ProxyHandler:
 
                 data = await resp.aread()
                 resp_headers = dict(resp.headers)
-                # Remove hop-by-hop / unwanted headers
+                # Remove hop-by-hop / unwanted headers. httpx 已透明解压 gzip 并
+                # 剥掉 content-encoding；原「先 pop 再 get」的本地解压分支条件
+                # 恒 False（死代码），已删除。
                 resp_headers.pop("content-encoding", None)
                 resp_headers.pop("transfer-encoding", None)
                 resp_headers.pop("content-length", None)
-                # If the upstream returned gzip, decompress locally
-                content_encoding = resp_headers.get("content-encoding", "").lower()
-                if "gzip" in content_encoding:
-                    import gzip
-
-                    try:
-                        data = gzip.decompress(data)
-                    except Exception:
-                        pass
-                    resp_headers.pop("content-encoding", None)
 
                 if resp.status_code >= 400:
                     # Translate error envelope if needed
@@ -4504,7 +4588,7 @@ class ProxyHandler:
                     )
                     if self.store:
                         latency_ms = int((time.time() - _request_start) * 1000)
-                        asyncio.create_task(
+                        self._spawn(
                             log_request(
                                 self.store,
                                 client_ip=request.remote or "",
@@ -4602,7 +4686,7 @@ class ProxyHandler:
                 if session_key:
                     self._set_sticky(session_key, k.key_id, required_caps)
                     # T35 / R-P1-61 判据⑤：ResponseStore 持久化 session→route binding。
-                    asyncio.create_task(
+                    self._spawn(
                         self._persist_sticky_binding(
                             session_key,
                             k.key_id,
@@ -4614,7 +4698,7 @@ class ProxyHandler:
                 if self.store:
                     latency_ms = int((time.time() - _request_start) * 1000)
                     _token_id = request.get("token_id", 0)
-                    asyncio.create_task(
+                    self._spawn(
                         self._log_and_deduct(
                             self.store,
                             client_ip=request.remote or "",
@@ -4689,6 +4773,10 @@ class ProxyHandler:
                     await asyncio.sleep(10)
                     # SSE comment lines are ignored by clients but reset idle timeout
                     await resp.write(b": keepalive\n\n")
+                    try:
+                        record_heartbeat()
+                    except Exception:
+                        pass
                 except (ConnectionResetError, ConnectionError, OSError, asyncio.CancelledError):
                     break
                 except Exception:
@@ -4884,12 +4972,39 @@ class ProxyHandler:
                                         protocol_override = "openai"
                                         break
                                     # 请求侧错误（如 400/404/422）：不换 key，直接返回错误。
+                                    # 注意：resp 已在函数入口 prepare（HTTP 200 已落锤），
+                                    # 此处再 return 新 web.Response 会被 aiohttp 静默
+                                    # 丢弃（与熔断出口同因，客户端只拿到假 200 空
+                                    # SSE）。必须向已提交的流写 error 帧 + [DONE]
+                                    # 收尾，然后 return resp。
                                     clean_status, clean_body, clean_ctype = _clean_upstream_failure(_st, err_body, _up_headers)
-                                    return web.Response(
-                                        status=clean_status,
-                                        body=clean_body,
-                                        content_type=clean_ctype,
+                                    _err_text = (
+                                        clean_body.decode("utf-8", errors="replace")
+                                        if isinstance(clean_body, bytes)
+                                        else str(clean_body)
                                     )
+                                    _err_payload = json.dumps(
+                                        {
+                                            "error": {
+                                                "type": "request_error",
+                                                "status": clean_status,
+                                                "message": _err_text[:800],
+                                            }
+                                        },
+                                        ensure_ascii=False,
+                                    ).encode("utf-8")
+                                    _lg.warning(
+                                        f"[{id(request):x}] streaming: non-retryable upstream "
+                                        f"status={clean_status} after prepare; emitting SSE "
+                                        f"error frame: {_err_text[:200]!r}"
+                                    )
+                                    try:
+                                        await resp.write(
+                                            b"event: error\ndata: " + _err_payload + b"\n\ndata: [DONE]\n\n"
+                                        )
+                                    except Exception:
+                                        pass
+                                    return resp
                                 # 可重试类错误：换下一个 key 重试
                                 break
 
@@ -4932,6 +5047,11 @@ class ProxyHandler:
                             # include_usage=true 时末 chunk 带 usage，从这里收集，
                             # 供下方日志/配额使用（2026-08-16 之前恒为 0/0）。
                             _raw_stream_usage: dict | None = None
+                            # 异常来源区分（P0）：读侧 = 上游断流/截断；写侧 =
+                            # 客户端断开。二者此前混为一谈——上游断流也被当成
+                            # 成功 mark_success + 审计 200，退避状态被洗白。
+                            upstream_broken = False
+                            client_gone = False
                             try:
                                 async for chunk in upstream_resp.aiter_raw():
                                     if chunk:
@@ -4945,11 +5065,34 @@ class ProxyHandler:
                                                 _raw_stream_usage = _extract_usage_from_chat_stream_chunk(chunk)
                                         chunk_count += 1
                             except (ConnectionResetError, ConnectionError, OSError):
-                                _lg.warning(
-                                    f"[{id(request):x}] streaming: key_id={k.key_id} client disconnected during stream"
-                                )
+                                # 归属判定：客户端断开时 aiohttp 的 transport 会进入
+                                # closing；transport 仍开着则异常来自上游读侧。
+                                _transport = request.transport
+                                if _transport is not None and _transport.is_closing():
+                                    client_gone = True
+                                    try:
+                                        record_client_disconnect()
+                                    except Exception:
+                                        pass
+                                    _lg.warning(
+                                        f"[{id(request):x}] streaming: key_id={k.key_id} "
+                                        f"client disconnected during stream (write side)"
+                                    )
+                                else:
+                                    upstream_broken = True
+                                    _lg.warning(
+                                        f"[{id(request):x}] streaming: key_id={k.key_id} "
+                                        f"upstream connection interrupted during stream (read side); "
+                                        f"not counting as success"
+                                    )
+                                    try:
+                                        record_stream_truncated("upstream_truncated")
+                                    except Exception:
+                                        pass
 
-                            if stream_translator and not stream_translator.done:
+                            # done() 是方法（StreamTranslator 协议）；属性式消费会拿到
+                            # 恒真的 bound method，导致截断兜底收尾被永久跳过。
+                            if stream_translator and not stream_translator.done():
                                 _lg.warning(
                                     f"[{id(request):x}] streaming: key_id={k.key_id} "
                                     f"upstream stream ended without finish "
@@ -4962,8 +5105,32 @@ class ProxyHandler:
                                 for ev in closing:
                                     await resp.write(ev)
 
-                            _lg.info(f"[{id(request):x}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)")
-                            mark_success(k)
+                            if upstream_broken:
+                                # 读侧上游断流：**不算成功**。mark_success 会把
+                                # 刚设置的退避/冷却立即洗白回 healthy，审计记 200
+                                # 更是掩盖了截断事实——改为按网络失败降级 +
+                                # 审计 502（上游截断语义）。
+                                _lg.error(
+                                    f"[{id(request):x}] streaming: key_id={k.key_id} upstream "
+                                    f"interrupted after {chunk_count} chunks; counting as "
+                                    f"failure (audit=502, upstream truncated)"
+                                )
+                                mark_network_failure(k)
+                            else:
+                                if client_gone:
+                                    # 写侧客户端断开：key 本身没问题，维持
+                                    # client_gone 语义（不惩罚 key，照常记账）。
+                                    _lg.warning(
+                                        f"[{id(request):x}] streaming: key_id={k.key_id} "
+                                        f"client gone after {chunk_count} chunks delivered"
+                                    )
+                                else:
+                                    _lg.info(f"[{id(request):x}] streaming: key_id={k.key_id} completed ({chunk_count} chunks)")
+                                    try:
+                                        record_stream_completed("completed")
+                                    except Exception:
+                                        pass
+                                mark_success(k)
 
                             # 流式响应的 token 用量：优先从 stream_translator 提取
                             # （翻译路径）；透传路径（无 translator）回落上游
@@ -4997,7 +5164,7 @@ class ProxyHandler:
                                     required_caps,
                                 )
                                 # T35 / R-P1-61 判据⑤：ResponseStore 持久化 binding。
-                                asyncio.create_task(
+                                self._spawn(
                                     self._persist_sticky_binding(
                                         session_key,
                                         k.key_id,
@@ -5008,14 +5175,16 @@ class ProxyHandler:
                             if self.store:
                                 latency_ms = int((time.time() - _stream_start) * 1000)
                                 _token_id = request.get("token_id", 0)
-                                asyncio.create_task(
+                                self._spawn(
                                     self._log_and_deduct(
                                         self.store,
                                         client_ip=request.remote or "",
                                         model_name=requested_model or "",
                                         member_model=k.model_name,
                                         key_id=k.key_id,
-                                        status=200,
+                                        # 读侧上游断流：审计如实记 502 截断，不再
+                                        # 记 200 假成功；写侧客户端断开维持 200。
+                                        status=502 if upstream_broken else 200,
                                         latency_ms=latency_ms,
                                         tokens_in=_stream_tokens_in,
                                         tokens_out=_stream_tokens_out,
@@ -5023,6 +5192,11 @@ class ProxyHandler:
                                         outbound_protocol=outbound_protocol,
                                         translated=need_translation,
                                         token_id=_token_id,
+                                        error=(
+                                            "upstream stream truncated mid-response"
+                                            if upstream_broken
+                                            else ""
+                                        ),
                                     )
                                 )
                             return resp
@@ -5072,9 +5246,12 @@ class ProxyHandler:
                         f"Returning 502."
                     )
                     try:
+                        # [DONE] 收尾：只发 event:error 时 chat 客户端会一直等
+                        # 结束哨兵，补上让 SDK 立即收尾。
                         await resp.write(
                             b'event: error\ndata: {"error":{"type":"upstream_error",'
                             b'"message":"upstream temporarily unavailable"}}\n\n'
+                            b"data: [DONE]\n\n"
                         )
                     except Exception:
                         pass
@@ -5104,6 +5281,7 @@ class ProxyHandler:
                         await resp.write(
                             b'event: error\ndata: {"error":{"type":"upstream_error",'
                             b'"message":"all keys cooling, please retry later"}}\n\n'
+                            b"data: [DONE]\n\n"
                         )
                     except Exception:
                         pass
@@ -5133,6 +5311,7 @@ class ProxyHandler:
                         await resp.write(
                             b'event: error\ndata: {"error":{"type":"upstream_error",'
                             b'"message":"upstream temporarily unavailable"}}\n\n'
+                            b"data: [DONE]\n\n"
                         )
                     except Exception:
                         pass
@@ -5184,6 +5363,17 @@ class ProxyHandler:
         error: str = "",
     ) -> None:
         """记录请求日志 + 扣减令牌配额 + 计算成本（异步调用）。"""
+        # Prometheus 请求计数（R-P1-54 观测接线）：本方法是 legacy 与 v3 两条
+        # 路径共同的审计收口，在此埋点保证 /metrics 覆盖全部转发请求。
+        try:
+            _ep = {
+                "responses": "/v1/responses",
+                "anthropic": "/v1/messages",
+            }.get(inbound_protocol, "/v1/chat/completions")
+            record_request(_ep, status)
+        except Exception:
+            pass
+
         # 计算成本
         cost = 0.0
         try:
@@ -5267,7 +5457,7 @@ class ProxyHandler:
         _ob = outbound_protocol
         _tr = translated
         _err = (error or "")[:500]
-        asyncio.create_task(
+        self._spawn(
             self._log_and_deduct(
                 self.store,
                 client_ip=_client_ip,
@@ -5308,7 +5498,7 @@ class ProxyHandler:
         _model = model_name or ""
         _err = error or ""
         _inbound = inbound_protocol or ""
-        asyncio.create_task(
+        self._spawn(
             self._log_gate_failure_task(
                 self.store,
                 client_ip=_client_ip,
@@ -5505,9 +5695,19 @@ class _V3UpstreamResult:
     ``outbound_protocol`` / ``need_translation`` are carried alongside so the
     caller (the v3 request-logging path) can record which upstream protocol
     actually served the request without re-deriving it.
+
+    ``local_rate_limited`` marks the *local sliding window* rejection emitted by
+    :meth:`_prepare_v3_upstream_call` (key.window.allow 失败)——与「上游真 429」
+    同为 429 但语义完全不同：前者应换下一个候选 key 继续尝试，后者才是上游限流。
     """
 
-    __slots__ = ("status_code", "body", "outbound_protocol", "need_translation")
+    __slots__ = (
+        "status_code",
+        "body",
+        "outbound_protocol",
+        "need_translation",
+        "local_rate_limited",
+    )
 
     def __init__(
         self,
@@ -5515,17 +5715,20 @@ class _V3UpstreamResult:
         body: bytes,
         outbound_protocol: str = "",
         need_translation: bool = False,
+        local_rate_limited: bool = False,
     ) -> None:
         self.status_code = int(status_code)
         self.body = body if isinstance(body, bytes) else str(body).encode("utf-8")
         self.outbound_protocol = outbound_protocol
         self.need_translation = bool(need_translation)
+        self.local_rate_limited = bool(local_rate_limited)
 
 
-def _http_json(status: int, payload: Any) -> _V3UpstreamResult:
+def _http_json(status: int, payload: Any, *, local_rate_limited: bool = False) -> _V3UpstreamResult:
     """Build an early-error result with ``status_code`` + ``body``.
 
     ``payload`` may be bytes, str or a JSON-serialisable object.
+    ``local_rate_limited=True`` 标记本地滑动窗口拒绝（见 :class:`_V3UpstreamResult`）。
     """
     if isinstance(payload, bytes):
         body = payload
@@ -5533,4 +5736,4 @@ def _http_json(status: int, payload: Any) -> _V3UpstreamResult:
         body = payload.encode("utf-8")
     else:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    return _V3UpstreamResult(status, body)
+    return _V3UpstreamResult(status, body, local_rate_limited=local_rate_limited)

@@ -30,7 +30,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--port", type=int, default=None)
     p.add_argument("--upstream", default=None)
-    p.add_argument("--key", default=None)
+    p.add_argument(
+        "--key",
+        default=None,
+        help="Upstream API key (NOTE: visible in process list; prefer ZHONGZHUAN_KEY env var)",
+    )
     p.add_argument("--service", action="store_true", help="Windows Service entry")
     p.add_argument("--version", action="version", version=f"zhongzhuan {__version__}")
     # Service commands
@@ -39,7 +43,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--start", action="store_true", help="Start Windows service")
     p.add_argument("--stop", action="store_true", help="Stop Windows service")
     p.add_argument("--autostart", nargs="?", const="status", help="Auto-start on/off/status")
-    p.add_argument("--open-admin", action="store_true", help="Open admin UI in browser")
+    p.add_argument(
+        "--open-admin",
+        action="store_true",
+        help="Open admin UI in browser after startup (overrides ZHONGZHUAN_NO_BROWSER)",
+    )
     # TLS subcommand
     p.add_argument("--tls-selfsign", action="store_true", help="Generate self-signed TLS certificate")
     p.add_argument("--cn", default="localhost", help="Common Name for self-signed cert")
@@ -99,8 +107,16 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
     for _cid, _c in cipher_rows:
         try:
             ciphers[_cid] = decrypt(_c).decode("utf-8")
-        except Exception:
+        except Exception as _exc:
+            # 解密失败不能无声跳过——否则该 key 静默退出路由池，运维只能从
+            # 「loaded N keys」数字反推。至少给出 key_id 与原因。
             ciphers[_cid] = None
+            try:
+                from .observability.log import logger as _lg
+
+                _lg.warning(f"key_id={_cid} decrypt failed ({type(_exc).__name__}); key excluded from routing")
+            except Exception:
+                print(f"[warn] key_id={_cid} decrypt failed; key excluded from routing", file=sys.stderr)
 
     health_list: list[KeyHealth] = []
     for kr in key_rows:
@@ -574,10 +590,9 @@ def handle_service_commands(args: argparse.Namespace) -> int | None:
         print(f"Auto-start for '{svc_name}': {'ON' if enabled else 'OFF'}")
         return 0
 
-    if args.open_admin:
-        admin_port = cfg.server.admin.port
-        webbrowser.open(f"http://127.0.0.1:{admin_port}")
-        return 0
+    # 注：--open-admin 不在此处理（旧实现放在 Windows-only 分支里：Linux 被
+    # 静默忽略，Windows 则开完浏览器直接退出而 admin 尚未监听——两个平台都
+    # 是坏的）。现移至 main() 的 run_foreground 之后置逻辑，见下方。
 
     return None
 
@@ -612,6 +627,14 @@ def main() -> int:
     result = handle_service_commands(args)
     if result is not None:
         return result
+
+    if getattr(args, "open_admin", False):
+        # 两个平台一致的语义：随前台启动打开浏览器（admin 监听后触发，
+        # 见 run_foreground）。此标志仅用于覆盖 ZHONGZHUAN_NO_BROWSER 抑制。
+        import os as _os
+
+        _os.environ.pop("ZHONGZHUAN_NO_BROWSER", None)
+        print("[zhongzhuan] --open-admin: browser will open once admin is listening")
 
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute() and not cfg_path.exists():

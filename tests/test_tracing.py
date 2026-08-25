@@ -16,6 +16,7 @@ from zhongzhuan.observability.tracing import (
     ATTR_EVENT_DELAY,
     ATTR_RETRY_REASON,
     ATTR_TTFT,
+    SPAN_BUFFER_MAX,
     Span,
     Tracer,
     record_breaker_reason,
@@ -99,3 +100,41 @@ def test_span_duration_measured_in_ns_clock():
     tracer.end_span(span)
     assert span.end_ns >= span.start_ns
     assert span.duration_ms >= 0.5
+
+
+def test_span_buffer_is_bounded_ring():
+    """/_spans 有环形上限：超过 SPAN_BUFFER_MAX 后最老 span 被裁掉。"""
+    tracer = Tracer()
+    for i in range(SPAN_BUFFER_MAX + 100):
+        s = tracer.start_span(f"span_{i}")
+        tracer.end_span(s)
+    spans = tracer.spans
+    assert len(spans) == SPAN_BUFFER_MAX
+    # 最老的 100 个已被裁掉，保留的是最近的窗口。
+    assert spans[0].name == "span_100"
+    assert spans[-1].name == f"span_{SPAN_BUFFER_MAX + 99}"
+
+
+def test_same_name_concurrent_spans_end_independently():
+    """同名 span 并发开启：以 span_id 区分，end 各自独立、互不错杀。"""
+    tracer = Tracer()
+    s1 = tracer.start_span("round")
+    s2 = tracer.start_span("round")
+    assert s1.span_id != s2.span_id
+    tracer.end_span(s1, status="ok")
+    tracer.end_span(s2, status="error")
+    ended = tracer.find("round")
+    assert [s.status for s in ended] == ["ok", "error"]
+
+
+def test_parent_id_links_to_open_span():
+    """start_span 时若存在未结束的 span，parent_id 指向它（锁内读取）。"""
+    tracer = Tracer()
+    outer = tracer.start_span("outer")
+    inner = tracer.start_span("inner")
+    assert inner.parent_id == str(outer.span_id)
+    tracer.end_span(inner)
+    tracer.end_span(outer)
+    orphan = tracer.start_span("orphan")
+    assert orphan.parent_id == ""
+    tracer.end_span(orphan)

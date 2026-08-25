@@ -1,21 +1,30 @@
-"""E2E test: start the real proxy server with a real API key and make a request through it."""
+"""手工 E2E 检查：用真实 API key 启动代理并发起真实请求。
+
+【手工脚本，未经测试维护】—— 不属于 pytest 测试套件（不叫 test_*，
+不会被收集），会发起真实网络/计费请求，需要手工执行::
+
+    $env:AGNES_API_KEY='sk-xxx'; python scripts/manual_check_e2e.py
+
+内容为早期调试脚本的迁移版（原 tests/test_real_e2e.py），已改为当前的
+异步 Store API（SqliteStore.create 自带 migration）。
+"""
 
 import asyncio
-import json
+import os
 import socket
 import sys
-import os
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from aiohttp import ClientSession, web
 
-# Build a minimal config so we don't need the admin UI
 from zhongzhuan.proxy import ProxyServer
 from zhongzhuan.proxy.ratelimit import KeyHealth, SlidingWindow
 from zhongzhuan.upstream import UpstreamClient
-from zhongzhuan.store import Store
+from zhongzhuan.store.keys import ApiKey, create_key
+from zhongzhuan.store.models import Model, create_model
+from zhongzhuan.store.sqlite_store import SqliteStore
 
 
 API_KEY = os.environ.get("AGNES_API_KEY", "")
@@ -35,37 +44,23 @@ async def main():
         print("Set AGNES_API_KEY env var")
         return
 
-    # Create a temp store and seed it
-    store = Store(":memory:")
-    # Apply schema
-    from zhongzhuan.store.schema import SCHEMA
+    # 内存库 + 自动跑版本化 migration（R-P0-04）
+    store = await SqliteStore.create(":memory:")
 
-    conn = store.connect()
-    conn.executescript(SCHEMA)
-    # Insert a model
-    from zhongzhuan.store.models import create_model
-    from zhongzhuan.store.keys import create_key, ApiKey
-
-    model = create_model(
+    model = await create_model(
         store,
-        type(
-            "M",
-            (),
-            {
-                "name": "agens",
-                "upstream_base": UPSTREAM,
-                "upstream_model": "agnes-2.0-flash",
-                "rpm_limit": 60,
-                "tpm_limit": 100000,
-                "enabled": True,
-                "weight": 1,
-            },
-        )(),
+        Model(
+            name="agens",
+            upstream_base=UPSTREAM,
+            upstream_model="agnes-2.0-flash",
+            rpm_limit=60,
+            tpm_limit=100000,
+            enabled=True,
+            weight=1,
+        ),
     )
 
-    # Insert a key
-    k = ApiKey(id=None, model_id=model.id, label="test", key_value=API_KEY)
-    create_key(store, k)
+    k = await create_key(store, ApiKey(id=None, model_id=model.id, label="test", key_value=API_KEY))
 
     # Build upstream client and key health
     upstream = UpstreamClient(base_url=UPSTREAM, timeout=30.0)
@@ -135,7 +130,7 @@ async def main():
     finally:
         await runner.cleanup()
         await upstream.close()
-        store.close()
+        await store.close()
 
 
 if __name__ == "__main__":

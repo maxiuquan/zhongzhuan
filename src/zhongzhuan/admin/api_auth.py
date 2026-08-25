@@ -14,13 +14,17 @@ def register_routes(app: web.Application, ctx) -> None:
         username = data.get("username", "")
         password = data.get("password", "")
 
-        if not await verify_admin(ctx.store, username, password):
+        # 取当前密码哈希（主键点查）用于签发可吊销 JWT（pv 指纹）。
+        row = await ctx.store.fetchone(
+            "SELECT password_hash FROM admin_users WHERE username=?", (username,)
+        )
+        if not row or not await verify_admin(ctx.store, username, password):
             return web.json_response(
                 {"error": "invalid credentials"},
                 status=401,
             )
 
-        token = create_token(username)
+        token = create_token(username, password_hash=row[0])
         return web.json_response({"token": token, "username": username})
 
     async def status(_request):
@@ -44,7 +48,14 @@ def register_routes(app: web.Application, ctx) -> None:
                 status=401,
             )
 
+        if not isinstance(new_password, str) or len(new_password) < 8:
+            return web.json_response(
+                {"error": {"message": "新密码不能为空且至少 8 个字符", "type": "weak_password"}},
+                status=400,
+            )
+
         await update_password(ctx.store, username, new_password)
+        # 改密后旧 JWT 因 pv 指纹不匹配自动失效（见 auth.token_revoked）。
         return web.json_response({"ok": True})
 
     app.router.add_post("/api/auth/login", login)

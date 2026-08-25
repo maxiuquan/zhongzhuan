@@ -6,6 +6,8 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root/zhongzhuan
+# src-layout：必须注入 PYTHONPATH，否则 -m zhongzhuan 找不到包
+Environment=PYTHONPATH=/root/zhongzhuan/src
 ExecStart=/usr/bin/python3 -m zhongzhuan
 Restart=always
 RestartSec=5

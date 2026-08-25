@@ -17,6 +17,20 @@ def _sc(*args: str) -> tuple[int, str, str]:
     return r.returncode, r.stdout, r.stderr
 
 
+# 这些 sc.exe 返回码属于「目标状态已达成」的幂等结果，不算失败：
+# 1060 = 服务已安装 / 1062 = 服务未启动 / 1072 = 标记待删除
+_SC_IDEMPOTENT_OK = {0, 1060, 1062, 1072}
+
+
+def _sc_checked(*args: str) -> tuple[int, str, str]:
+    """执行 sc.exe 并在非幂等失败时抛错（旧实现丢弃返回码导致假成功——
+    非管理员运行 start 得到 Access Denied 也打印 "started"，误导排障）。"""
+    code, out, err = _sc(*args)
+    if code not in _SC_IDEMPOTENT_OK:
+        raise RuntimeError(f"sc {' '.join(args)} failed (exit {code}): {(err or out).strip()}")
+    return code, out, err
+
+
 def install(svc_name: str, display_name: str, auto_start: bool = True) -> None:
     """Register as Windows service (requires admin)."""
     if sys.platform != "win32":
@@ -36,25 +50,34 @@ def install(svc_name: str, display_name: str, auto_start: bool = True) -> None:
     # Set failure actions: restart on failure
     _sc("failure", svc_name, "reset=86400", "actions=restart/5000/restart/10000/restart/30000")
 
+    # 已知限制（如实告知，勿静默）：本进程是控制台程序，未实现 SCM 调度器
+    # （StartServiceCtrlDispatcher），SCM 启动后约 30s 会因等待超时报错 1053
+    # 并终止进程。生产部署请改用任务计划程序或 NSSM 包装。
+    print(
+        "[WARN] Windows service mode is best-effort: this console app does not\n"
+        "       implement the SCM dispatcher, so scm may kill it after ~30s\n"
+        "       (error 1053). Prefer Task Scheduler or NSSM for production."
+    )
+
 
 def uninstall(svc_name: str) -> None:
     """Remove Windows service."""
     if sys.platform != "win32":
         return
-    _sc("stop", svc_name)
-    _sc("delete", svc_name)
+    _sc_checked("stop", svc_name)
+    _sc_checked("delete", svc_name)
 
 
 def start(svc_name: str) -> None:
     if sys.platform != "win32":
         return
-    _sc("start", svc_name)
+    _sc_checked("start", svc_name)
 
 
 def stop(svc_name: str) -> None:
     if sys.platform != "win32":
         return
-    _sc("stop", svc_name)
+    _sc_checked("stop", svc_name)
 
 
 def status(svc_name: str) -> str:
@@ -64,9 +87,14 @@ def status(svc_name: str) -> str:
     code, out, _ = _sc("query", svc_name)
     if code != 0:
         return "not_installed"
-    if "RUNNING" in out:
+    # 用 STATE : <num> <NAME> 结构化匹配，避免非英文 locale 的子串误判
+    import re as _re
+
+    m = _re.search(r"STATE\s*:\s*\d+\s+(\w+)", out)
+    state = m.group(1).upper() if m else ""
+    if state == "RUNNING":
         return "running"
-    if "STOPPED" in out:
+    if state == "STOPPED":
         return "stopped"
     return "unknown"
 

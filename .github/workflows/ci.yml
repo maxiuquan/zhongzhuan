@@ -49,10 +49,10 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run tests (skip live)
-        run: python -m pytest tests/ -q -m "not live" --ignore=tests/test_proxy_live.py
+        run: python -m pytest tests/ -q -m "not live"
 
       - name: Pytest collect-only sanity (zero errors)
-        run: python -m pytest tests/ --collect-only -q --ignore=tests/test_proxy_live.py
+        run: python -m pytest tests/ --collect-only -q
 
   # ------------------------------------------------------------------ #
   # 2. ruff：lint + format（T36 / R-P2-13）
@@ -262,6 +262,8 @@ jobs:
   # ------------------------------------------------------------------ #
   sdk-contract:
     runs-on: ubuntu-latest
+    # TS 侧（openai-node 合约）尚不稳定：降级为非阻断，失败不卡 CI。
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

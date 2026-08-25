@@ -51,17 +51,20 @@ class AdminServer:
                 return await handler(request)
             except web.HTTPException:
                 raise
-            except Exception as e:
+            except Exception:
+                from loguru import logger
+
+                logger.exception(f"[admin] internal error: {request.method} {request.path}")
                 return web.json_response(
-                    {"error": {"message": str(e), "type": "internal_error"}},
+                    {"error": {"message": "internal server error", "type": "internal_error"}},
                     status=500,
                 )
 
         app.middlewares.append(error_middleware)
 
-        # JWT auth middleware
+        # JWT auth middleware（传 store 以启用 JWT 可吊销校验）
         init_jwt_secret()
-        app.middlewares.append(make_auth_middleware())
+        app.middlewares.append(make_auth_middleware(self.store))
 
         # API routes
         register_auth(app, self)

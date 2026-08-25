@@ -80,7 +80,16 @@ def make_cors_middleware(allow_origins: list[str] | None = None) -> Middleware:
             _add_cors_headers(resp, echo)
             return resp
 
-        resp = await handler(request)
+        try:
+            resp = await handler(request)
+        except Exception:
+            # 下游中间件/handler 抛异常时也要带上 CORS 头：否则浏览器侧拿到的
+            # 错误响应没有 Allow-Origin，前端连错误详情都读不到（CORS 拦截）。
+            # 转成标准 500 返回，不让 aiohttp 的默认 500 裸奔出 CORS 头。
+            resp = web.Response(status=500, text="internal server error")
+            if allowed:
+                _add_cors_headers(resp, echo)
+            return resp
 
         if allowed:
             _add_cors_headers(resp, echo)
@@ -94,6 +103,11 @@ def _add_cors_headers(resp: web.StreamResponse, origin: str) -> None:
     resp.headers["Access-Control-Allow-Methods"] = _ALLOW_METHODS
     resp.headers["Access-Control-Allow-Headers"] = _ALLOW_HEADERS
     resp.headers["Access-Control-Max-Age"] = _MAX_AGE
+    # 回显具体 Origin 时必须补 Vary: Origin（缓存按 Origin 区分）；与 gzip
+    # 中间件已写入的 Vary（Accept-Encoding）合并而非覆盖。
+    vary = resp.headers.get("Vary", "")
+    if "origin" not in vary.lower():
+        resp.headers["Vary"] = f"{vary}, Origin" if vary else "Origin"
     # 允许携带凭据（cookie/CSRF token）时不允许 ``*``，这里只在明确 Origin 时开启。
     if origin and origin != "*":
         resp.headers["Access-Control-Allow-Credentials"] = "true"

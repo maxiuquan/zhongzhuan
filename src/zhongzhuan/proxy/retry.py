@@ -32,17 +32,6 @@ from .ratelimit import (
 )
 
 
-def cooldown_for(failures: int) -> float:
-    """Return cooldown seconds based on consecutive failures (for 5xx / network)."""
-    if failures <= 1:
-        return 5.0
-    if failures == 2:
-        return 10.0
-    if failures == 3:
-        return 30.0
-    return 60.0
-
-
 def _bump_failure(k: KeyHealth) -> None:
     """Record one failure on both counters (T07: total vs consecutive)."""
     k.total_failures += 1
@@ -145,7 +134,9 @@ def mark_banned(k: KeyHealth) -> None:
     """403 CF/WAF 封禁：长冷却（600s 档），到期自动恢复；也可手动提前恢复。"""
     _bump_failure(k)
     k.status = STATE_ERROR
-    # 封禁直接用最长沙冷却档，不再逐级
+    # 封禁直接用最长沙冷却档，不再逐级（backoff_level 同步置满，
+    # 与调度打分/展示口径一致——2026-08 审查后补齐，旧 record_failure 语义）。
+    k.backoff_level = 3
     k.cooldown_until = time.time() + backoff_seconds(3)
     k.failure_class = CLASS_BANNED
     k.last_failure_at = time.time()

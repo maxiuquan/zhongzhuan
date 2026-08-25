@@ -45,7 +45,9 @@ async def test_single_key(
     # Clean URL - remove backticks and quotes
     upstream_base = upstream_base.replace("`", "").replace('"', '').strip().rstrip("/")
     if not upstream_base:
-        upstream_base = "https://macc.eu.cc"
+        # 安全红线：上游为空时绝不能把真实 key 发往任何默认域名（密钥外泄通道）。
+        result.error = "no upstream_base configured; skipped (refusing to send key to a default host)"
+        return result
     if not upstream_base.startswith(("http://", "https://")):
         upstream_base = "https://" + upstream_base
     
@@ -147,29 +149,29 @@ async def test_tidb_keys(tidb_config: dict, concurrent: int = 5) -> None:
                 row = await cur.fetchone()
                 return row[0] if row else None
     
-    # Debug: check if secret_key exists in TiDB
+    # Debug: check if secret_key exists in TiDB（只报存在性，绝不打印密钥本体）
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("SELECT value FROM system_config WHERE `key`=%s", ("secret_key",))
             row = await cur.fetchone()
             if row:
-                print(f"secret_key from TiDB (hex): {row[0][:64]}...")
+                print(f"secret_key found in TiDB system_config (len={len(str(row[0]))} hex chars)")
             else:
                 print("WARNING: secret_key NOT FOUND in TiDB system_config!")
-    
+
     await crypto_init(Path("."), store_get_key=_get_config)
     print("Crypto initialized\n")
-    
-    # Test decryption with first key
+
+    # Test decryption with first key（只打印 mask，不打印明文片段）
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute("SELECT key_cipher FROM api_keys WHERE id=1")
             test_row = await cur.fetchone()
             if test_row:
                 try:
-                    from zhongzhuan.crypto import decrypt as _decrypt
+                    from zhongzhuan.crypto import decrypt as _decrypt, mask as _mask
                     test_plain = _decrypt(test_row[0]).decode("utf-8")
-                    print(f"Decryption test SUCCESS: key starts with {test_plain[:10]}...")
+                    print(f"Decryption test SUCCESS: key = {_mask(test_plain)}")
                 except Exception as e:
                     import traceback
                     print(f"Decryption test FAILED: {e}")

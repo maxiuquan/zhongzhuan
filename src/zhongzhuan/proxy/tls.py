@@ -129,6 +129,21 @@ def selfsign(
         _selfsign_openssl(out_cert, out_key, out_ca, cn, san_dns, san_ip, days)
 
 
+def _create_private_file(path: str) -> int:
+    """以受限权限（0o600）独占创建私钥文件，返回可写的 fd。
+
+    用 ``O_CREAT|O_EXCL`` 直接受限创建，消除「先写全文后 chmod」之间私钥以
+    进程 umask 权限暴露在磁盘上的竞态窗口。已存在的旧文件先删除——重新生成
+    时新私钥始终走受限创建路径（unlink 与 create 之间磁盘上没有私钥内容，
+    无暴露窗口）。
+    """
+    try:
+        os.unlink(path)
+    except (FileNotFoundError, PermissionError):
+        pass
+    return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+
+
 def _write_key(path: str, key) -> None:
     from cryptography.hazmat.primitives import serialization
 
@@ -137,7 +152,12 @@ def _write_key(path: str, key) -> None:
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption(),
     )
-    Path(path).write_bytes(pem)
+    fd = _create_private_file(path)
+    try:
+        os.write(fd, pem)
+    finally:
+        os.close(fd)
+    # 平台兜底（Windows 上 mode 参数仅影响只读位，POSIX 上确保权限收敛）。
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -167,6 +187,13 @@ def _selfsign_openssl(
     if not san_parts:
         san_parts = ["DNS:localhost", "IP:127.0.0.1"]
     san_str = ",".join(san_parts)
+
+    # 先以受限权限（0o600）创建私钥输出文件：openssl 会覆写已存在文件并保留
+    # 其权限，这样 CLI 私钥落盘同样不经历「默认权限 + 事后 chmod」的竞态窗口。
+    try:
+        os.close(_create_private_file(out_key))
+    except OSError:
+        pass
 
     # Generate key + self-signed cert with SANs (single cert, no separate CA)
     cmd = [

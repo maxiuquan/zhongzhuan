@@ -666,6 +666,9 @@ Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$INSTALL_DIR/.env
+# src-layout 下包不可直接导入：部署流程只装第三方依赖不装本项目本身，
+# 必须显式注入 PYTHONPATH（此前缺失会导致 systemd 启动 ModuleNotFoundError）。
+Environment=PYTHONPATH=$INSTALL_DIR/src
 ExecStart=$PYTHON_BIN -m zhongzhuan
 Restart=always
 RestartSec=5

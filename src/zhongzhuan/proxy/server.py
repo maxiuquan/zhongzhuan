@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
+import os
 import re
 import time
+from typing import Any
 
 from aiohttp import web
 from aiohttp.payload import Payload
@@ -12,6 +15,7 @@ from aiohttp.payload import Payload
 logger = logging.getLogger(__name__)
 
 from .auth import make_proxy_auth_middleware
+from .concurrency import ConcurrencyGate, GateConfig, make_concurrency_middleware
 from .cors import make_cors_middleware
 from .handler import make_handler
 from ..store import Store
@@ -42,6 +46,7 @@ class ProxyServer:
         store: Store | None = None,
         load_keys_fn=None,
         sticky_ttl: float = 1800.0,
+        global_concurrent: int | None = None,
         *,
         responses_bridge=None,
         feature_flags=None,
@@ -56,6 +61,17 @@ class ProxyServer:
         self.store = store
         self.load_keys_fn = load_keys_fn
         self.sticky_ttl = sticky_ttl
+        # 并发闸门上限（T34 / R-P2-15）：显式传参优先；缺省走进程级当前配置
+        # （``default_config().limits.global_concurrent``，由 run_foreground 在
+        # 启动时注入），与 config.yaml 的 limits.global_concurrent 对齐。
+        if global_concurrent is None:
+            try:
+                from ..config import default_config
+
+                global_concurrent = int(default_config().limits.global_concurrent)
+            except Exception:
+                global_concurrent = 64
+        self.global_concurrent = max(1, int(global_concurrent))
         # T22: Responses v3 bridge wiring.  ``responses_bridge`` is the config
         # object (``enabled`` + ``rollout``); when omitted the bridge stays
         # disabled so existing callers (and the store-less setup) are
@@ -79,6 +95,13 @@ class ProxyServer:
                 _make_gzip_middleware(min_size=1024),  # >1KB 才压缩
             ],
         )
+
+        # T34 / R-P2-15：并发闸门接线（此前从未生效）。位于 CORS 之后、auth
+        # 之前：超限请求排队等待，排队超时由中间件映射为 429 + Retry-After。
+        self._concurrency_gate = ConcurrencyGate(
+            GateConfig(global_limit=self.global_concurrent)
+        )
+        app.middlewares.append(make_concurrency_middleware(self._concurrency_gate))
 
         # Proxy access token auth middleware (VPS mode)
         if self.store is not None:
@@ -260,7 +283,39 @@ class ProxyServer:
         )
         return web.json_response(sanitize_health_payload(payload), status=status)
 
-    async def _health_dependencies(self, _request: web.Request) -> web.Response:
+    # ------------------------------------------------------------------
+    # 内部端点防护（/api/*、/metrics、/healthz/deps）：
+    #   * 环境变量 ZHONGZHUAN_INTERNAL_TOKEN 已设置 → 请求头 X-Internal-Token
+    #     必须与其 hmac.compare_digest 相等；
+    #   * 未设置 → 仅允许回环地址（127.0.0.1 / ::1）访问；
+    #   * 其余一律 403。
+    # /healthz/live 与 /healthz/ready 保持公开（容器/K8s 探针不携带内部令牌）。
+    # ------------------------------------------------------------------
+
+    _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+
+    @classmethod
+    def _internal_access_denied(cls, request: web.Request) -> web.Response | None:
+        """内部端点鉴权：通过返回 ``None``，拒绝返回 403 响应。"""
+        expected = os.getenv("ZHONGZHUAN_INTERNAL_TOKEN", "")
+        if expected:
+            provided = request.headers.get("X-Internal-Token", "")
+            if provided and hmac.compare_digest(provided, expected):
+                return None
+            return web.json_response({"error": "internal token required"}, status=403)
+        if (request.remote or "") not in cls._LOOPBACK_HOSTS:
+            return web.json_response(
+                {"error": "internal endpoints are loopback-only"},
+                status=403,
+            )
+        return None
+
+    async def _health_dependencies(self, request: web.Request) -> web.Response:
+        # /healthz/deps 暴露存储/上游/工具执行器的内部依赖拓扑，需内部令牌
+        # 或回环来源（/healthz/live、/healthz/ready 保持公开供探针使用）。
+        denied = self._internal_access_denied(request)
+        if denied is not None:
+            return denied
         from ..observability.health import (
             build_dependency_status,
             dependency_item,
@@ -293,7 +348,12 @@ class ProxyServer:
             sanitize_health_payload(build_dependency_status(deps)),
         )
 
-    async def _metrics(self, _request: web.Request) -> web.Response:
+    async def _metrics(self, request: web.Request) -> web.Response:
+        # /metrics 暴露 Prometheus 指标（含请求量/key 健康等运营数据），
+        # 需内部令牌或回环来源，防止公网抓取。
+        denied = self._internal_access_denied(request)
+        if denied is not None:
+            return denied
         from ..observability.metrics import render_metrics
 
         # Prometheus 标准 content-type 带 version/charset 参数；
@@ -302,7 +362,12 @@ class ProxyServer:
         resp.headers["Content-Type"] = "text/plain; version=0.0.4; charset=utf-8"
         return resp
 
-    async def _reload(self, _request: web.Request, handler) -> web.Response:
+    async def _reload(self, request: web.Request, handler) -> web.Response:
+        # /api/reload 触发 key/models/groups 热重载（写操作），必须内部令牌
+        # 或回环来源；否则任意来源都能重载/扰动运行中的 key 池。
+        denied = self._internal_access_denied(request)
+        if denied is not None:
+            return denied
         from loguru import logger
 
         n = await handler.reload_keys()
@@ -352,7 +417,12 @@ class ProxyServer:
         permanent（欠费/配置已修）与 banned（封禁解除）都走这里；只重置目标
         key，不触发 reload（reload 会重建所有 KeyHealth 对象，且 2026-08-15 v1
         语义下 reload 不重置 invalid——直接改内存状态即可立即生效）。
+
+        管理端写操作：需内部令牌（ZHONGZHUAN_INTERNAL_TOKEN）或回环来源。
         """
+        denied = self._internal_access_denied(request)
+        if denied is not None:
+            return denied
         key_id = int(request.match_info.get("key_id", "0") or 0)
         if key_id <= 0:
             return web.json_response({"ok": False, "error": "invalid key_id"}, status=400)
@@ -361,13 +431,18 @@ class ProxyServer:
             return web.json_response({"ok": False, "error": "key not found in proxy memory"}, status=404)
         return web.json_response({"ok": True, "key_id": key_id})
 
-    async def _key_health(self, _request: web.Request, handler) -> web.Response:
+    async def _key_health(self, request: web.Request, handler) -> web.Response:
         """管理端查询全部 key 的健康状态（内存权威，实时）。
 
         返回 key_id → {status, failure_class, backoff_level, cooldown_until,
         cooldown_remaining, last_failure_at}，供 Key 池/分组页展示失效原因与
         「确认恢复」按钮状态。
+
+        内部端点：需内部令牌（ZHONGZHUAN_INTERNAL_TOKEN）或回环来源。
         """
+        denied = self._internal_access_denied(request)
+        if denied is not None:
+            return denied
         now = time.time()
         items = []
         for k in handler._keys or []:
@@ -538,13 +613,20 @@ class ProxyServer:
                 # group "mf" — a 12-member catch-all that would otherwise show
                 # up as a bare, meaningless "mf" slug to Codex users.  Also
                 # honour each group's own exposed switch.
-                for g in await _list_groups_db(self.store):
-                    gname = g.get("name", "")
-                    if (gname and gname != "mf"
-                            and g.get("exposed", True)
-                            and gname not in seen):
-                        seen.add(gname)
-                        slugs.append(gname)
+                # 分组查询失败只降级掉分组名，不能把上面已过滤好的模型列表
+                # 一并丢弃回落静态兜底（2026-08 审查修复：此前 except 会吞掉
+                # 整个 slugs 结果，测试 test_codex_model_slugs_excludes_* 钉死
+                # 的「只暴露 enabled+非兜底」契约被打破）。
+                try:
+                    for g in await _list_groups_db(self.store):
+                        gname = g.get("name", "")
+                        if (gname and gname != "mf"
+                                and g.get("exposed", True)
+                                and gname not in seen):
+                            seen.add(gname)
+                            slugs.append(gname)
+                except Exception:
+                    pass
                 if slugs:
                     return slugs
             except Exception:
@@ -568,7 +650,7 @@ class ProxyServer:
         知道本中继支持原生子代理协议，从而走通 spawn/wait 而非退化为单兵模式。
         """
         display = slug[len("oc-"):] if slug.startswith("oc-") else slug
-        info = {
+        info: dict[str, Any] = {
             "slug": slug,
             "display_name": display,
             "description": None,

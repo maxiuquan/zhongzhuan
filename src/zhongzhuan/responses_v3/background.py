@@ -95,6 +95,10 @@ _TERMINAL_EVENT: dict[str, str] = {
     "expired": "response.incomplete",
 }
 
+#: :meth:`BackgroundWorker._fetch_chunk` 的流结束哨兵（None 会与「无 payload 块」
+#: 混淆，因此用模块级单例对象）。
+_STREAM_EOF: object = object()
+
 
 def _arguments_text(value: Any) -> str:
     """Normalise a tool-arguments fragment to the JSON *text* the wire carries.
@@ -437,11 +441,24 @@ class BackgroundWorker:
         return status
 
     async def _heartbeat(self, task_id: str) -> None:
-        """Renew the lease until the job leaves the active states."""
+        """Renew the lease until the job leaves the active states.
+
+        v3.2 整改：续租失败（租约被回收 / 任务已被判终态）此前只 ``return``——
+        本进程里还挂着的那条上游连接就成了「无限 job」：没人再为它续命，它却
+        继续烧 token。现在续租失败时把 run 置为 cancelled 并关闭上游，让
+        ``_stream`` 的边界检查尽快落地到取消流程。
+        """
         try:
             while True:
                 await asyncio.sleep(self._heartbeat_seconds)
                 if not await self._jobs.renew_lease(task_id, self._lease_seconds):
+                    run = self._runs.get(task_id)
+                    if run is not None:
+                        LOGGER.warning(
+                            "background job %s lost its lease; cancelling in-flight upstream", task_id
+                        )
+                        run.cancelled = True
+                        await run.cancel_upstream()
                     return
         except asyncio.CancelledError:
             return
@@ -495,11 +512,17 @@ class BackgroundWorker:
         returning one, so a test can hand over a fresh generator per attempt
         (an already-started async generator cannot be re-entered after a
         recovery).
+
+        v3.2 整改：墙钟死线此前只在 chunk 边界检查——一个「取块永远挂起」的
+        上游等于无限 job（预算检查根本没机会执行）。现在用
+        ``asyncio.wait_for(source.__anext__(), timeout=剩余预算)`` 包裹每一次
+        取块：超时即视为 wall-clock 到期，走取消流程并关闭上游。
         """
         source = upstream() if callable(upstream) else upstream
         run.upstream = source
         index = 0
-        async for chunk in source:
+        iterator = source.__aiter__()
+        while True:
             # Cancellation and the wall clock are checked at every boundary --
             # they are the two ceilings that can be crossed while the loop is
             # merely *waiting*, so charging them per chunk is not enough.
@@ -512,11 +535,36 @@ class BackgroundWorker:
             reason = ledger.check_wall_time(now=self._clock())
             if reason is not None:
                 return reason
+            chunk = await self._fetch_chunk(run, iterator, ledger)
+            if isinstance(chunk, TerminalReason):
+                return chunk
+            if chunk is _STREAM_EOF:
+                break
             reason = await self._charge_chunk(run, chunk, ledger, emitter, index)
             if reason is not None:
                 return reason
             index += 1
         return ledger.check_wall_time(now=self._clock())
+
+    async def _fetch_chunk(self, run: _JobRun, iterator: Any, ledger: BudgetLedger) -> Any:
+        """取下一个上游块，受墙钟剩余预算硬约束。
+
+        返回值三态：块本体 / ``_STREAM_EOF`` 哨兵 / :class:`TerminalReason`
+        （等待超时 = wall-clock 到期）。超时会取消挂起的 ``__anext__`` 并触发
+        上游关闭——「上游挂起 = 无限 job」从结构上被排除。
+        """
+        elapsed = self._clock() - ledger.started_at
+        remaining = float(ledger.budget.max_wall_time_seconds) - elapsed
+        if remaining <= 0:
+            return TerminalReason.MAX_RESPONSE_TIME
+        try:
+            return await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+        except asyncio.TimeoutError:
+            LOGGER.warning("background job %s hit the wall-clock deadline mid-chunk", run.task_id)
+            await run.cancel_upstream()
+            return TerminalReason.MAX_RESPONSE_TIME
+        except StopAsyncIteration:
+            return _STREAM_EOF
 
     async def _charge_chunk(
         self,
@@ -575,7 +623,14 @@ class BackgroundWorker:
 
         if kind in ("text", "output_text.delta") or "delta" in chunk or "text" in chunk:
             text = str(chunk.get("delta", chunk.get("text", "")) or "")
-            tokens = int(chunk.get("tokens", 1) or 0)
+            # v3.2 整改：此前每个 delta 恒记 1 token，输出预算（R-P1-38 的
+            # MAX_OUTPUT_BUDGET）与 request_logs 用量都被严重低估。显式带
+            # ``tokens`` 字段的块优先；否则按「4 字符 ≈ 1 token」估算法计费。
+            raw_tokens = chunk.get("tokens")
+            if raw_tokens is not None:
+                tokens = int(raw_tokens or 0)
+            else:
+                tokens = max(1, len(text) // 4) if text else 0
             return await self._charge_text(run, text, tokens, ledger, emitter)
 
         return None

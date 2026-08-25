@@ -15,6 +15,7 @@ def setup_logging(log_dir: Path, level: str = "INFO") -> None:
         sys.stderr,
         level=level,
         format="<green>{time:HH:mm:ss.SSS}</green> | <level>{level: <7}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>",
+        enqueue=True,  # 与文件 sink 一致：异步写入，日志 IO 不阻塞事件循环
     )
     logger.add(
         log_dir / "app-{time:YYYY-MM-DD}.log",

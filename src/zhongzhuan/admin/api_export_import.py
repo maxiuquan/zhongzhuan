@@ -13,6 +13,10 @@ from .notify import notify_proxy_reload
 from ..store.keys import list_keys
 from ..store.models import list_models
 
+# 导入 zip 的安全上限：成员数与解压后累计字节数（防 zip 炸弹）
+_MAX_IMPORT_MEMBERS = 64
+_MAX_IMPORT_BYTES = 32 * 1024 * 1024
+
 
 def register_routes(app: web.Application, ctx) -> None:
     async def export_config(_request):
@@ -60,16 +64,78 @@ def register_routes(app: web.Application, ctx) -> None:
             headers={"Content-Disposition": "attachment; filename=zhongzhuan-export.zip"},
         )
 
+    def _bad(message: str) -> web.Response:
+        return web.json_response({"error": {"message": message, "type": "invalid_import"}}, status=400)
+
     async def import_config(request):
-        """Import config from uploaded zip."""
+        """Import config from uploaded zip.
+
+        先整体解析校验（zip 结构 / 大小 / JSON / 字段），全部通过后才删后插，
+        且删除+插入包在 store 事务里；任何解析错误都不会破坏现有数据。
+        """
         data = await request.read()
         buf = io.BytesIO(data)
-        with zipfile.ZipFile(buf, "r") as zf:
-            # Models
-            if "models.json" in zf.namelist():
-                models_data = json.loads(zf.read("models.json"))
-                from ..store.models import Model, create_model, list_models as lm, delete_model
+        try:
+            zf = zipfile.ZipFile(buf, "r")
+        except zipfile.BadZipFile:
+            return _bad("上传的不是有效的 zip 文件")
+        try:
+            return await _parse_and_apply(zf)
+        except zipfile.BadZipFile:
+            # 成员元数据可能撒谎，解压时才暴露损坏（防 zip 炸弹的最后防线）。
+            return _bad("zip 内文件损坏或超出可解压范围")
 
+    async def _parse_and_apply(zf: zipfile.ZipFile) -> web.Response:
+        with zf:
+            infos = zf.infolist()
+            if len(infos) > _MAX_IMPORT_MEMBERS:
+                return web.json_response(
+                    {"error": {"message": f"zip 成员数超过上限 {_MAX_IMPORT_MEMBERS}", "type": "payload_too_large"}},
+                    status=413,
+                )
+            if sum(i.file_size for i in infos) > _MAX_IMPORT_BYTES:
+                return web.json_response(
+                    {"error": {"message": "解压后总大小超过 32MB 上限", "type": "payload_too_large"}},
+                    status=413,
+                )
+            names = zf.namelist()
+            skipped_keys = 0
+            # ---- 整体解析校验（在任何删除之前）----
+            models_data = None
+            if "models.json" in names:
+                try:
+                    models_data = json.loads(zf.read("models.json"))
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    return _bad(f"models.json 解析失败: {e}")
+                if not isinstance(models_data, list):
+                    return _bad("models.json 必须是 JSON 数组")
+                for i, md in enumerate(models_data):
+                    if not isinstance(md, dict):
+                        return _bad(f"models.json[{i}] 必须是对象")
+                    for field in ("name", "upstream_base", "upstream_model"):
+                        if not md.get(field):
+                            return _bad(f"models.json[{i}] 缺少必填字段 {field}")
+            keys_data = None
+            if "keys.json" in names:
+                try:
+                    keys_data = json.loads(zf.read("keys.json"))
+                except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                    return _bad(f"keys.json 解析失败: {e}")
+                if not isinstance(keys_data, list):
+                    return _bad("keys.json 必须是 JSON 数组")
+                skipped_keys = sum(1 for kd in keys_data if not (isinstance(kd, dict) and "key_value" in kd))
+                for i, kd in enumerate(keys_data):
+                    if not isinstance(kd, dict):
+                        return _bad(f"keys.json[{i}] 必须是对象")
+                    if "key_value" in kd and not kd.get("model_id"):
+                        return _bad(f"keys.json[{i}] 缺少必填字段 model_id")
+
+        from ..store.models import Model, create_model, list_models as lm, delete_model
+        from ..store.keys import ApiKey, create_key, list_keys as lk, delete_key
+
+        # ---- 校验通过：删后插，包进 store 事务 ----
+        async with ctx.store.transaction():
+            if models_data is not None:
                 existing = await lm(ctx.store)
                 for m in existing:
                     await delete_model(ctx.store, m.id)
@@ -90,11 +156,7 @@ def register_routes(app: web.Application, ctx) -> None:
                             upstream_path_override=md.get("upstream_path_override", ""),
                         ),
                     )
-            # Keys
-            if "keys.json" in zf.namelist():
-                keys_data = json.loads(zf.read("keys.json"))
-                from ..store.keys import ApiKey, create_key, list_keys as lk, delete_key
-
+            if keys_data is not None:
                 all_keys = await lk(ctx.store)
                 for k in all_keys:
                     await delete_key(ctx.store, k.id)
@@ -112,11 +174,10 @@ def register_routes(app: web.Application, ctx) -> None:
                             ),
                         )
         await notify_proxy_reload()
-        return web.json_response({"ok": True})
+        return web.json_response({"ok": True, "skipped_keys": skipped_keys})
 
     app.router.add_get("/api/export", export_config)
     app.router.add_post("/api/import", import_config)
-    app.router.add_get("/api/config", _config_info)
 
 
 def _model_dict(m) -> dict:
@@ -130,16 +191,3 @@ def _model_dict(m) -> dict:
         "enabled": m.enabled,
         "weight": m.weight,
     }
-
-
-async def _config_info(request):
-    ctx = request.app.get("ctx")
-    if ctx and ctx.config:
-        return web.json_response(
-            {
-                "proxy": {"host": ctx.config.server.proxy.host, "port": ctx.config.server.proxy.port},
-                "admin": {"host": ctx.config.server.admin.host, "port": ctx.config.server.admin.port},
-                "global_concurrent": ctx.config.limits.global_concurrent,
-            }
-        )
-    return web.json_response({"ok": True})

@@ -363,32 +363,38 @@ class DebugCapture:
         """Add ``entry`` under the size caps (oldest evicted first)."""
         size = len(json.dumps(entry.to_dict(), ensure_ascii=False))
         if self.config.max_entries > 0 and len(self._entries) >= self.config.max_entries:
-            self._evict_oldest()
+            self._evict_oldest(reason="size")
         if self.config.max_bytes > 0:
             while self._entries and self._bytes + size > self.config.max_bytes:
-                self._evict_oldest()
+                self._evict_oldest(reason="size")
         self._entries.append(entry)
         self._bytes += size
         self.stats.entries = len(self._entries)
         self.stats.bytes = self._bytes
 
-    def _evict_oldest(self) -> None:
-        """Drop the oldest entry and account for its size."""
+    def _evict_oldest(self, *, reason: str = "size") -> None:
+        """Drop the oldest entry and account for its size.
+
+        ``reason`` 决定计数桶：``"size"``（容量淘汰）计 ``dropped``，
+        ``"ttl"``（过期淘汰）计 ``expired`` —— 两者不重复计数。
+        """
         if not self._entries:
             return
         old = self._entries.popleft()
         self._bytes -= len(json.dumps(old.to_dict(), ensure_ascii=False))
         if self._bytes < 0:
             self._bytes = 0
-        self.stats.dropped += 1
+        if reason == "ttl":
+            self.stats.expired += 1
+        else:
+            self.stats.dropped += 1
 
     def _prune_expired(self, now: float) -> None:
         """Drop entries whose TTL has elapsed (called on write)."""
         if self.config.ttl_seconds <= 0:
             return
         while self._entries and now - self._entries[0].timestamp > self.config.ttl_seconds:
-            self._evict_oldest()
-            self.stats.expired += 1
+            self._evict_oldest(reason="ttl")
 
 
 # ---------------------------------------------------------------------------

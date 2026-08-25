@@ -13,11 +13,15 @@ from loguru import logger
 
 
 # Anthropic stop_reason -> OpenAI finish_reason
+# （与 translate_a2o.MAP_FINISH_REASON_O2A、stream_a2o.MAP_STOP_REASON_A2O 是
+# 同一张方向表的三个拷贝：改一处必须同步其余两处，注释互指防漂移。）
 MAP_STOP_REASON_A2O: dict[str, str] = {
     "end_turn": "stop",
     "max_tokens": "length",
     "tool_use": "tool_calls",
     "stop_sequence": "stop",
+    "refusal": "content_filter",
+    "pause_turn": "stop",
 }
 
 
@@ -288,6 +292,12 @@ def translate_request_o2a(body: dict, anthropic_version: str = "2023-06-01") -> 
         tc = _convert_tool_choice_o2a(body["tool_choice"])
         if tc is not None:
             out["tool_choice"] = tc
+        # tool_choice:"none" 表示禁用一切工具。Anthropic 无等价物，仅映射
+        # {type:auto} 的话上游仍看得到 tools 并可能发起调用 —— 与 none 语义
+        # 相悖。因此这里必须同时清空 tools（warning 日志见
+        # _convert_tool_choice_o2a）。
+        if isinstance(body["tool_choice"], str) and body["tool_choice"] == "none":
+            out["tools"] = []
 
     # Dropped fields with no Anthropic equivalent.
     dropped = []

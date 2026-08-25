@@ -351,7 +351,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
           <div class="card-header">
             <h2>Key 列表</h2>
             <div class="actions">
-              <input id="keySearch" type="text" placeholder="搜索标签/模型/Key/上游…" oninput="loadKeys()" style="margin-right:8px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-width:180px">
+              <input id="keySearch" type="text" placeholder="搜索标签/模型/Key/上游…" oninput="scheduleLoadKeys()" style="margin-right:8px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);min-width:180px">
               <button class="btn" onclick="testAllKeys()">测试全部</button>
               <button class="btn primary" onclick="showKeyModal()">+ 添加 Key</button>
               <button class="btn primary" onclick="showBatchImportModal()">批量导入</button>
@@ -473,11 +473,18 @@ function showLoading(show) {
   else { loading = Math.max(0, loading - 1); if (loading === 0) document.body.style.cursor = ""; }
 }
 
+function getCookie(name) {
+  const m = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
 async function api(path, opts = {}) {
   try {
     showLoading(true);
     const headers = {"Content-Type": "application/json"};
     if (authToken) headers["Authorization"] = "Bearer " + authToken;
+    const csrf = getCookie("zhongzhuan_csrf");
+    if (csrf) headers["X-CSRF-Token"] = csrf;
     const r = await fetch(API + path, {headers, ...opts});
     showLoading(false);
     if (r.status === 401) {
@@ -1107,8 +1114,17 @@ async function saveModel(id) {
 }
 
 // ---- Key 池 ----
+// 搜索输入防抖 + 递增序号丢弃过期响应（快速输入时旧响应不覆盖新结果）。
+let _keySearchTimer = null;
+let _loadKeysSeq = 0;
+function scheduleLoadKeys() {
+  clearTimeout(_keySearchTimer);
+  _keySearchTimer = setTimeout(loadKeys, 200);
+}
 async function loadKeys() {
+  const seq = ++_loadKeysSeq;
   const [dk, dm] = await Promise.all([api("/api/keys"), api("/api/models")]);
+  if (seq !== _loadKeysSeq) return; // 已有更新的请求，丢弃本次过期响应
   if (!dk && !dm) return;
   keys = dk?.data || [];
   models = dm?.data || [];
@@ -1328,7 +1344,7 @@ async function loadGroups() {
     : groups.map(g => `
       <tr class="group-row"><td><strong class="truncate" title="${esc(g.name)}">${esc(g.name)}</strong></td><td><code>${esc(g.strategy)}</code></td>
       <td><span class="truncate" title="${(g.members||[]).map(x => esc(modelMap[x.model_id] || ("model#"+x.model_id)) + '(w'+(x.weight||1)+',o'+(x.ord||0)+')' + ((x.bad_keys||[]).length ? ' [失效 '+x.bad_keys.length+' key]' : '')).join(', ')}">${(g.members||[]).map(x => {
-        const bad = x.bad_keys && x.bad_keys.length ? '<span style="color:#c62828" title="失效 key: '+x.bad_keys.join(',')+'">⚠</span>' : '';
+        const bad = x.bad_keys && x.bad_keys.length ? '<span style="color:#c62828" title="失效 key: '+esc(x.bad_keys.join(','))+'">⚠</span>' : '';
         return esc(modelMap[x.model_id] || ("model#"+x.model_id)) + bad + '<span style="color:var(--text-subtle);font-size:11px">(w'+(x.weight||1)+',o'+(x.ord||0)+')</span>';
       }).join(", ") || '<span style="color:var(--text-subtle)">无</span>'}</span></td>
       <td><button class="btn small" onclick="testGroup(${g.id}, '${esc(g.name)}')">测试</button> <button class="btn small" onclick="editGroup(${g.id})">编辑</button> <button class="btn small danger" onclick="delGroup(${g.id})">删除</button></td></tr>`).join("");
@@ -1704,7 +1720,7 @@ function editToken(id) {
     <div class="form-group"><label>标签</label><input id="e_tlabel"></div>
     <div class="form-row">
       <div class="form-group"><label>Token 配额</label><input id="e_quota" type="number" value="-1"><div class="form-hint">-1 = 无限</div></div>
-      <div class="form-group"><label>有效期 (天,从现在起)</label><input id="e_expires" type="number" value="0"><div class="form-hint">0 = 永久/不变</div></div>
+      <div class="form-group"><label>有效期 (天,从现在起)</label><input id="e_expires" type="number" placeholder="不修改"><div class="form-hint">留空 = 保持当前有效期不变</div></div>
     </div>
     <div class="form-group"><label>模型白名单</label><input id="e_whitelist" placeholder="留空 = 允许全部"></div>
     <div class="modal-actions"><button class="btn" onclick="closeModal()">取消</button><button class="btn primary" onclick="saveEditToken(${id})">保存</button></div>`;
@@ -1724,9 +1740,11 @@ async function saveEditToken(id) {
   const body = {
     label: document.getElementById("e_tlabel").value,
     quota_tokens: parseInt(document.getElementById("e_quota").value)||-1,
-    expires_days: parseInt(document.getElementById("e_expires").value)||0,
     model_whitelist: document.getElementById("e_whitelist").value.trim(),
   };
+  // 有效期留空 = 不修改（不送 expires_days，后端字段缺省即不动）。
+  const expRaw = (document.getElementById("e_expires").value || "").trim();
+  if (expRaw !== "" && !isNaN(parseInt(expRaw))) body.expires_days = parseInt(expRaw);
   const r = await api("/api/tokens/" + id, {method:"PUT", body:JSON.stringify(body)});
   if (r !== null) { closeModal(); loadTokens(); }
 }
@@ -1874,15 +1892,18 @@ async function loadSvcStatus() {
     if (s.status === "running") {
       badge.className = "status-pill running"; badge.innerHTML = '<span class="dot"></span>运行中';
       btn.textContent = s.control_supported === false ? "当前进程" : "停止";
+      btn.dataset.action = s.control_supported === false ? "" : "stop";
       btn.disabled = s.control_supported === false;
       side.innerHTML = '<span class="health-dot good"></span><span style="color:var(--success)">服务运行中</span>';
     } else if (s.status === "stopped") {
       badge.className = "status-pill stopped"; badge.innerHTML = '<span class="dot"></span>已停止';
       btn.textContent = "启动";
+      btn.dataset.action = "start";
       side.innerHTML = '<span class="health-dot bad"></span><span style="color:var(--danger)">服务已停止</span>';
     } else {
       badge.className = "status-pill"; badge.innerHTML = '<span class="dot"></span>' + s.status;
       btn.textContent = "安装服务";
+      btn.dataset.action = "install";
       side.innerHTML = '<span class="health-dot warn"></span><span style="color:var(--text-muted)">' + s.status + '</span>';
     }
   } catch(e) {}
@@ -1890,9 +1911,12 @@ async function loadSvcStatus() {
 
 async function svcToggle() {
   const btn = document.getElementById("svcBtn");
-  if (btn.textContent === "启动") await api("/api/service/start", {method:"POST"});
-  else if (btn.textContent === "停止") await api("/api/service/stop", {method:"POST"});
-  else if (btn.textContent === "安装服务") await api("/api/service/install", {method:"POST"});
+  // 动作由 data-action 属性驱动（不依赖按钮文案），服务操作需显式 confirm。
+  const opts = {method:"POST", body:JSON.stringify({confirm:true})};
+  const action = btn.dataset.action || "";
+  if (action === "start") await api("/api/service/start", opts);
+  else if (action === "stop") await api("/api/service/stop", opts);
+  else if (action === "install") await api("/api/service/install", opts);
   setTimeout(loadSvcStatus, 1000);
 }
 
@@ -1915,10 +1939,14 @@ function importConfig() {
   input.type = "file"; input.accept = ".zip";
   input.onchange = async () => {
     try {
-      const headers = {};
+      const headers = {"X-CSRF-Token": getCookie("zhongzhuan_csrf")};
       if (authToken) headers["Authorization"] = "Bearer " + authToken;
       const r = await fetch(API + "/api/import", {method:"POST", body: input.files[0], headers});
-      if (!r.ok) throw new Error(r.statusText);
+      if (!r.ok) {
+        let msg = r.statusText;
+        try { msg = (await r.json()).error?.message || msg; } catch(e) {}
+        throw new Error(msg);
+      }
       loadModels(); loadKeys(); loadGroups();
       alert("导入成功");
     } catch(e) { console.error("导入失败", e); alert("导入失败: " + e.message); }
@@ -1998,7 +2026,13 @@ window.addEventListener("resize", () => {
 });
 
 checkAuth();
-setInterval(loadOverview, 30000);
+// 定时刷新仪表盘：页面不可见或不在 dashboard tab 时不拉取，省流量省后端。
+setInterval(() => {
+  if (document.visibilityState !== "visible") return;
+  const tab = document.getElementById("tab-dashboard");
+  if (!tab || !tab.classList.contains("active")) return;
+  loadOverview();
+}, 30000);
 </script>
 </body>
 </html>"""

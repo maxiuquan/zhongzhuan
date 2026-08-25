@@ -15,6 +15,8 @@ import json
 import time
 from typing import Any
 
+from loguru import logger
+
 from .responses_bridge import ResponsesTurnBridge
 from .responses_models import HOSTED_TOOL_CAPABILITY, Capability, NAMESPACE_TOOL_TYPE, ReasoningEventMode
 from .tool_accumulator import split_namespace_name
@@ -67,6 +69,10 @@ def normalize_responses_input(input_val: Any) -> list | None:
     return None
 
 
+#: 因无法合法表达而被丢弃的 input_image part 计数（file_id-only 形态）。
+_DROPPED_INPUT_IMAGE_PARTS: dict[str, int] = {"file_id_only": 0}
+
+
 def _convert_content_block(c: Any) -> Any:
     if not isinstance(c, dict):
         return c
@@ -74,7 +80,19 @@ def _convert_content_block(c: Any) -> Any:
     if t in (ITEM_INPUT_TEXT, ITEM_OUTPUT_TEXT):
         return {"type": BLOCK_TEXT, "text": c.get("text", "")}
     if t == ITEM_INPUT_IMAGE:
-        url = c.get("image_url") or c.get("file_id") or ""
+        url = c.get("image_url")
+        if not url:
+            # file_id-only 的 input_image：把 file_id 塞进 image_url.url 会产出
+            # 非法 URL（"file-xxx" 不是 http/data URL），严格上游直接 400。
+            # Chat Completions 无 file_id 引用语义 —— 跳过该 part 并计数告警，
+            # 绝不产出非法 URL。
+            _DROPPED_INPUT_IMAGE_PARTS["file_id_only"] += 1
+            logger.warning(
+                "convert_responses_request: dropped input_image part with only "
+                "file_id (no legal Chat Completions representation); dropped={} ",
+                _DROPPED_INPUT_IMAGE_PARTS["file_id_only"],
+            )
+            return None
         return {"type": BLOCK_IMAGE_URL, "image_url": {"url": url, "detail": c.get("detail", "auto")}}
     return c
 
@@ -247,7 +265,9 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
                 pending_tool_results = []
             content = item.get("content")
             if isinstance(content, list):
-                content = [_convert_content_block(c) for c in content]
+                converted = [_convert_content_block(c) for c in content]
+                # 过滤被丢弃的 part（如 file_id-only 的 input_image）。
+                content = [b for b in converted if b is not None]
             # Chat Completions has no `developer` role -- only `system`.  Remap
             # it so strict non-OpenAI upstreams don't reject the request with a
             # 400.  This covers BOTH the current turn AND replayed transcript
@@ -256,7 +276,8 @@ def convert_responses_request_to_chatcompletions(body: dict) -> dict:
             # role: "developer" verbatim from the native Responses store.
             # The OpenAI-native Responses path (gpt-5.6-sol) is unaffected: it
             # never enters this translator and keeps developer as-is.
-            role = ROLE_SYSTEM if item["role"] == "developer" else item["role"]
+            role = item.get("role", "")
+            role = ROLE_SYSTEM if role == "developer" else role
             result["messages"].append({"role": role, "content": content})
 
         elif item_type == ITEM_FUNCTION_CALL:
@@ -475,7 +496,9 @@ class ResponsesStreamTranslator:
 
     §2.10 门面 + 组合：委托 :class:`~.responses_bridge.ResponsesTurnBridge`。
     对外契约不变：``ResponsesStreamTranslator(model="")``、
-    ``await feed(chunk) -> list[bytes]``、``done``、``finish_safely()``、``usage``。
+    ``await feed(chunk) -> list[bytes]``、``done()``（方法调用语义，见
+    :mod:`.translator_base` 的 ``StreamTranslator`` 协议）、``finish_safely()``、
+    ``usage``。
     """
 
     def __init__(
@@ -491,9 +514,9 @@ class ResponsesStreamTranslator:
         )
         self.usage: dict = self._bridge.usage
 
-    @property
     def done(self) -> bool:
-        return self._bridge.done
+        """流是否已结束。统一方法调用语义：必须 ``tr.done()`` 显式调用。"""
+        return self._bridge.done()
 
     def finish_safely(self) -> list[bytes]:
         return self._bridge.finish_safely()
@@ -510,16 +533,19 @@ class ResponsesStreamTranslator:
 class CompositeStreamTranslator:
     """把上游翻译器输出管道进下游（如 Anthropic SSE -> OpenAI SSE -> Responses SSE）。
 
-    接口与其他流翻译器一致：``feed``（async）、``done``、``finish_safely``、``usage``。
+    接口与其他流翻译器一致：``feed``（async）、``done()``（方法调用语义）、
+    ``finish_safely``、``usage``。
     """
 
     def __init__(self, first, second) -> None:
         self.first = first
         self.second = second
 
-    @property
     def done(self) -> bool:
-        return self.first.done and self.second.done
+        # 统一方法调用语义：显式调用 done()。旧实现用属性访问
+        # （``self.first.done and ...``），当 first 是 StreamA2O/StreamO2A 时
+        # 拿到的是恒真的 bound method —— 复合翻译器的"已结束"永远为真。
+        return bool(self.first.done()) and bool(self.second.done())
 
     @property
     def usage(self) -> dict:

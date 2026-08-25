@@ -58,7 +58,8 @@ class ResponsesTurnBridge:
     Drives a single Chat Completions SSE stream and translates it into
     Responses SSE.  Implements the same interface as the other stream
     translators used by the proxy: ``await feed(chunk) -> list[bytes]``,
-    ``done`` (property), ``finish_safely()``, ``afinish()`` and ``usage``.
+    ``done()`` (method-call semantics), ``finish_safely()`` / ``afinish()``
+    and ``usage``.
 
     Args:
         model: The upstream model name, echoed on the Responses response.
@@ -102,8 +103,8 @@ class ResponsesTurnBridge:
     # Interface (legacy translator contract)
     # ------------------------------------------------------------------
 
-    @property
     def done(self) -> bool:
+        """流是否已结束。统一方法调用语义（StreamTranslator 协议）：``done()``。"""
         return self._finished
 
     def finish_safely(self) -> list[bytes]:
@@ -181,9 +182,15 @@ class ResponsesTurnBridge:
                 frames.extend(self._handle_tool_call(tc))
 
         # -- finish reason ----------------------------------------------
-        if choice.get("finish_reason"):
-            frames.extend(self._close_all())
-            frames.extend(self._emit_completed())
+        finish_reason = choice.get("finish_reason")
+        if finish_reason:
+            # status:"completed" 只用于正常完成（stop / tool_calls）。
+            # "length" 是截断而非成功：终态 response 对象与 output_item.done
+            # 都必须用 incomplete + incomplete_details.reason="max_output_tokens"，
+            # 否则客户端把被截断的回合当成完整成功（铁律：不漂白失败语义）。
+            truncated = finish_reason == "length"
+            frames.extend(self._close_all(item_status="incomplete" if truncated else "completed"))
+            frames.extend(self._emit_terminal(finish_reason))
         return frames
 
     # -- content ---------------------------------------------------------
@@ -250,7 +257,7 @@ class ResponsesTurnBridge:
             },
         )
 
-    def _close_message(self, msg) -> list[bytes]:
+    def _close_message(self, msg, *, status: str = "completed") -> list[bytes]:
         if self._msg_done.get(msg.output_index):
             return []
         self._msg_done[msg.output_index] = True
@@ -295,7 +302,7 @@ class ResponsesTurnBridge:
                 ]
             },
         )
-        frames.extend(self._emitter.close_item(item, status="completed"))
+        frames.extend(self._emitter.close_item(item, status=status))
         return frames
 
     def _close_current_message(self) -> list[bytes]:
@@ -356,7 +363,7 @@ class ResponsesTurnBridge:
             },
         )
 
-    def _close_reasoning(self) -> list[bytes]:
+    def _close_reasoning(self, *, status: str = "completed") -> list[bytes]:
         if not self._reasoning_enabled():
             return []
         rea = self._acc.reasoning
@@ -394,7 +401,7 @@ class ResponsesTurnBridge:
             item_type=ItemType.REASONING,
             extra={"summary": [{"type": "summary_text", "text": rea.text}]},
         )
-        frames.extend(self._emitter.close_item(item, status="completed"))
+        frames.extend(self._emitter.close_item(item, status=status))
         return frames
 
     # -- tool calls -------------------------------------------------------
@@ -403,7 +410,9 @@ class ResponsesTurnBridge:
         frames: list[bytes] = []
         tc_idx = tc.get("index", 0) or 0
         new_call_id = tc.get("id")
-        func_name = tc.get("function", {}).get("name")
+        # function 可能为 null（部分上游在非 function delta 里显式置 null），
+        # 用 ``or {}`` 兜底避免 AttributeError。
+        func_name = (tc.get("function") or {}).get("name")
 
         acc = self._acc.tools.get(call_id=new_call_id or "", source_index=tc_idx)
         if acc is None:
@@ -428,7 +437,7 @@ class ResponsesTurnBridge:
             if new_call_id:
                 acc.bind_call_id(new_call_id)
 
-        args = tc.get("function", {}).get("arguments")
+        args = (tc.get("function") or {}).get("arguments")
         if args:
             acc.append_arguments(args)
             frames.extend(self._emit_tool_args_delta(acc, args))
@@ -473,7 +482,7 @@ class ResponsesTurnBridge:
             },
         )
 
-    def _close_tool_call(self, acc) -> list[bytes]:
+    def _close_tool_call(self, acc, *, status: str = "completed") -> list[bytes]:
         if self._tool_done.get(acc.output_index):
             return []
         item_id = self._tool_item_id(acc)
@@ -482,7 +491,7 @@ class ResponsesTurnBridge:
         # 铁律 2: never emit a runnable function call for truncated / invalid
         # arguments.  Only a call whose arguments parse AND whose top level is a
         # JSON object may emit ``function_call_arguments.done`` + be closed as
-        # ``completed``.  Anything else (empty / truncated / non-object) is left
+        # completed.  Anything else (empty / truncated / non-object) is left
         # incomplete: the client must never JSON.parse a partial fragment and
         # execute it as ``{}``.
         if acc.validate_arguments(require_object=True):
@@ -507,7 +516,7 @@ class ResponsesTurnBridge:
                         name=acc.name,
                         extra={"arguments": acc.arguments, **({"namespace": acc.namespace} if acc.namespace else {})},
                     ),
-                    status="completed",
+                    status=status,
                 )
             )
         else:
@@ -532,14 +541,28 @@ class ResponsesTurnBridge:
 
     # -- close / terminal -------------------------------------------------
 
-    def _close_all(self) -> list[bytes]:
+    def _close_all(self, *, item_status: str = "completed") -> list[bytes]:
         frames: list[bytes] = []
         for msg in self._acc.messages:
-            frames.extend(self._close_message(msg))
-        frames.extend(self._close_reasoning())
+            frames.extend(self._close_message(msg, status=item_status))
+        frames.extend(self._close_reasoning(status=item_status))
         for acc in self._acc.tools.list_all():
-            frames.extend(self._close_tool_call(acc))
+            frames.extend(self._close_tool_call(acc, status=item_status))
         return frames
+
+    def _emit_terminal(self, finish_reason: str) -> list[bytes]:
+        """Emit the terminal response event matching the upstream finish_reason.
+
+        ``length`` maps to the official incomplete semantics
+        (``response.incomplete`` + ``incomplete_details.reason="max_output_tokens"``);
+        every other finish_reason is a normal completion.
+        """
+        if finish_reason == "length":
+            return self._emitter.terminate(
+                ResponseStatus.INCOMPLETE,
+                incomplete_details={"reason": "max_output_tokens"},
+            )
+        return self._emitter.terminate(ResponseStatus.COMPLETED)
 
     def _emit_completed(self) -> list[bytes]:
         return self._emitter.terminate(ResponseStatus.COMPLETED)

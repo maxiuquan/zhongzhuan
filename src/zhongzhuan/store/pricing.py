@@ -72,12 +72,15 @@ async def list_pricing(s: Store) -> list[ModelPricing]:
 async def upsert_pricing(s: Store, p: ModelPricing) -> None:
     """插入或更新模型定价。"""
     now = Store.now()
-    # 跨数据库兼容：先 DELETE 再 INSERT
-    await s.execute("DELETE FROM model_pricing WHERE model_name=?", (p.model_name,))
-    await s.execute(
-        "INSERT INTO model_pricing(model_name, input_price_per_1k, output_price_per_1k, currency, updated_at) VALUES(?,?,?,?,?)",
-        (p.model_name, p.input_price_per_1k, p.output_price_per_1k, p.currency, now),
-    )
+    # 跨数据库兼容：先 DELETE 再 INSERT（避免方言相关的 UPSERT 语法差异）。
+    # 两段写包进同一个事务：DELETE 得手后 INSERT 失败会把一条已有定价直接删没，
+    # 成本估算会静默按 0 计；回滚保证「要么旧价、要么新价」。
+    async with s.transaction():
+        await s.execute("DELETE FROM model_pricing WHERE model_name=?", (p.model_name,))
+        await s.execute(
+            "INSERT INTO model_pricing(model_name, input_price_per_1k, output_price_per_1k, currency, updated_at) VALUES(?,?,?,?,?)",
+            (p.model_name, p.input_price_per_1k, p.output_price_per_1k, p.currency, now),
+        )
 
 
 async def delete_pricing(s: Store, model_name: str) -> None:

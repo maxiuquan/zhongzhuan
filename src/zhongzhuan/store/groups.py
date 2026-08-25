@@ -92,12 +92,20 @@ async def update_group(s: Store, group_id: int, g: GroupData) -> None:
 
 
 async def set_group_members(s: Store, group_id: int, members: list[GroupMemberData]) -> None:
-    await s.execute("DELETE FROM group_models WHERE group_id=?", (group_id,))
-    for m in members:
-        await s.execute(
-            "INSERT INTO group_models(group_id, model_id, weight, ord) VALUES(?,?,?,?)",
-            (group_id, m.model_id, m.weight, m.ord),
-        )
+    """整体重写一个分组的成员表（先 DELETE 再逐条 INSERT）。
+
+    两段写必须包在同一个 ``transaction()`` 里：DELETE 成功后若某条 INSERT 失败
+    （连接断开、约束冲突），没有事务就意味着分组被清空且新成员只进去一半 ——
+    调度器会把这个「半空分组」当成真实配置继续用。回滚保证成员表要么是旧集，
+    要么是新集，不存在中间态。
+    """
+    async with s.transaction():
+        await s.execute("DELETE FROM group_models WHERE group_id=?", (group_id,))
+        for m in members:
+            await s.execute(
+                "INSERT INTO group_models(group_id, model_id, weight, ord) VALUES(?,?,?,?)",
+                (group_id, m.model_id, m.weight, m.ord),
+            )
 
 
 async def delete_group(s: Store, group_id: int) -> None:

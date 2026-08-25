@@ -22,6 +22,7 @@ import re
 import time
 from typing import Any
 
+from ..proxy.protocol.responses_errors import _REDACTION_PATTERNS as _SECRET_REDACTION_PATTERNS
 from ..proxy.protocol.responses_errors import redact
 
 #: 健康响应体的最大字段值长度（防注入 / 防拖库）。
@@ -43,10 +44,11 @@ MIGRATION_TABLE = "schema_migrations"
 async def migration_status(store: Any | None) -> tuple[bool, str]:
     """返回 ``(完成?, 详情)``：``schema_migrations`` 最高版本 == 注册表最大版本。
 
-    ``store`` 为 ``None``（proxy 无存储）时视为未就绪。
+    ``store`` 为 ``None``（轻量模式：proxy 无存储）时视为
+    ``not_applicable`` —— 返回 ``(True, ...)``，不阻断 readiness。
     """
     if store is None:
-        return False, "store unavailable"
+        return True, "not_applicable (storeless lightweight mode)"
     try:
         rows = await store.fetchall(f"SELECT version FROM {MIGRATION_TABLE}")
     except Exception as exc:  # noqa: BLE001 - 健康检查绝不允许抛给调用方
@@ -111,18 +113,20 @@ def find_leaks(text: str) -> list[str]:
 
     R-P2-08 判据②：公开健康响应体正则断言无 URL / 密钥模式。测试用这个函数
     断言 ``find_leaks(rendered_body) == []``。
+
+    密钥模式直接复用 :mod:`zhongzhuan.proxy.protocol.responses_errors` 的
+    ``_REDACTION_PATTERNS``（与 :func:`redact` / :func:`sanitize_health_text`
+    同一事实源）：脱敏表每新增一个家族，泄露探测自动跟进，不再各自维护
+    两份正则。
     """
     found: list[str] = []
     for m in _URL_PATTERN.finditer(text):
         found.append(f"url:{m.group(0)[:40]}")
     for m in re.finditer(r"\bsk-[A-Za-z0-9_\-]{6,}", text):
         found.append(f"key:{m.group(0)[:40]}")
-    for m in re.finditer(
-        r"(?i)(\"?(?:api[_-]?key|access[_-]?token|secret[_-]?key|client[_-]?secret)\"?"
-        r"\s*[:=]\s*)(?:\"|')?[A-Za-z0-9_\-.~+/=]{6,}",
-        text,
-    ):
-        found.append("secret:" + m.group(0)[:40])
+    for pattern, _replacement in _SECRET_REDACTION_PATTERNS:
+        for m in pattern.finditer(text):
+            found.append("secret:" + m.group(0)[:40])
     return found
 
 
@@ -165,8 +169,12 @@ def build_readiness(
 def build_dependency_status(
     dependencies: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """dependency status：逐项状态。每项 ``{"name", "status", "detail"}``。"""
-    all_ok = all(d.get("status") == "ok" for d in dependencies)
+    """dependency status：逐项状态。每项 ``{"name", "status", "detail"}``。
+
+    ``optional_unavailable``（可选依赖缺失）不算不健康 —— 只有必选依赖
+    （``down``）才把整体判为 ``degraded``。
+    """
+    all_ok = all(d.get("status") in ("ok", "optional_unavailable") for d in dependencies)
     return {
         "status": "ok" if all_ok else "degraded",
         "dependencies": dependencies,

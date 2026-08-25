@@ -13,12 +13,16 @@ from loguru import logger
 
 
 # OpenAI finish_reason -> Anthropic stop_reason
+# （与 translate_o2a.MAP_STOP_REASON_A2O、stream_o2a.MAP_FINISH_REASON_O2A 是
+# 同一张方向表的三个拷贝：改一处必须同步其余两处，注释互指防漂移。）
 MAP_FINISH_REASON_O2A: dict[str, str] = {
     "stop": "end_turn",
     "length": "max_tokens",
     "tool_calls": "tool_use",
     "content_filter": "end_turn",
     "function_call": "tool_use",
+    "refusal": "end_turn",
+    "pause_turn": "end_turn",
 }
 
 
@@ -36,7 +40,9 @@ def _system_to_text(system: Any) -> str:
                     parts.append(str(block["text"]))
                 elif "text" in block:
                     parts.append(str(block["text"]))
-        return "".join(parts)
+        # 多个 system 块用换行连接："".join 会把相邻块粘连成单词/句子边界
+        # 损坏的文本（如 "sys1sys2"），"\n".join 保留块边界语义。
+        return "\n".join(parts)
     return str(system)
 
 
@@ -117,6 +123,16 @@ def _convert_tool_results_a2o(blocks: list[dict]) -> list[dict]:
                 content = "".join(parts)
             elif not isinstance(content, str):
                 content = json.dumps(content, ensure_ascii=False) if content is not None else ""
+            # is_error:true 的工具结果是失败而非成功输出：加 "Error: " 前缀
+            # 约定（原文本保留），让上游模型能区分工具失败与正常返回，避免把
+            # 报错内容当成有效结果继续推理。
+            if block.get("is_error"):
+                text = content or ""
+                if text and not text.startswith("Error: "):
+                    text = "Error: " + text
+                elif not text:
+                    text = "Error: (tool reported failure without detail)"
+                content = text
             out.append(
                 {
                     "role": "tool",
@@ -300,7 +316,31 @@ def translate_response_o2a(resp: dict, model: str = "") -> dict:
 
     content: list[dict] = []
     msg_content = message.get("content")
-    if msg_content:
+    if isinstance(msg_content, str):
+        if msg_content:
+            content.append({"type": "text", "text": msg_content})
+    elif isinstance(msg_content, list):
+        # 多模态 part 列表：按 part.type 拼接 text 部分。直接 str() 整个列表
+        # 会产出 Python repr（"{'type': 'text', ...}"），污染下游文本。
+        text_parts: list[str] = []
+        skipped_parts = 0
+        for part in msg_content:
+            if isinstance(part, dict) and part.get("type") in ("text", "input_text", "output_text"):
+                t = part.get("text")
+                if isinstance(t, str) and t:
+                    text_parts.append(t)
+            else:
+                skipped_parts += 1
+        if skipped_parts:
+            logger.debug(
+                "translate_response_o2a: skipped {} non-text content part(s) "
+                "(images etc. have no Chat Completions string representation)",
+                skipped_parts,
+            )
+        joined = "".join(text_parts)
+        if joined:
+            content.append({"type": "text", "text": joined})
+    elif msg_content:
         content.append({"type": "text", "text": str(msg_content)})
 
     for tc in message.get("tool_calls") or []:

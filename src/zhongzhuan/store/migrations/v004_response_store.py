@@ -44,6 +44,24 @@ Design rules (T19 alignment with authoritative DDL §4.2 / B2 decision):
   item_registry before insertion (R-P0-14 / R-P1-29 / R-P1-40).
 * ``payload`` is stored as JSON text (SQLite-compatible) so both the SQLite
   and TiDB backends can share one schema.
+
+为什么 ``*_baseline_sql`` 不是 ``SQLITE_TABLES`` / ``MYSQL_TABLES`` 的原样副本
+----------------------------------------------------------------------------
+（本文件头注释为 2026-08 修复而加，改动只触及 baseline 语句集。）
+
+引擎的 ``Migration.digest()`` **只哈希正常语句集**（``sqlite_sql`` /
+``mysql_sql``），不含 baseline 语句集 —— 因此编辑 baseline 不触发已发布迁移的
+digest 漂移告警，这是本次修改合规的前提（实读
+``migration_engine.Migration.digest`` 后确认）。
+
+baseline 模式只在「probe 表（responses）已存在、但版本表缺失」的库上触发，
+即一张**列集未知的历史形表**：B2 改名前的旧形态没有 ``workspace_id`` 列。
+原样复用正常语句集会让 baseline 在这类库上执行
+``CREATE INDEX ... (workspace_id, ...)`` 而撞上 ``no such column`` —— 该错误不
+在引擎白名单内，服务直接拒启动。修复：从 baseline 语句集中摘除全部 7 条引用
+``workspace_id`` 的 ``*_ws`` 索引（SQLite / MySQL 各 7 条）；它们由 v007 无条件
+补建（v007 的补索引清单包含全部 15 条，且在健康库上是幂等 no-op）。带
+``IF NOT EXISTS`` 的建表语句保留 —— 对已存在的表是静默 no-op。
 """
 
 from __future__ import annotations
@@ -287,12 +305,33 @@ MYSQL_TABLES: tuple[str, ...] = (
 )
 
 
+#: 引用 ``workspace_id`` 的 ``*_ws`` 索引名 —— 唯一在 baseline 模式下有
+#: ``no such column`` 风险的语句族（见文件头「为什么 ``*_baseline_sql`` 不是
+#: 原样副本」一节）。v007 会无条件补建它们。
+_WS_INDEX_NAMES: tuple[str, ...] = (
+    "idx_responses_ws",
+    "idx_resp_input_ws",
+    "idx_resp_output_ws",
+    "idx_resp_events_ws",
+    "idx_state_chain_ws",
+    "idx_bt_ws",
+    "idx_te_ws",
+)
+
+
+def _without_ws_indexes(statements: tuple[str, ...]) -> tuple[str, ...]:
+    """摘除 *statements* 中的 ``*_ws`` 索引（仅用于 baseline 语句集）。"""
+    return tuple(s for s in statements if not any(name in s for name in _WS_INDEX_NAMES))
+
+
 MIGRATION = Migration(
     version=4,
     name="response_store",
     sqlite_sql=SQLITE_TABLES,
     mysql_sql=MYSQL_TABLES,
-    sqlite_baseline_sql=SQLITE_TABLES,
-    mysql_baseline_sql=MYSQL_TABLES,
+    # baseline 模式：建表保留（IF NOT EXISTS 幂等 no-op），摘除 *_ws 索引，
+    # 留给 v007 补建。digest 只覆盖上面两个正常语句集，此改动不触发漂移告警。
+    sqlite_baseline_sql=_without_ws_indexes(SQLITE_TABLES),
+    mysql_baseline_sql=_without_ws_indexes(MYSQL_TABLES),
     baseline_probe="responses",
 )

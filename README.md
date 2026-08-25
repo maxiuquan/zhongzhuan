@@ -71,7 +71,7 @@ zhongzhuan --help
 | `build` | `pyinstaller` | 打包单文件 exe |
 | `mcp` | `mcp` | Remote MCP hosted tool（v3 Phase 2） |
 | `metrics` | `prometheus-client`、`opentelemetry-sdk`、otlp exporter | `/metrics` 与链路追踪 |
-| `test` | `pytest`、`pytest-asyncio`、`pytest-cov`、`hypothesis`、`respx` | 跑测试 |
+| `test` | `pytest`、`pytest-asyncio`、`pytest-cov`、`hypothesis` | 跑测试 |
 | `lint` | `ruff`、`mypy`、`bandit`、`pip-audit` | 静态检查与依赖扫描 |
 | `dev` | 以上除 `build` 外的合集 | 本地开发一把梭 |
 
@@ -226,8 +226,8 @@ pip install -e ".[dev]"
 ### 6.1 跑测试
 
 ```bash
-# 完整套件（跳过需要真实网络的用例）
-pytest -q --ignore=tests/test_real_e2e.py --ignore=tests/test_real_agnes.py
+# 完整套件（pyproject 的 addopts 已默认排除 live / soak）
+pytest -q
 
 # 只跑旧协议 golden 基线回归
 pytest -q tests/test_legacy_golden.py
@@ -250,8 +250,9 @@ pip-audit
 这些脚本会发起真实网络请求，**不属于测试套件**，需要手工执行：
 
 ```bash
-python scripts/live_check.py --base-url http://127.0.0.1:8088 --model your-model
-python tests/seed_admin_api.py          # 需先设置 AGNES_API_KEY 环境变量
+python scripts/manual_check_e2e.py      # 端到端：内存库 + 代理全链路（需 AGNES_API_KEY）
+python scripts/manual_check_agnes.py    # 直连 vs 经代理对比（需 AGNES_API_KEY）
+python tests/seed_admin_api.py          # 管理后台种子数据
 ```
 
 ### 6.4 目录结构

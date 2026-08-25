@@ -382,9 +382,15 @@ class CapabilityRouter:
         required_effective = required - self._forwarded
         available = [k for k in candidates if _available(self._registry, k)]
 
-        # -- 0. 配置强制原生：R-P1-44「原生模式不得先降级为 Chat Completions」--
+        # -- 0. 配置强制模式 -----------------------------------------------
+        # NATIVE：R-P1-44「原生模式不得先降级为 Chat Completions」。
+        # TRANSLATE（v3.2 整改）：配置显式声明 ``upstream_mode: translate`` 时
+        # 同样必须被尊重——此前只认 NATIVE，强转翻译的部署仍会被逐 key 的
+        # NATIVE 声明劫持成直通，配置等于虚设。
         if self._forced_mode is ExecutionMode.NATIVE:
             return self._forced_native(req, required, required_effective, candidates, available)
+        if self._forced_mode is ExecutionMode.TRANSLATE:
+            return self._forced_translate(req, required, candidates, available)
 
         # -- 1. NATIVE：上游自己声明了全部所需能力 --
         native = self._pick_native(required_effective, available)
@@ -461,6 +467,30 @@ class CapabilityRouter:
             granted=required & (declared | self._emulated | self._forwarded),
             gaps=self._gaps_for(req, missing, REASON_NO_UPSTREAM),
             reason="upstream_mode=responses_native (passthrough forced)",
+        )
+
+    def _forced_translate(
+        self,
+        req: SanitizedRequest,
+        required: frozenset[Capability],
+        candidates: Sequence[KeyHealth],
+        available: Sequence[KeyHealth],
+    ) -> RouteDecision | CapabilityError:
+        """``upstream_mode: translate`` 下的强制等价降级。
+
+        配置层已经裁定「这个部署只做翻译」：不再挑选 NATIVE 声明的 key，全部
+        请求按上游协议走 chat/completions 或 messages。没有可用 key 时与强制
+        原生同款语义——503（暂时性故障），而不是静默换判定。
+        """
+        if not available:
+            return self._failure(req, required, candidates)
+        key = available[0]
+        return RouteDecision(
+            mode=ExecutionMode.TRANSLATE,
+            key=key,
+            upstream_path=_translate_path(key),
+            granted=required & (self._forwarded | self._emulated),
+            reason="upstream_mode=translate (translation forced)",
         )
 
     def _pick_native(

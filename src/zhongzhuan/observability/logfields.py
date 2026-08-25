@@ -26,6 +26,7 @@ Two responsibilities, both mandated by §11.2 of the architecture document:
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
@@ -111,6 +112,12 @@ _REASONING_KEY_PATTERN = re.compile(
 #: the complete reasoning text must never be written).
 _REASONING_DISCOURSE = re.compile(r"(?i)\breason(?:ing|ed|s|es|able)?\b")
 
+#: 第二层启发式的适用键白名单：只有**自由文本类**字段的值才可能被塞进推理
+#: 正文，整段折叠只对这些键生效。标识 / 名称类键（model、request_id 等）
+#: 豁免 —— 模型名（如 ``gpt-5.2-reasoning``）天然携带 reasoning 词根，
+#: 折叠它们等于把字段整个抹掉。
+_LAYER2_FIELD_PATTERN = re.compile(r"(?i)(?:^|_)(?:terminal_reason|cancel_reason|message|error)(?:$|_)")
+
 
 def redact(value: str) -> str:
     """Redact credentials / Authorization / JWT from ``value``.
@@ -122,23 +129,26 @@ def redact(value: str) -> str:
     return _redact_sensitive(value)
 
 
-def redact_reasoning(value: str) -> str:
+def redact_reasoning(value: str, *, field_name: str = "") -> str:
     """Redact reasoning content so the full reasoning text is never written.
 
     Two layers:
 
     1. JSON reasoning-keyed string values (``"reasoning_summary_text": "..."``)
        keep their key but lose their content;
-    2. any value that *is* reasoning discourse (contains a reasoning marker)
-       collapses to :data:`REDACTED` wholesale -- this is what catches a
-       reasoning passage stuffed into an ordinary field like ``model`` or
-       ``terminal_reason``.
+    2. any value of a **free-text field** (whitelist: ``terminal_reason`` /
+       ``cancel_reason`` / ``message`` / ``error`` 类键) that *is* reasoning
+       discourse (contains a reasoning marker) collapses to :data:`REDACTED`
+       wholesale -- this is what catches a reasoning passage stuffed into an
+       ordinary free-text field.  Identifier-like keys (``model`` / name /
+       id 类) are exempt: a model named ``gpt-5.2-reasoning`` carries the
+       marker but is not reasoning content.
     """
     value = _REASONING_KEY_PATTERN.sub(
         lambda m: m.group(1) + m.group(2) + REDACTED + m.group(4),
         value,
     )
-    if _REASONING_DISCOURSE.search(value):
+    if _LAYER2_FIELD_PATTERN.search(field_name or "") and _REASONING_DISCOURSE.search(value):
         return REDACTED
     return value
 
@@ -173,7 +183,7 @@ def sanitize_text(
     if "reasoning" in (field_name or "").lower():
         return REDACTED
     cleaned = redact(text)
-    cleaned = redact_reasoning(cleaned)
+    cleaned = redact_reasoning(cleaned, field_name=field_name)
     return truncate(cleaned, max_chars=max_chars)
 
 
@@ -185,7 +195,9 @@ def sanitize_value(value: Any, *, field_name: str = "", max_chars: int = MAX_LOG
         return [sanitize_text(str(item), field_name=field_name, max_chars=max_chars) for item in value]
     if isinstance(value, Mapping):
         return {str(k): sanitize_value(v, field_name=str(k), max_chars=max_chars) for k, v in value.items()}
-    return value  # bool / int / float / None -- no secret material
+    if isinstance(value, float) and not math.isfinite(value):
+        return None  # NaN/Inf 不是合法 JSON 数值，替换为 null
+    return value  # bool / int / finite float / None -- no secret material
 
 
 # ---------------------------------------------------------------------------

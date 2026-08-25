@@ -8,8 +8,11 @@ Legacy database compatibility
 -----------------------------
 A database that already contains ``models`` but has no ``schema_migrations``
 table predates the migration engine.  For those the runner switches to
-*baseline mode*: the ``CREATE TABLE`` DDL is **not** replayed, only the
-provably idempotent repair statements (``ADD COLUMN`` / ``CREATE INDEX``) run,
+*baseline mode*: since 2026-08 the baseline statement set is
+``TABLES + ALTERS + INDEXES`` -- every ``CREATE TABLE`` is ``IF NOT EXISTS``
+(silent no-op on existing tables), so replaying it is free and covers legacy
+databases that are missing one of the core tables entirely; the provably
+idempotent repair statements (``ADD COLUMN`` / ``CREATE INDEX``) run as before,
 and the version is recorded with ``status='baselined'``.
 
 Why the repair statements still run in baseline mode: the pre-engine code
@@ -309,8 +312,13 @@ MIGRATION = Migration(
     name="baseline",
     sqlite_sql=SQLITE_TABLES + SQLITE_INDEXES + SQLITE_ALTERS,
     mysql_sql=MYSQL_TABLES + MYSQL_INDEXES + MYSQL_ALTERS,
-    # Baseline mode: never replay CREATE TABLE, only idempotent repairs.
-    sqlite_baseline_sql=SQLITE_ALTERS + SQLITE_INDEXES,
-    mysql_baseline_sql=MYSQL_ALTERS + MYSQL_INDEXES,
+    # Baseline 模式（2026-08 起与 v004/v007/v008 策略对齐）：
+    # CREATE TABLE 全部带 IF NOT EXISTS，对已存在的老表是静默 no-op、幂等无害，
+    # 补回 TABLES 让 baseline 语句集覆盖「老库缺某张核心表」的场景（此前只跑
+    # ALTER + INDEX，缺表的老库会带着残缺 schema 自称迁移完毕）。引擎的
+    # sql_digest 只哈希上面的正常语句集，改 baseline 不触发漂移告警。
+    # 注意 MySQL 的 TABLES 同样全部是 IF NOT EXISTS 形态，可直接复用。
+    sqlite_baseline_sql=SQLITE_TABLES + SQLITE_ALTERS + SQLITE_INDEXES,
+    mysql_baseline_sql=MYSQL_TABLES + MYSQL_ALTERS + MYSQL_INDEXES,
     baseline_probe="models",
 )

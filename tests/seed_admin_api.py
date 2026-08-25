@@ -8,7 +8,13 @@ import aiohttp
 
 
 async def main():
-    api_key = os.environ.get("AGNES_API_KEY", "sk-KhU0WpxQvXVyT59klRC2GabxH8HSEe7tBYs0L9Hnaqy85ifg")
+    # 安全红线：密钥只允许从环境注入，绝不硬编码默认值（历史版本曾把真实
+    # key 写死在此处并入库 git——该密钥应视为已泄露并轮换）。
+    api_key = os.environ.get("AGNES_API_KEY", "").strip()
+    if not api_key:
+        print("[seed] AGNES_API_KEY not set; nothing to seed. "
+              "Set it explicitly:  AGNES_API_KEY=sk-... python tests/seed_admin_api.py")
+        return
     base = "http://127.0.0.1:8089"
 
     async with aiohttp.ClientSession() as sess:

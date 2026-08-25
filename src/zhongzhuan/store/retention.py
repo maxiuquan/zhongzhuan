@@ -122,6 +122,10 @@ async def _delete_batched(
     TiDB, so the batch is selected by primary key in a tabled-out subquery
     first (same trick the T06 baseline used for ``request_logs``).  Loops until
     fewer than ``batch_size`` rows remain.
+
+    计数口径（2026-08 修复）：累计值取每条 DELETE 的**真实受影响行数**
+    （``Store.execute_rowcount``），不再用删除前的 COUNT 预估 ``take`` 充数 ——
+    并发写入 / 行在子查询与 DELETE 之间被并发删掉时，预估值会虚报。
     """
     deleted = 0
     while True:
@@ -144,9 +148,9 @@ async def _delete_batched(
                 f"SELECT {cols} FROM (SELECT {cols} FROM {table} WHERE {where} LIMIT ?) AS batch"
                 f")"
             )
-        await store.execute(sql, params + (take,))
-        deleted += take
-        if take < batch_size:
+        affected = await store.execute_rowcount(sql, params + (take,))
+        deleted += affected
+        if affected < batch_size:
             break
     return deleted
 

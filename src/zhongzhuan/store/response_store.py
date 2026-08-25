@@ -46,6 +46,16 @@ def _loads(text: str, default: Any = None) -> Any:
         return default
 
 
+#: ``responses`` 的显式列清单，顺序与 v004 DDL 及 :meth:`ResponseStore._row_to_record`
+#: 的下标解包严格一致。不用 ``SELECT *``：列序由 DDL 决定，一旦迁移追加新列，
+#: 按下标取值的代码就会静默错位（TiDB / SQLite 均无按名取值的便携游标）。
+_RESPONSE_COLUMNS = (
+    "response_id, workspace_id, status, model, created_at, updated_at, "
+    "completed_at, previous_response_id, background, request, output, "
+    "`usage`, error, incomplete_details, terminal_reason, cancelled"
+)
+
+
 @dataclass
 class ResponseRecord:
     """A persisted response row (JSON fields decoded)."""
@@ -66,6 +76,15 @@ class ResponseRecord:
     incomplete_details: dict[str, Any] = field(default_factory=dict)
     terminal_reason: str = ""
     cancelled: bool = False
+
+
+#: ``route_bindings`` 的显式列清单，顺序与 v008 DDL 及
+#: :meth:`ResponseStore._route_binding_to_dict` 的下标解包严格一致（理由同
+#: ``_RESPONSE_COLUMNS``：``SELECT *`` 的列序跟着 DDL 走，追加列即错位）。
+_ROUTE_BINDING_COLUMNS = (
+    "session_key, key_id, capabilities, workspace_id, "
+    "created_at, updated_at, expires_at, failover_count, last_failover_reason"
+)
 
 
 class ResponseStore:
@@ -122,7 +141,7 @@ class ResponseStore:
         workspace_id: str = "",
     ) -> ResponseRecord | None:
         row = await self._store.fetchone(
-            "SELECT * FROM responses WHERE response_id = ? AND workspace_id = ?",
+            f"SELECT {_RESPONSE_COLUMNS} FROM responses WHERE response_id = ? AND workspace_id = ?",
             (response_id, workspace_id),
         )
         if row is None:
@@ -163,11 +182,17 @@ class ResponseStore:
         )
 
     async def delete_response(self, response_id: str, *, workspace_id: str = "") -> bool:
-        cur = await self._store.execute(
+        """删除一条 response；返回是否真的删了行。
+
+        ``Store.execute`` 返回的是 ``lastrowid``（DELETE 恒为 0），不能当
+        rowcount 用 —— 这里必须走 :meth:`Store.execute_rowcount`，否则
+        「删了不存在的东西」也会被报告成成功。
+        """
+        affected = await self._store.execute_rowcount(
             "DELETE FROM responses WHERE response_id = ? AND workspace_id = ?",
             (response_id, workspace_id),
         )
-        return cur > 0
+        return affected > 0
 
     async def set_cancelled(self, response_id: str, *, workspace_id: str = "") -> None:
         now = int(time.time())
@@ -445,7 +470,7 @@ class ResponseStore:
         as absent (matching the in-memory sticky dictionary semantics).
         """
         row = await self._store.fetchone(
-            "SELECT * FROM route_bindings WHERE session_key = ?",
+            f"SELECT {_ROUTE_BINDING_COLUMNS} FROM route_bindings WHERE session_key = ?",
             (session_key,),
         )
         if row is None:

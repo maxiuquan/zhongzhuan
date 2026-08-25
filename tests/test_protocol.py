@@ -89,7 +89,9 @@ class TestRequestA2O:
             "messages": [{"role": "user", "content": "hi"}],
         }
         out = translate_request_a2o(body)
-        assert out["messages"][0] == {"role": "system", "content": "sys1sys2"}
+        # 修复后多 system 块用 "\n" 连接保留块边界（旧断言 "sys1sys2" 是
+        # "".join 粘连缺陷的行为，已按修复更新）。
+        assert out["messages"][0] == {"role": "system", "content": "sys1\nsys2"}
 
     def test_max_tokens_default_when_missing(self):
         body = {"messages": [{"role": "user", "content": "hi"}]}

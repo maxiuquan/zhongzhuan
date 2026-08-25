@@ -40,6 +40,13 @@ from ..proxy.protocol.responses_models import ErrorClass, TerminalReason
 # 1. Primitive metric types
 # ---------------------------------------------------------------------------
 
+#: 单个 Counter 允许的最大 label 组合数（series 基数上限，默认值）。
+MAX_SERIES_DEFAULT: int = 1000
+
+#: 超过基数上限后，新 label 组合统一归并进的保留桶标签值。
+#: （每个 labelname 都取该值，如 ``{field="_overflow_"}``。）
+OVERFLOW_LABEL_VALUE: str = "_overflow_"
+
 
 def _escape_label(value: Any) -> str:
     """Escape a label value for the Prometheus text format."""
@@ -99,16 +106,31 @@ class _BaseMetric:
 
 
 class Counter(_BaseMetric):
-    """A monotonic counter with optional labels."""
+    """A monotonic counter with optional labels (bounded cardinality).
 
-    def __init__(self, name: str, help_text: str, labelnames: Sequence[str] = ()) -> None:
+    基数保护：不同 label 组合（series）数达到 ``max_series`` 后，新组合不再
+    各立系列，而是统一累加进保留桶 ``{<label>="_overflow_"}`` —— 高基数字段
+    （未约束的 model 名、任意 field 值……）不能把内存和 /metrics 输出撑爆。
+    已存在的 series 继续正常累加，不受影响。
+    """
+
+    def __init__(
+        self,
+        name: str,
+        help_text: str,
+        labelnames: Sequence[str] = (),
+        max_series: int = MAX_SERIES_DEFAULT,
+    ) -> None:
         super().__init__(name, help_text, labelnames)
         self._values: dict[tuple[str, ...], float] = {}
+        self.max_series = int(max_series)
 
     def inc(self, value: float = 1.0, **labels: Any) -> None:
         """Increment the counter by ``value`` for the given label set."""
         key = self._label_key(labels)
         with self._lock:
+            if key not in self._values and len(self._values) >= self.max_series:
+                key = tuple(OVERFLOW_LABEL_VALUE for _ in sorted(self.labelnames))
             self._values[key] = self._values.get(key, 0.0) + value
 
     def render(self) -> list[str]:
@@ -446,6 +468,8 @@ def record_error_class(err_class: ErrorClass) -> None:
 __all__ = [
     "Counter",
     "Histogram",
+    "MAX_SERIES_DEFAULT",
+    "OVERFLOW_LABEL_VALUE",
     "requests_total",
     "streams_completed_total",
     "streams_truncated_total",

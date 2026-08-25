@@ -82,7 +82,13 @@ def make_proxy_auth_middleware(store) -> Middleware:
         # 配额校验
         ok, reason = at.check_quota(requested_model)
         if not ok:
-            status = 403 if "disabled" in reason or "expired" in reason or "whitelist" in reason else 429
+            # revoked（已撤销）与 disabled/expired 同类：令牌身份已失效，应回
+            # 403 而非 429 —— 429 意味着"稍后重试可恢复"，对撤销令牌是误导。
+            status = (
+                403
+                if any(m in reason for m in ("disabled", "expired", "whitelist", "revoked"))
+                else 429
+            )
             return web.json_response(
                 {"error": {"message": reason, "type": "quota_exceeded" if status == 429 else "forbidden"}},
                 status=status,

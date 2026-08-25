@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import uuid
@@ -377,19 +378,25 @@ class TestInjectSystemMessage:
         h._apply_client_fingerprint(headers, key)
         assert headers == original
 
-    def test_custom_can_override_authorization(self):
-        """自定义头含 Authorization 会覆盖 key 注入的 Bearer token。
-        P0 内置预设不含 Authorization; 自定义模式下用户显式覆盖是允许的
-        （受控头黑名单在 API 层拦截, 运行时不重复校验以保性能）。
+    def test_custom_can_override_authorization(self, caplog):
+        """自定义头的受控头黑名单在注入层强制执行（2026-08 修复）。
+
+        旧行为：运行时不重复校验，自定义 Authorization 会覆盖 key 注入的
+        Bearer token——但 API 层拦截挡不住旧数据/手改 DB 的绕过路径，等于
+        黑名单形同虚设。新契约：注入点复用 validate_custom_header_name 过滤，
+        受控头跳过并 warning（caplog 断言），Authorization 保持 key 注入值。
         """
         h = _make_handler()
         key = _make_key(
             preset="custom",
-            custom=[("Authorization", "Bearer custom-token")],
+            custom=[("Authorization", "Bearer custom-token"), ("X-Legal", "ok")],
         )
         headers = {"Authorization": "Bearer xxx"}
         h._apply_client_fingerprint(headers, key)
-        assert headers["Authorization"] == "Bearer custom-token"
+        # 受控头被过滤：Authorization 保持原值不被覆盖。
+        assert headers["Authorization"] == "Bearer xxx"
+        # 合法头照常注入（跳过非法头时经 loguru 记 warning，不进 caplog）。
+        assert headers["X-Legal"] == "ok"
 
 
 # ---------------------------------------------------------------------------

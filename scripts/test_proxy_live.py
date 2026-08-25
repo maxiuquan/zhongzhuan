@@ -1,6 +1,5 @@
 """Make a real chat completion request through the running proxy."""
 import asyncio
-import os
 
 import aiohttp
 

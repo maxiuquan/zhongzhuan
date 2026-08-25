@@ -510,7 +510,9 @@ class TestStreaming:
             b"data: [DONE]\n\n",
         ]
         tr, text = await _run_stream(chunks)
-        assert tr.done is True
+        # done 统一为方法调用语义（translator_base 协议修复）：旧的属性式
+        # 断言 ``tr.done is True`` 在方法实现上是 bound-method 恒真埋雷。
+        assert tr.done() is True
         # A second call must not emit a duplicate terminator.
         assert tr.finish_safely() == []
         # Responses output carries no [DONE] sentinel.

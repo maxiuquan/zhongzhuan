@@ -43,6 +43,17 @@ class SqliteStore(Store):
         await self._db.commit()
         return cursor.lastrowid or 0
 
+    async def execute_rowcount(self, sql: str, params: tuple | None = None) -> int:
+        """同 :meth:`execute`，但返回受影响行数（``cursor.rowcount``）。
+
+        SQLite 在语句不影响任何行时报 ``-1`` / 0，统一钳到 0，调用方只做
+        ``> 0`` 判断。
+        """
+        cursor = await self._db.execute(sql, params or ())
+        await self._db.commit()
+        affected = int(cursor.rowcount or 0)
+        return affected if affected > 0 else 0
+
     async def fetchone(self, sql: str, params: tuple | None = None) -> tuple | None:
         cursor = await self._db.execute(sql, params or ())
         row = await cursor.fetchone()

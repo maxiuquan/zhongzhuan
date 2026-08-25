@@ -1,11 +1,20 @@
-"""Test against real AgnesAI to see if we get 502 there too."""
+"""手工检查：直连真实 AgnesAI 上游 vs 经 zhongzhuan 代理各打一轮。
+
+【手工脚本，未经测试维护】—— 不属于 pytest 测试套件（不叫 test_*，
+不会被收集），会发起真实网络/计费请求，需要手工执行::
+
+    $env:AGNES_API_KEY='sk-xxx'; python scripts/manual_check_agnes.py
+
+内容为早期调试脚本的迁移版（原 tests/test_real_agnes.py），基本原样保留。
+"""
 
 import asyncio
-import json
 import os
 import socket
 import sys
-import time
+
+# Add src to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from aiohttp import ClientSession, web
 
@@ -116,7 +125,7 @@ async def main():
     api_key = os.environ.get("AGNES_API_KEY", "")
     if not api_key:
         print("No AGNES_API_KEY env var set.")
-        print("Usage: $env:AGNES_API_KEY='sk-xxx'; python tests/test_real_agnes.py")
+        print("Usage: $env:AGNES_API_KEY='sk-xxx'; python scripts/manual_check_agnes.py")
         return
     await call_agnes_direct()
     await call_via_proxy(api_key)

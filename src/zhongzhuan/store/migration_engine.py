@@ -451,9 +451,38 @@ class MigrationRunner:
         report.backup_path = await self.backup_sqlite(report.from_version)
         await self.ensure_version_table()
 
+        # ------------------------------------------------------------------
+        # Baseline 判定（时序缺陷修复）：只探测**一次**，且必须在第一个
+        # pending 迁移执行之前。
+        #
+        # 旧实现把「版本表缺失」这个标志贯穿整个循环、对每个迁移各自探测
+        # probe 表。在全新库上 v001 一跑，``models`` / ``access_tokens`` /
+        # ``tool_executions`` 等被前面的迁移陆续建了出来，于是 v003-v015 的
+        # probe（access_tokens / models / tool_executions ...）全部命中 ——
+        # 全新库被误判成存量库，这些迁移走了 baseline 路径并记为
+        # ``baselined``。一旦某个迁移的 baseline 语句集与正常语句集有差别，
+        # 新库就会带着残缺 schema 自称迁移完毕（正是 v007 文件头记载的那类
+        # 静默破坏的温床）。
+        #
+        # 正确语义：probe 只回答一个问题 —— 「在引擎介入**之前**，这个库是否
+        # 已经存在？」。这只能看第一个 pending 迁移执行前的世界：彼时
+        # ``table_exists(probe)`` 为 False（全新库），则后续所有表都只能出自
+        # 本轮迁移，一律不算 baseline；为 True 则是真正的存量库。
+        #
+        # 对存量库的兼容语义不变：首个 probe 命中后，仍按旧规则逐个迁移判定
+        # （probe 非空且表存在 -> baseline）。老库里 ``models`` /
+        # ``access_tokens`` 在场而 ``responses`` / ``route_bindings`` 缺席，
+        # 因此 v001/v003/v005... baselined、v004/v006/v008 照常完整执行 ——
+        # 与修复前的行为逐位一致。
+        # ------------------------------------------------------------------
+        legacy_database = False
+        if not had_version_table:
+            first_probe = pending[0].baseline_probe
+            legacy_database = bool(first_probe) and await self._ex.table_exists(first_probe)
+
         for migration in pending:
             baseline = (
-                not had_version_table
+                legacy_database
                 and bool(migration.baseline_probe)
                 and await self._ex.table_exists(migration.baseline_probe)
             )
