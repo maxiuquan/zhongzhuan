@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import AsyncIterator
 
 import httpx
 from httpx import Timeout as HttpxTimeout
 
 from ..config.timeouts import DEFAULT_TIMEOUT_POLICY, TimeoutPolicy
+
+#: Soft ceiling above which an upstream client's retained pool is considered
+#: leaked/accumulated and subject to a forced idle flush (P0#2). Mirrors the
+#: keepalive cap configured on the httpx client below.
+_LEAK_POOL_CEILING: int = 64
 
 # Legacy default kept for the deprecated ``timeout: float`` call shape.
 LEGACY_WRITE_TIMEOUT: float = 30.0
@@ -154,9 +160,91 @@ class UpstreamClient:
         content: bytes | None = None,
         params: dict | None = None,
     ) -> AsyncIterator[httpx.Response]:
+        """Yield an httpx streaming response.
+
+        The ``async with`` context manager guarantees that the underlying
+        connection is returned to the pool when the body exits normally, but
+        when the consumer ``break``s or an exception propagates through the
+        generator, Python may defer ``aclose()`` until garbage collection —
+        by which time the peer has already sent FIN and the socket is stuck
+        in CLOSE-WAIT, leaking a pool slot indefinitely.
+
+        Fix (2026-09-02): wrap the httpx stream in an explicit
+        ``try/finally`` with ``aclose()``.  Even if the consumer breaks
+        out of the ``async for`` loop, the generator's ``finally`` block
+        runs immediately during ``aclose()``, ensuring the connection is
+        released back to the pool *now*, not at GC time.
+        """
         if self._client is None:
             await self.start()
         assert self._client is not None
         url = self._resolve_url(path)
-        async with self._client.stream(method, url, headers=headers, content=content, params=params) as resp:
+        resp = await self._client.send(
+            self._client.build_request(method, url, headers=headers, content=content, params=params),
+            stream=True,
+        )
+        try:
             yield resp
+        finally:
+            await resp.aclose()
+
+    # ---- P0#2: connection-pool self-heal (long-uptime leak detection) ----
+    #
+    # Even with the ``really-close`` fix above, a process that runs for days
+    # can still accumulate stray CLOSE-WAIT sockets if some path ever leaves a
+    # response un-:meth:`aclose`\\d.  These methods let a periodic background
+    # sweep introspect the underlying httpcore pool and force a full client
+    # rebuild once the retained pool visibly exceeds the healthy ceiling.
+    # Introspection is deliberately defensive: probing private transport
+    # internals must degrade to "no leak" instead of raising on a new httpx.
+
+    def _pool_connections(self) -> list:
+        """Best-effort list of retained httpcore connections, or ``[]``.
+
+        httpx >=0.28 keeps its multiplexer pool at ``client._transport._pool``
+        (an ``AsyncConnectionPool``) whose ``connections`` property exposes the
+        live sockets.  Any version/attribute drift returns an empty list, which
+        disables auto-rebuild without breaking request serving.
+        """
+        client = self._client
+        if client is None:
+            return []
+        transport = getattr(client, "_transport", None)
+        pool = getattr(transport, "_pool", None)
+        conns = getattr(pool, "connections", None)
+        return list(conns) if isinstance(conns, list) else []
+
+    def retained_connection_count(self) -> int:
+        """Number of connections currently held by the upstream pool."""
+        return len(self._pool_connections())
+
+    def is_idle(self) -> bool:
+        """True if no pooled connection is actively serving a request.
+
+        A connection is considered busy unless it reports itself idle or
+        already closed.  Used to guarantee we never rebuild a client while
+        requests are mid-flight on it.
+        """
+        for conn in self._pool_connections():
+            try:
+                busy = not (bool(conn.is_idle()) or bool(conn.is_closed()))
+            except Exception:  # noqa: BLE001 - introspection drift
+                busy = True
+            if busy:
+                return False
+        return True
+
+    async def rebuild(self) -> None:
+        """Drop the underlying httpx client so the next request opens a fresh one.
+
+        Closing the old client tears down every retained socket (releasing any
+        CLOSE-WAIT that the pool kept alive).  Must only be called when
+        :meth:`is_idle` is true, otherwise in-flight requests would be killed.
+        """
+        client = self._client
+        self._client = None
+        if client is not None:
+            try:
+                await client.aclose()
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - teardown
+                pass

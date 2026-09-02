@@ -4104,6 +4104,7 @@ class ProxyHandler:
             return
         self._bg_running = True
         self._spawn(self._sticky_cleanup_loop())
+        self._spawn(self._upstream_pool_sweep_loop())
         if self.store is not None:
             self._spawn(self._health_snapshot_loop())
         # P0-6: the v3 background worker is part of this handler's lifecycle,
@@ -4205,6 +4206,54 @@ class ProxyHandler:
             except Exception:
                 _lg.exception("health snapshot loop error")
                 await asyncio.sleep(60)
+
+    async def _upstream_pool_sweep_loop(self) -> None:
+        """P0#2：周期检测上游连接池泄漏并强制重建（长跑防 CLOSE-WAIT 累积）。
+
+        进程连续运行数天后，即便有 ``try/finally: aclose`` 兜底，个别历史路径
+        仍可能残留 CLOSE-WAIT socket 占住 keepalive 池位。此循环每 5 分钟扫描
+        一次懒建 client 缓存：当某上游的保留连接数显著超过池上限、且该 client
+        已无在途请求时，整只重建以释放陈旧 socket。健康时仅按需重建，零开销。
+        """
+        from ..upstream.client import _LEAK_POOL_CEILING
+
+        while self._bg_running:
+            try:
+                await asyncio.sleep(300)
+                if not self._bg_running:
+                    break
+                await self._sweep_upstream_pools(_LEAK_POOL_CEILING)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                _lg.exception("upstream pool sweep loop error")
+                await asyncio.sleep(60)
+
+    async def _sweep_upstream_pools(self, ceiling: int) -> None:
+        """扫描懒建上游 client 缓存，对超限且空闲的 client 触发重建。
+
+        ``retained_connection_count()`` 返回当前保留在 httpcore 池中的连接数。
+        仅当如下两个条件同时满足才重建（否则跳过，绝不打断在途请求）：
+          1. 保留连接数 > ceiling —— 高于 keepalive 健康上限，疑似泄漏累积；
+          2. ``is_idle()`` 为真 —— 没有任何连接在服役，可安全整只关闭。
+        """
+        for base_url, client in list(self._client_cache.items()):
+            if client is None or client._client is None:
+                continue
+            try:
+                retained = client.retained_connection_count()
+                if retained <= ceiling:
+                    continue
+                if not client.is_idle():
+                    continue
+            except Exception as exc:  # noqa: BLE001 - introspection drift
+                _lg.warning(f"upstream pool sweep inspect failed {base_url!r}: {exc}")
+                continue
+            await client.rebuild()
+            _lg.warning(
+                f"upstream pool sweep: rebuilt leaked client for {base_url!r} "
+                f"(retained={retained})"
+            )
 
     async def __call__(self, request: web.Request) -> web.StreamResponse:
         _request_start = time.time()
