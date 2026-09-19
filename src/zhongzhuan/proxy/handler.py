@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -52,6 +53,39 @@ from ..responses_v3.upstream_chunk_adapter import UpstreamSSEChunkAdapter
 #: ``developer`` 角色（官方 Codex CLI 的 "You are Codex" 即在此），我们只认
 #: ``system`` 会漏掉，导致该标识原样透传上游而 403（2026-08-06 实测）。
 _INSTRUCTION_ROLES = ("system", "developer")
+
+#: key 健康快照的写盘节流参数（2026-09-19，TiDB 配额事故后引入）。
+#:
+#: 原实现对 ``self._keys`` 做**无条件全量** UPSERT：209 把 key × 每 30 秒一次
+#: ≈ 60.2 万次写/天。TiDB Cloud Starter 免费档仅 50M RU/月，实测 2026-09-01 →
+#: 09-14 即耗尽（≈3.75M RU/天），集群被限制访问、后台登录接口全 500。健康状态
+#: 绝大多数周期是不变的，全量重写纯属写放大 —— 改为「只写指纹变化的 key」后
+#: 写量降两个数量级，同时保留周期性全量兜底，防止某条状态变更路径没被 diff
+#: 捕获时快照永久失鲜。
+#:
+#: 语义等价性：内存值不变时，DB 里那行本来就与内存一致（上一轮写的就是它），
+#: 因此跳过写不会让快照变陈旧；任何实际的健康状态迁移都会改变指纹而被写入。
+_HEALTH_SNAPSHOT_INTERVAL_SECONDS = float(os.environ.get("ZHONGZHUAN_HEALTH_SNAPSHOT_INTERVAL_SECONDS", "30"))
+#: 每 N 个快照周期强制全量写一次（默认 60 × 30s ≈ 30 分钟）作兜底，同时充当
+#: 「写量统计」的上报周期 —— 部署后可从日志读到增量策略的真实写量。
+_HEALTH_FULL_SYNC_EVERY = max(1, int(os.environ.get("ZHONGZHUAN_HEALTH_FULL_SYNC_EVERY", "60")))
+
+
+def _health_fingerprint(k: Any) -> tuple:
+    """``key_health`` 行里所有会被持久化的字段（顺序与 ``KeyHealthRow`` 一致）。
+
+    仅这 7 个字段会被 ``save_health`` 写库，因此也只有它们能构成「需要重写」
+    的依据；``updated_at`` 由 ``save_health`` 自填，不参与比较。
+    """
+    return (
+        k.status,
+        k.cooldown_until,
+        k.rpm_limit,
+        k.tpm_limit,
+        k.success_count,
+        k.total_failures,
+        k.recent_429_count,
+    )
 
 
 def _ma_extract_text(data: Any) -> str:
@@ -841,6 +875,11 @@ class ProxyHandler:
         # 强引用防 GC，完成后 add_done_callback 自动 discard，stop 时统一取消。
         self._bg_tasks: set[asyncio.Task] = set()
         self._bg_running = False
+        #: 健康快照增量写的路由池标识 + 上次落库指纹（2026-09-19 写放大修复）。
+        #: `_health_pool_sig` 变了（reload 换了 list 对象、或增删了 key）→ 指纹
+        #: 基准整体作废，下一轮全量重写。见 :meth:`_health_snapshot_once`。
+        self._health_pool_sig: tuple | None = None
+        self._health_last_saved: dict[int, tuple] = {}
         #: P0-6: the v3 ``background=true`` worker, owned by this handler's
         #: background-task lifecycle.  ``None`` until ``start_background_tasks``
         #: finds a store-backed v3 setup (a store-less proxy never has one).
@@ -4171,36 +4210,87 @@ class ProxyHandler:
                 _lg.exception("sticky cleanup loop error")
                 await asyncio.sleep(60)
 
-    async def _health_snapshot_loop(self) -> None:
-        """优化点4：每 30 秒把 key 健康状态快照到 DB（重启后可恢复）。"""
+    async def _health_snapshot_once(self, *, force_full: bool = False) -> int:
+        """执行**一轮** key 健康快照，返回本轮实际写库的 key 数。
+
+        只写指纹（:func:`_health_fingerprint`）发生变化的 key；``force_full``
+        或指纹基准为空时退化为全量写。写失败的 key **不推进**指纹基准，因此下
+        一轮会重试，快照不会静默停在旧值上。
+
+        从 :meth:`_health_snapshot_loop` 拆出来是为了可测：单轮行为可以脱离
+        ``sleep`` 直接断言，无需起后台任务再掐秒表。
+        """
         from ..store.key_health import save_health, KeyHealthRow
 
+        if self.store is None:
+            return 0
+        keys = self._keys
+        # 路由池标识：(list 对象身份, 参与快照的 key 数)。reload_keys 会整体替换
+        # self._keys，增删 key 也会改变数量 —— 两者都让旧指纹基准不可信。
+        pool_sig = (id(keys), sum(1 for k in keys if k.key_id > 0))
+        if pool_sig != self._health_pool_sig:
+            self._health_pool_sig = pool_sig
+            self._health_last_saved.clear()
+        write_all = force_full or not self._health_last_saved
+
+        written = 0
+        for k in keys:
+            if k.key_id <= 0:
+                continue  # 跳过 env/dummy key (key_id=0)
+            fp = _health_fingerprint(k)
+            if not write_all and self._health_last_saved.get(k.key_id) == fp:
+                continue
+            try:
+                await save_health(
+                    self.store,
+                    KeyHealthRow(
+                        key_id=k.key_id,
+                        status=k.status,
+                        cooldown_until=k.cooldown_until,
+                        rpm_limit=k.rpm_limit,
+                        tpm_limit=k.tpm_limit,
+                        success_count=k.success_count,
+                        failure_count=k.total_failures,
+                        recent_429_count=k.recent_429_count,
+                    ),
+                )
+            except Exception as exc:
+                # 快照失败静默吞掉会让「重启恢复」悄悄失效（DB 故障期全量丢快照
+                # 却无任何日志），至少 warning 带上 key_id。
+                _lg.warning(f"health snapshot save failed key_id={k.key_id}: {exc}")
+                continue
+            self._health_last_saved[k.key_id] = fp
+            written += 1
+        return written
+
+    async def _health_snapshot_loop(self) -> None:
+        """优化点4：周期把 key 健康状态快照到 DB（重启后可恢复）。
+
+        2026-09-19（TiDB 配额事故）：由「每周期无条件全量写」改为**增量写** ——
+        只落指纹变化的 key，每 ``_HEALTH_FULL_SYNC_EVERY`` 个周期强制全量兜底
+        一次。参数与等价性论证见模块顶部常量注释。
+        """
+        cycles = 0
+        #: 自上次全量起累计的写次数，随全量周期一起上报，用于核对优化效果。
+        writes_since_full = 0
         while self._bg_running:
             try:
-                await asyncio.sleep(30)
+                await asyncio.sleep(_HEALTH_SNAPSHOT_INTERVAL_SECONDS)
                 if not self._bg_running or self.store is None:
                     break
-                for k in self._keys:
-                    if k.key_id <= 0:
-                        continue  # 跳过 env/dummy key (key_id=0)
-                    try:
-                        await save_health(
-                            self.store,
-                            KeyHealthRow(
-                                key_id=k.key_id,
-                                status=k.status,
-                                cooldown_until=k.cooldown_until,
-                                rpm_limit=k.rpm_limit,
-                                tpm_limit=k.tpm_limit,
-                                success_count=k.success_count,
-                                failure_count=k.total_failures,
-                                recent_429_count=k.recent_429_count,
-                            ),
-                        )
-                    except Exception as exc:
-                        # 快照失败静默吞掉会让「重启恢复」悄悄失效（DB 故障期
-                        # 全量丢快照却无任何日志），至少 warning 带上 key_id。
-                        _lg.warning(f"health snapshot save failed key_id={k.key_id}: {exc}")
+                cycles += 1
+                full_sync = cycles % _HEALTH_FULL_SYNC_EVERY == 0
+                written = await self._health_snapshot_once(force_full=full_sync)
+                writes_since_full += written
+                if full_sync:
+                    span = _HEALTH_FULL_SYNC_EVERY * _HEALTH_SNAPSHOT_INTERVAL_SECONDS
+                    _lg.info(
+                        f"health snapshot: {writes_since_full} key writes in last {span:.0f}s "
+                        f"({_HEALTH_FULL_SYNC_EVERY} cycles), pool={len(self._health_last_saved)} keys"
+                    )
+                    writes_since_full = 0
+                elif written:
+                    _lg.debug(f"health snapshot: wrote {written} changed key(s)")
             except asyncio.CancelledError:
                 break
             except Exception:
