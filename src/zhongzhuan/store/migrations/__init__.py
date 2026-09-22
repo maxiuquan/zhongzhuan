@@ -24,6 +24,7 @@ from .v013_reasoning_effort_map import MIGRATION as M013
 from .v014_model_tag_note import MIGRATION as M014
 from .v015_group_fallback import MIGRATION as M015
 from .v016_access_token_prefix_index import MIGRATION as M016
+from .v017_background_jobs_claim_index import MIGRATION as M017
 
 #: Ordered migration registry.  Keep ascending by ``version``.
 MIGRATIONS: tuple[Migration, ...] = (
@@ -42,6 +43,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     M014,
     M015,
     M016,
+    M017,
 )
 
 __all__ = ["MIGRATIONS", "Migration"]
