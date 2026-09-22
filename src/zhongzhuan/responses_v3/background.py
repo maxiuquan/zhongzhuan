@@ -317,6 +317,10 @@ class BackgroundWorker:
         self._poll_count = 0
         self._claim_count = 0
         self._last_claim_seconds = 0.0
+        #: 上一次 INFO 上报时的计数快照 —— 上报的是**区间增量**，否则读日志的人
+        #: 无法判断轮询速率（累计值只说明进程活了多久）。
+        self._reported_polls = 0
+        self._reported_claims = 0
 
     # -- accessors -----------------------------------------------------------
 
@@ -1211,6 +1215,8 @@ class BackgroundWorker:
         self._poll_count = 0
         self._claim_count = 0
         self._last_claim_seconds = 0.0
+        self._reported_polls = 0
+        self._reported_claims = 0
         last_report = self._clock()
         try:
             while self._running:
@@ -1252,19 +1258,31 @@ class BackgroundWorker:
             pass  # safety-net tick: no notification arrived in time
 
     def _report_if_due(self, last_report: float, idle_report_seconds: float) -> float:
-        """Emit the idle INFO at most once per ``idle_report_seconds``."""
+        """Emit the idle INFO at most once per ``idle_report_seconds``.
+
+        The line carries **per-interval deltas** (what the interval length in
+        the message refers to) *and* the cumulative totals, so a reader can
+        judge the poll rate without knowing when the process started.  A
+        healthy deployment idles at exactly one poll per ``poll_interval``
+        (≈60 polls / 1800s); a regression to a tight loop shows up as orders
+        of magnitude more, which is the whole point of this line.
+        """
         if idle_report_seconds <= 0:
             return self._clock()
         now = self._clock()
         if now - last_report < idle_report_seconds:
             return last_report
         LOGGER.info(
-            "background worker idle: %d polls / %d claims in %.0fs (last claim %.2fs)",
+            "background worker idle: %d polls / %d claims in %.0fs (cumulative %d / %d, last claim %.2fs)",
+            self._poll_count - self._reported_polls,
+            self._claim_count - self._reported_claims,
+            now - last_report,
             self._poll_count,
             self._claim_count,
-            now - last_report,
             self._last_claim_seconds,
         )
+        self._reported_polls = self._poll_count
+        self._reported_claims = self._claim_count
         return now
 
     def stop(self) -> None:
