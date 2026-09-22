@@ -70,6 +70,27 @@ _HEALTH_SNAPSHOT_INTERVAL_SECONDS = float(os.environ.get("ZHONGZHUAN_HEALTH_SNAP
 #: 「写量统计」的上报周期 —— 部署后可从日志读到增量策略的真实写量。
 _HEALTH_FULL_SYNC_EVERY = max(1, int(os.environ.get("ZHONGZHUAN_HEALTH_FULL_SYNC_EVERY", "60")))
 
+#: v3 后台 worker 的空闲轮询间隔（秒）—— **安全网，不是主触发**。
+#:
+#: 2026-09-22（TiDB RU 事故）：此前 `BackgroundWorker.start` 的默认值是硬编码
+#: 1.0 秒，而 `peek_claimable` 在 `background_jobs` 上无 `(status, lease_until)`
+#: 索引 → 每秒一次全表扫描、零 job 也照跑。控制台实测该语句占当月 RU 的 98.6%
+#: （≈124M RU/月，免费额度 50M 的 2.5 倍），与「每月 13 号爆额度」吻合。
+#: 现在同进程入队由 `BackgroundWorker.notify()` 事件即时唤醒（延迟≈0），
+#: 30 秒只兜「别的进程入的队」—— 当前单实例部署用不到。
+_V3_WORKER_POLL_SECONDS = max(0.05, float(os.environ.get("ZHONGZHUAN_V3_WORKER_POLL_SECONDS", "30")))
+
+#: 急停开关：`ZHONGZHUAN_V3_BACKGROUND_WORKER=0` 时 `_v3_background_worker()`
+#: 恒返回 None —— 既不启动轮询循环，也让 `background=true` 请求落到既有的
+#: 503 `background_unavailable`（而不是排进一个没人消费的队列里静默积压）。
+#: 以后再出这类「后台循环烧钱」的问题，改一个环境变量重启即可掐掉。
+_V3_BACKGROUND_WORKER_ENABLED = os.environ.get("ZHONGZHUAN_V3_BACKGROUND_WORKER", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+
 
 def _health_fingerprint(k: Any) -> tuple:
     """``key_health`` 行里所有会被持久化的字段（顺序与 ``KeyHealthRow`` 一致）。
@@ -4040,7 +4061,14 @@ class ProxyHandler:
         and a v3 handler; a store-less or v2-only deployment simply has no
         background support and says so with a 503 instead of accepting jobs it
         can never run.
+
+        ``ZHONGZHUAN_V3_BACKGROUND_WORKER=0`` is the same 503 by configuration:
+        the gate lives here rather than in ``start_background_tasks`` so that a
+        disabled worker is *also* unavailable to ``enqueue`` -- otherwise
+        ``background=true`` would keep accepting jobs that nothing ever drains.
         """
+        if not _V3_BACKGROUND_WORKER_ENABLED:
+            return None
         if self._v3_worker is not None:
             return self._v3_worker
         if self._v3 is None:
@@ -4151,8 +4179,15 @@ class ProxyHandler:
         # drains the background queue.
         worker = self._v3_background_worker()
         if worker is not None:
-            self._spawn(worker.start(upstream_factory=self._v3_background_upstream_factory))
-            _lg.info("[v3] background worker started")
+            self._spawn(
+                worker.start(
+                    poll_interval=_V3_WORKER_POLL_SECONDS,
+                    upstream_factory=self._v3_background_upstream_factory,
+                )
+            )
+            _lg.info(f"[v3] background worker started (idle poll every {_V3_WORKER_POLL_SECONDS:g}s, event-driven)")
+        else:
+            _lg.info("[v3] background worker not started (no store/v3, or disabled by env)")
         _lg.info(f"started {len(self._bg_tasks)} background tasks")
 
     async def stop_background_tasks(self) -> None:

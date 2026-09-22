@@ -604,3 +604,131 @@ async def test_run_job_returns_none_when_not_claimable(rs):
     await _seed(worker, "resp_done")
     assert await worker.run_job("resp_done", upstream=FakeUpstream([text()])) == "completed"
     assert await worker.run_job("resp_done", upstream=FakeUpstream([text()])) == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Idle polling: event-driven wake-up (2026-09-22 TiDB RU leak)
+#
+# 事故：``peek_claimable`` 每秒一次全表扫描 ``background_jobs``（无
+# ``(status, lease_until)`` 索引），零 job 也照跑 = 86,400 次/天，
+# 控制台实测占当月 RU 的 98.6%（≈124M RU/月，免费额度的 2.5 倍）。
+# 修复：入队事件唤醒 + 间隔退化为 30s 安全网（migration v017 补索引）。
+# 这三条测试锁住的正是修复的三个不变量。
+# ---------------------------------------------------------------------------
+
+
+class CountingJobs:
+    """``background_jobs`` 计数壳：统计 ``peek_claimable`` 被调了几次。
+
+    ``on_first_peek`` 把「peek 返回空」与「进入等待」之间那个最窄的竞态窗口
+    撑开成可断言的场景（见 :func:`test_notify_between_peek_and_wait_is_not_lost`）。
+    """
+
+    def __init__(self, inner, *, on_first_peek=None):
+        self._inner = inner
+        self._on_first_peek = on_first_peek
+        self.peek_calls = 0
+
+    async def peek_claimable(self, **kwargs):
+        self.peek_calls += 1
+        if self.peek_calls == 1 and self._on_first_peek is not None:
+            await self._on_first_peek()
+            return None
+        return await self._inner.peek_claimable(**kwargs)
+
+    def __getattr__(self, name):  # claim/lease/TTL 路径原样透传
+        return getattr(self._inner, name)
+
+
+def _wrap_jobs(worker: BackgroundWorker, *, on_first_peek=None) -> CountingJobs:
+    """把 worker 的 jobs 存储换成计数壳（``_jobs`` 是 __init__ 注入的唯一接缝）。"""
+    wrapped = CountingJobs(worker.jobs, on_first_peek=on_first_peek)
+    worker._jobs = wrapped
+    return wrapped
+
+
+@pytest.mark.asyncio
+async def test_idle_loop_is_not_busy_polling(rs):
+    """空闲 2 秒内 ``peek_claimable`` ≤ 2 次（旧实现是 1 秒 1 次 → 2~3 次）。
+
+    默认间隔 30s 时，2 秒窗口里只该有**进入循环的那一次**探测 —— 这条断言就是
+    124M RU/月 那个 bug 的回归门禁。
+    """
+    worker = BackgroundWorker(rs)
+    jobs = _wrap_jobs(worker)
+
+    task = asyncio.create_task(worker.start(poll_interval=30.0))
+    await asyncio.sleep(2.0)
+    worker.stop()
+    await asyncio.wait_for(task, timeout=5)
+
+    assert jobs.peek_calls <= 2, f"空闲 2s 内探测了 {jobs.peek_calls} 次；1Hz 空转回归"
+    assert worker.stats()["claims"] == 0
+
+
+@pytest.mark.asyncio
+async def test_enqueue_wakes_idle_loop_without_waiting_out_interval(rs):
+    """入队即唤醒：30s 安全网下，job 仍在 1 秒内跑完（延迟不退反进）。
+
+    间隔从 1s 提到 30s 之所以安全，全靠这条路径 —— 单独提间隔会把
+    ``background=true`` 的启动延迟从 ≤1s 劣化到 ≤30s。
+    """
+    worker = BackgroundWorker(rs)
+    task = asyncio.create_task(
+        worker.start(
+            poll_interval=30.0,
+            upstream_factory=lambda _tid: FakeUpstream([text()]),
+        )
+    )
+    await asyncio.sleep(0.1)  # 让循环先进入空闲等待
+    await _seed(worker, "resp_wake")
+
+    deadline = time.monotonic() + 2.0
+    status = ""
+    while time.monotonic() < deadline:
+        job = await rs.jobs.get_job("resp_wake", workspace_id="t1")
+        status = str(job["status"]) if job else ""
+        if status == "completed":
+            break
+        await asyncio.sleep(0.02)
+    worker.stop()
+    await asyncio.wait_for(task, timeout=5)
+
+    assert status == "completed", f"入队未被唤醒，job 停在 {status!r}"
+    assert worker.stats()["claims"] == 1
+
+
+@pytest.mark.asyncio
+async def test_notify_between_peek_and_wait_is_not_lost(rs):
+    """peek 返回空与开始等待之间的 notify 不能被吞。
+
+    用「第一次 peek 时同步入队 + 通知」把窗口撑开：若唤醒事件被放在等待**之后**
+    清理，这次通知就丢了，循环只能睡满 30s 安全网 → 本用例会超时失败。
+    """
+    worker = BackgroundWorker(rs)
+
+    async def _race() -> None:
+        # 模拟「探测刚返回空，入队者就插队进来」：写行（durable）+ 置位事件。
+        await _seed(worker, "resp_race")
+
+    jobs = _wrap_jobs(worker, on_first_peek=_race)
+
+    task = asyncio.create_task(
+        worker.start(
+            poll_interval=30.0,
+            upstream_factory=lambda _tid: FakeUpstream([text()]),
+        )
+    )
+    deadline = time.monotonic() + 2.0
+    status = ""
+    while time.monotonic() < deadline:
+        job = await rs.jobs.get_job("resp_race", workspace_id="t1")
+        status = str(job["status"]) if job else ""
+        if status == "completed":
+            break
+        await asyncio.sleep(0.02)
+    worker.stop()
+    await asyncio.wait_for(task, timeout=5)
+
+    assert jobs.peek_calls >= 2, "竞态场景没被构造出来（只有一次探测）"
+    assert status == "completed", f"窗口内的通知被吞掉了，job 停在 {status!r}"

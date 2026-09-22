@@ -86,6 +86,24 @@ DEFAULT_LEASE_SECONDS: int = 300
 #: before it lapses.
 DEFAULT_HEARTBEAT_SECONDS: float = 30.0
 
+#: :meth:`BackgroundWorker.start` 的默认轮询间隔 —— 只在**没人唤醒**时才生效的
+#: 「安全网」节奏。
+#:
+#: 2026-09-22（TiDB RU 事故）：这个值曾是硬编码的 ``1.0``，而 ``peek_claimable``
+#: 在 ``background_jobs`` 上没有 ``(status, lease_until)`` 索引 → 每秒一次全表扫描，
+#: 24×7 空转。控制台实测该语句占当月 RU 的 **98.6%（≈124M RU/月）**，是免费额度
+#: 50M 的 2.5 倍，也是「每月 13 号爆额度」的真正元凶。
+#: 现在：同进程入队由 :meth:`BackgroundWorker.notify` 事件即时唤醒（延迟≈0），
+#: 30 秒仅用于「别的进程入的队」这一当前单实例部署根本不存在的场景。
+DEFAULT_POLL_INTERVAL_SECONDS: float = 30.0
+
+#: 空闲时每 N 秒打一行 INFO（轮询次数 / 认领次数 / 最近一次认领耗时）。
+#:
+#: 上次那条 124M RU/月 的泄漏是靠人肉对着控制台截图才定位到的；这条日志的职责
+#: 就是让下一次同类空转自己喊出来 —— 只要 ``polls`` 随时间线性上涨而 ``claims``
+#: 不动，就等于在说「我在空转」，不需要再去翻计费面板。
+DEFAULT_IDLE_REPORT_SECONDS: float = 1800.0
+
 #: Terminal ``response.*`` event name per terminal status.
 _TERMINAL_EVENT: dict[str, str] = {
     "completed": "response.completed",
@@ -289,6 +307,16 @@ class BackgroundWorker:
         self._clock = clock
         self._runs: dict[str, _JobRun] = {}
         self._running = False
+        #: 事件驱动唤醒（2026-09-22）：:meth:`enqueue` 置位，:meth:`start` 的空闲
+        #: 等待立刻返回 —— 让轮询间隔可以从 1s 提到 30s 而**不**牺牲
+        #: ``background=true`` 的启动延迟（反而更快）。``asyncio.Event`` 在 3.10+
+        #: 构造时不绑定事件循环，因此在 ``__init__`` 里创建是安全的。
+        self._wake = asyncio.Event()
+        #: 空闲可观测性：上一次 :meth:`start` 期间的累计轮询 / 认领次数与最近一次
+        #: 认领耗时（秒）。由 :meth:`stats` 暴露，并周期性地出现在 INFO 日志里。
+        self._poll_count = 0
+        self._claim_count = 0
+        self._last_claim_seconds = 0.0
 
     # -- accessors -----------------------------------------------------------
 
@@ -300,6 +328,31 @@ class BackgroundWorker:
     def jobs(self) -> Any:
         """The :class:`~zhongzhuan.store.background_jobs.BackgroundJobStore`."""
         return self._jobs
+
+    # -- 0. wake-up / observability (2026-09-22) -----------------------------
+
+    def notify(self) -> None:
+        """Wake an idle :meth:`start` loop because a job was just enqueued.
+
+        Deliberately *not* a "reset": if the notification arrives while the loop
+        is busy (or before it starts), the event stays set and is consumed by the
+        next :meth:`_idle_wait`.  That ordering is what makes the 1s → 30s
+        interval change safe -- a job enqueued between the ``peek_claimable``
+        miss and the sleep can never be missed, it can only be found sooner.
+        """
+        self._wake.set()
+
+    def stats(self) -> dict[str, Any]:
+        """Idle-loop counters since the current/last :meth:`start` began.
+
+        ``polls`` growing while ``claims`` stays put is the signature of the
+        leak this was added for (86,400 full scans/day with an empty queue).
+        """
+        return {
+            "polls": self._poll_count,
+            "claims": self._claim_count,
+            "last_claim_seconds": self._last_claim_seconds,
+        }
 
     # -- 1. enqueue (R-P1-34 ①) ---------------------------------------------
 
@@ -346,6 +399,11 @@ class BackgroundWorker:
             max_tool_rounds=effective.max_tool_rounds,
             expires_at=expires_at,
         )
+        # The job row is durable now, so a worker may act on it: wake this
+        # process's loop instead of making it wait out the safety-net interval.
+        # Cross-process pickup still relies on the timeout -- see
+        # ``DEFAULT_POLL_INTERVAL_SECONDS``.
+        self.notify()
         return await self._store.get_response(response_id, workspace_id=workspace_id)
 
     # -- 2. execution --------------------------------------------------------
@@ -1128,37 +1186,93 @@ class BackgroundWorker:
     async def start(
         self,
         *,
-        poll_interval: float = 1.0,
+        poll_interval: float = DEFAULT_POLL_INTERVAL_SECONDS,
         upstream_factory: Callable[[str], Any] | None = None,
         max_iterations: int | None = None,
+        idle_report_seconds: float = DEFAULT_IDLE_REPORT_SECONDS,
     ) -> None:
         """Poll for claimable jobs and run them until stopped.
 
         ``upstream_factory`` builds the execution source for a task id; it is
         injected because the real one (T28) does not exist yet, and a worker
         that hard-codes its executor cannot be tested at all.
+
+        ``poll_interval`` is now a **safety net**, not the primary trigger: an
+        idle loop blocks in :meth:`_idle_wait` until :meth:`notify` fires (same
+        process, ~0 latency) or the interval elapses (other processes).  See
+        ``DEFAULT_POLL_INTERVAL_SECONDS`` for why 1s was a 124M RU/month leak.
+
+        ``idle_report_seconds`` emits one INFO per interval while the loop is
+        idle, so a future runaway poll shows up in ``journalctl`` instead of
+        only in the billing console.
         """
         self._running = True
         iterations = 0
+        self._poll_count = 0
+        self._claim_count = 0
+        self._last_claim_seconds = 0.0
+        last_report = self._clock()
         try:
             while self._running:
                 if max_iterations is not None and iterations >= max_iterations:
                     return
                 iterations += 1
+                self._poll_count += 1
+                # Clear the wake event **before** peeking, never after: a
+                # :meth:`notify` that lands between "peek said the queue is
+                # empty" and "we start waiting" must not be swallowed by a later
+                # clear.  Ordered first, that window costs nothing -- the wait
+                # returns immediately and the next peek re-checks.
+                self._wake.clear()
                 # Peek, then let ``run_job`` do the claiming: a double claim
                 # would burn a recovery attempt for every poll.
                 task_id = await self._jobs.peek_claimable()
                 if task_id is None:
-                    await asyncio.sleep(poll_interval)
+                    await self._idle_wait(poll_interval)
+                    last_report = self._report_if_due(last_report, idle_report_seconds)
                     continue
+                started = self._clock()
                 source = upstream_factory(task_id) if upstream_factory else _empty
                 await self.run_job(task_id, upstream=source)
+                self._claim_count += 1
+                self._last_claim_seconds = max(0.0, self._clock() - started)
         finally:
             self._running = False
+
+    async def _idle_wait(self, poll_interval: float) -> None:
+        """Block until woken by :meth:`notify` or until ``poll_interval`` passes.
+
+        The event itself is cleared by the caller *before* peeking (see
+        :meth:`start`), so nothing is cleared here -- clearing after the peek
+        would drop a notify that arrived in the peek→wait window.
+        """
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=poll_interval)
+        except (asyncio.TimeoutError, TimeoutError):
+            pass  # safety-net tick: no notification arrived in time
+
+    def _report_if_due(self, last_report: float, idle_report_seconds: float) -> float:
+        """Emit the idle INFO at most once per ``idle_report_seconds``."""
+        if idle_report_seconds <= 0:
+            return self._clock()
+        now = self._clock()
+        if now - last_report < idle_report_seconds:
+            return last_report
+        LOGGER.info(
+            "background worker idle: %d polls / %d claims in %.0fs (last claim %.2fs)",
+            self._poll_count,
+            self._claim_count,
+            now - last_report,
+            self._last_claim_seconds,
+        )
+        return now
 
     def stop(self) -> None:
         """Ask :meth:`start` to leave its loop after the current job."""
         self._running = False
+        # A loop parked in ``_idle_wait`` would otherwise sit there for the whole
+        # safety-net interval; shutdown should not wait 30s for a poll.
+        self._wake.set()
 
 
 async def _empty() -> AsyncIterable[Any]:
@@ -1168,7 +1282,9 @@ async def _empty() -> AsyncIterable[Any]:
 
 
 __all__ = [
-    "DEFAULT_LEASE_SECONDS",
     "DEFAULT_HEARTBEAT_SECONDS",
+    "DEFAULT_IDLE_REPORT_SECONDS",
+    "DEFAULT_LEASE_SECONDS",
+    "DEFAULT_POLL_INTERVAL_SECONDS",
     "BackgroundWorker",
 ]
