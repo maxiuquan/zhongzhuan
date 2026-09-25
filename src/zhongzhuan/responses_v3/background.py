@@ -57,10 +57,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterable, Callable
+
+from loguru import logger as LOGGER
 
 from ..proxy.protocol.responses_emitter import ResponsesEventEmitter
 from ..proxy.protocol.responses_errors import to_incomplete_details
@@ -76,7 +77,10 @@ from ..store.background_jobs import TERMINAL_STATUSES
 from ..store.response_store import ResponseRecord, ResponseStore
 from .budget import BACKGROUND_BUDGET, BudgetLedger, CircuitBreaker, ExecutionBudget
 
-LOGGER = logging.getLogger("zhongzhuan.responses_v3.background")
+#: Project-wide logging goes through loguru; a stdlib ``logging.getLogger``
+#: here would emit INFO into a void (no stdlib sink is configured in
+#: production), which is exactly how the idle self-report went silent after
+#: 2a601a7 while its own unit test stayed green.
 
 #: Default lease length.  Long enough that a slow tool round cannot lose the
 #: lease, short enough that a crashed worker's job is recovered promptly.
@@ -491,7 +495,7 @@ class BackgroundWorker:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - one job must not kill the worker
-            LOGGER.warning("background job %s failed: %r", task_id, exc)
+            LOGGER.warning("background job {} failed: {!r}", task_id, exc)
             status = await self._finish_failed(run, emitter, exc)
         finally:
             heartbeat.cancel()
@@ -1273,7 +1277,7 @@ class BackgroundWorker:
         if now - last_report < idle_report_seconds:
             return last_report
         LOGGER.info(
-            "background worker idle: %d polls / %d claims in %.0fs (cumulative %d / %d, last claim %.2fs)",
+            "background worker idle: {} polls / {} claims in {:.0f}s (cumulative {} / {}, last claim {:.2f}s)",
             self._poll_count - self._reported_polls,
             self._claim_count - self._reported_claims,
             now - last_report,

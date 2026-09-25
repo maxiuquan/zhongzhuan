@@ -13,10 +13,10 @@ Acceptance mapping
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 
 import pytest
+from loguru import logger
 
 from zhongzhuan.responses_v3.background import BackgroundWorker
 from zhongzhuan.responses_v3.budget import ExecutionBudget
@@ -736,25 +736,33 @@ async def test_notify_between_peek_and_wait_is_not_lost(rs):
 
 
 @pytest.mark.asyncio
-async def test_idle_report_logs_per_interval_deltas(rs, caplog):
+async def test_idle_report_logs_per_interval_deltas(rs):
     """空闲上报打的是**区间增量**（同时带累计值）。
 
     读日志的人不该需要知道进程是什么时候起的：只打累计值，就没法判断轮询速率。
     这条日志是 T+24h 验收的主要读数（健康时应是 ≈60 polls / 1800s）。
+
+    捕获必须走 loguru sink（生产唯一的日志体系）：background.py 曾用 stdlib
+    ``logging.getLogger``，caplog 测试全绿但生产里 INFO 被整个吞掉，空闲自报
+    静默失效 —— 本用例用真实 sink 防止这类"测试绿、生产哑"的回归。
     """
     ticks = iter([1800.0, 1800.0, 3600.0])  # 到期 / 未到期 / 再次到期
     worker = BackgroundWorker(rs, clock=lambda: next(ticks))
     worker._poll_count = 60
 
-    with caplog.at_level(logging.INFO, logger="zhongzhuan.responses_v3.background"):
+    captured: list[str] = []
+    sink_id = logger.add(lambda m: captured.append(str(m)), level="INFO")
+    try:
         last = 0.0
         last = worker._report_if_due(last, 1800.0)  # 到期 → 打第 1 行
         last = worker._report_if_due(last, 1800.0)  # 未到期（now==last）→ 不打
         worker._poll_count += 60
         last = worker._report_if_due(last, 1800.0)  # 到期 → 打第 2 行
+    finally:
+        logger.remove(sink_id)
 
-    lines = [r.getMessage() for r in caplog.records if "background worker idle" in r.getMessage()]
-    assert len(lines) == 2, lines
+    lines = [ln for ln in captured if "background worker idle" in ln]
+    assert len(lines) == 2, captured
     assert "60 polls / 0 claims in 1800s" in lines[0], lines[0]
     assert "cumulative 60 / 0" in lines[0], lines[0]
     assert "60 polls / 0 claims in 1800s" in lines[1], lines[1]
