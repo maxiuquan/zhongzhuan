@@ -302,8 +302,19 @@ async def run_foreground(
     setup_logging(data_dir / cfg.storage.log_dir)
     logger.info(f"zhongzhuan {__version__} starting", cfg=str(cfg_path), data_dir=str(data_dir))
 
-    # Create async store (TiDB or SQLite based on config)
+    # Create async store (TiDB or SQLite based on config).
+    # 启动降级（2026-09-28）：TiDB 不可达时 create_store 返回懒建池的 store
+    # 而不是抛异常；下面各启动期 DB 读取包了 _startup_db_safe，进程带空 key
+    # 池 + 响亮 warning 继续起来，等 DB 恢复后按需重连。
     store = await create_store(cfg)
+
+    async def _startup_db_safe(what: str, factory, default):
+        """启动期 DB 读取的降级包装：失败记 warning 并返回 default。"""
+        try:
+            return await factory()
+        except Exception as exc:  # noqa: BLE001 - 降级路径
+            logger.warning(f"startup DB read failed ({what}): {type(exc).__name__}: {exc}; continuing degraded")
+            return default
 
     # Request-log retention scheduler (T06 / R-P0-03): deletes rows older than
     # the configured TTL on a fixed cadence.  Defaults to 14d / 3h.
@@ -337,7 +348,16 @@ async def run_foreground(
         row = await store.fetchone("SELECT value FROM system_config WHERE `key`=?", (key_name,))
         return row[0] if row else None
 
-    await crypto_init(data_dir, store_get_key=_get_config)
+    # crypto 是唯一不能「静默降级」的启动步骤：查 secret_key 失败时
+    # crypto.init 会 fail-closed 抛错（防止用新本地密钥覆盖旧密文）。
+    # 这里接住它进入后台重试（30s 一次），成功后热加载 key 池 —— 进程
+    # 在 TiDB 故障期也能起来，恢复后无需重启。
+    crypto_ok = False
+    try:
+        await crypto_init(data_dir, store_get_key=_get_config)
+        crypto_ok = True
+    except Exception as exc:  # noqa: BLE001 - 降级启动
+        logger.warning(f"crypto init failed, will retry in background: {exc!r}")
 
     # Create default admin user if auth is enabled and no admin exists
     from zhongzhuan.admin.auth import auth_enabled
@@ -345,14 +365,17 @@ async def run_foreground(
     if auth_enabled():
         from zhongzhuan.store.admin_users import admin_exists, create_admin
 
-        if not await admin_exists(store):
-            admin_user = os.getenv("ZHONGZHUAN_ADMIN_USER", "admin")
-            admin_pass = os.getenv("ZHONGZHUAN_ADMIN_PASSWORD", "")
-            if not admin_pass:
-                logger.warning("ZHONGZHUAN_ADMIN_PASSWORD not set in .env, admin will not be created")
-            else:
-                await create_admin(store, admin_user, admin_pass)
-                logger.info(f"默认管理员已创建: {admin_user}")
+        async def _ensure_admin() -> None:
+            if not await admin_exists(store):
+                admin_user = os.getenv("ZHONGZHUAN_ADMIN_USER", "admin")
+                admin_pass = os.getenv("ZHONGZHUAN_ADMIN_PASSWORD", "")
+                if not admin_pass:
+                    logger.warning("ZHONGZHUAN_ADMIN_PASSWORD not set in .env, admin will not be created")
+                else:
+                    await create_admin(store, admin_user, admin_pass)
+                    logger.info(f"默认管理员已创建: {admin_user}")
+
+        await _startup_db_safe("admin bootstrap", _ensure_admin, None)
 
     # Create default access token if proxy auth is enabled and no tokens exist
     from zhongzhuan.proxy.auth import proxy_auth_enabled
@@ -360,9 +383,12 @@ async def run_foreground(
     if proxy_auth_enabled():
         from zhongzhuan.store.access_tokens import token_count, create_token as create_access_token
 
-        if await token_count(store) == 0:
-            token = await create_access_token(store, "default")
-            logger.info(f"自动生成访问令牌: {token.token}")
+        async def _ensure_token() -> None:
+            if await token_count(store) == 0:
+                token = await create_access_token(store, "default")
+                logger.info(f"自动生成访问令牌: {token.token}")
+
+        await _startup_db_safe("access token bootstrap", _ensure_token, None)
 
     # OpenCode Free 兜底上游：启用时把免费模型 upsert 到 models + api_keys 表
     # 兜底模型作为"一等公民"写入 DB，可启用/禁用/删除，可加入分组参与路由
@@ -375,7 +401,7 @@ async def run_foreground(
             logger.exception("同步 OpenCode Free 兜底模型失败")
 
     # Build keys from DB (with per-model upstream info) — 兜底模型走标准加载路径
-    keys = await _load_keys_from_store(store, cfg)
+    keys = await _startup_db_safe("key pool load", lambda: _load_keys_from_store(store, cfg), [])
 
     # Fallback: env/CLI key (仅当 DB 无 key 且无兜底时)
     if not keys:
@@ -426,36 +452,35 @@ async def run_foreground(
         await client.start()
         upstream_clients[base_url] = client
 
-    # Load models and groups for /v1/models.
-    # 仅暴露「启用且非兜底」的模型：oc-* 等 is_fallback 模型是上游
-    # 池耗尽时的内部兜底实现细节，不应出现在给下游的模型发现列表里。
-    # ``exposed`` (M011) 只影响*发现列表*，不影响路由：被隐藏的模型/分组
-    # 仍可被客户端显式按名字调用，只是不出现在 /v1/models 里。
-    models_data = [
-        {"name": m.name, "exposed": int(getattr(m, "exposed", 1) or 0)}
-        for m in await list_models(store)
-        if m.enabled and not m.is_fallback
-    ]
-    from zhongzhuan.store.groups import list_groups as list_groups_db
+    async def _load_models_groups() -> tuple[list[dict], list[dict]]:
+        from zhongzhuan.store.groups import list_groups as list_groups_db
 
-    groups_data = [
-        {
-            "id": g["id"],
-            "name": g["name"],
-            "strategy": g["strategy"],
-            # 保留 model_id/weight/ord 字典，使 _set_groups 能按 ord 排定
-            # failover 成员顺序（严格按成员顺序故障转移）。
-            "members": [
-                {"model_id": m["model_id"], "weight": m.get("weight", 1), "ord": m.get("ord", 0)}
-                for m in (g.get("members") or [])
-            ],
-            # 展示开关；handler 的 _set_groups 只读 name/members，额外键无害。
-            "exposed": int(g.get("exposed", 1) or 0),
-            # 兜底分组（v015）
-            "fallback_group": g.get("fallback_group") or "",
-        }
-        for g in await list_groups_db(store)
-    ]
+        models_data = [
+            {"name": m.name, "exposed": int(getattr(m, "exposed", 1) or 0)}
+            for m in await list_models(store)
+            if m.enabled and not m.is_fallback
+        ]
+        groups_data = [
+            {
+                "id": g["id"],
+                "name": g["name"],
+                "strategy": g["strategy"],
+                # 保留 model_id/weight/ord 字典，使 _set_groups 能按 ord 排定
+                # failover 成员顺序（严格按成员顺序故障转移）。
+                "members": [
+                    {"model_id": m["model_id"], "weight": m.get("weight", 1), "ord": m.get("ord", 0)}
+                    for m in (g.get("members") or [])
+                ],
+                # 展示开关；handler 的 _set_groups 只读 name/members，额外键无害。
+                "exposed": int(g.get("exposed", 1) or 0),
+                # 兜底分组（v015）
+                "fallback_group": g.get("fallback_group") or "",
+            }
+            for g in await list_groups_db(store)
+        ]
+        return models_data, groups_data
+
+    models_data, groups_data = await _startup_db_safe("models/groups load", _load_models_groups, ([], []))
 
     proxy = ProxyServer(
         upstream_clients=upstream_clients,
@@ -470,6 +495,33 @@ async def run_foreground(
     )
     proxy_runner = web.AppRunner(proxy.app())
     await proxy_runner.setup()
+
+    # crypto 降级恢复（见上方 crypto_ok）：TiDB 恢复后初始化 AES key 并
+    # 热加载 key 池，无需重启进程。挂在 handler 的后台任务集合里，
+    # 停机时随 _bg_tasks 一起取消。
+    if not crypto_ok:
+        proxy_handler = getattr(proxy, "_proxy_handler", None)
+
+        async def _crypto_recovery() -> None:
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    await crypto_init(data_dir, store_get_key=_get_config)
+                    break
+                except Exception:  # noqa: BLE001 - 继续等 TiDB 恢复
+                    continue
+            logger.info("crypto init succeeded (TiDB recovered); reloading key pool")
+            if proxy_handler is not None:
+                try:
+                    n = await proxy_handler.reload_keys()
+                    logger.info(f"key pool reloaded after crypto recovery: {n} keys")
+                except Exception:  # noqa: BLE001
+                    logger.exception("key reload after crypto recovery failed")
+
+        if proxy_handler is not None:
+            proxy_handler._spawn(_crypto_recovery())
+        else:
+            asyncio.create_task(_crypto_recovery())
 
     # Build SSL context for proxy port (TLS for VPS / Claude Code)
     from zhongzhuan.proxy.tls import build_ssl_context

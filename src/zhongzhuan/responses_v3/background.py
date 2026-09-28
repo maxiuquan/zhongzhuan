@@ -98,8 +98,15 @@ DEFAULT_HEARTBEAT_SECONDS: float = 30.0
 #: 24×7 空转。控制台实测该语句占当月 RU 的 **98.6%（≈124M RU/月）**，是免费额度
 #: 50M 的 2.5 倍，也是「每月 13 号爆额度」的真正元凶。
 #: 现在：同进程入队由 :meth:`BackgroundWorker.notify` 事件即时唤醒（延迟≈0），
-#: 30 秒仅用于「别的进程入的队」这一当前单实例部署根本不存在的场景。
-DEFAULT_POLL_INTERVAL_SECONDS: float = 30.0
+#: 安全网只兜「别的进程入的队」与崩溃租约回收（单实例下进程重启即首轮
+#: peek，不依赖它）。
+#:
+#: 2026-09-28（TiDB RU 在线税事故）：默认 30→3600。停机对照实验实锤：
+#: 有活连接集群就有 ≈20 RU/s 固定基线（不在 Statements 体现），且每次唤醒
+#: 后集群要 ~5 分钟才能休眠回去。安全网摸库必须压到小时级，空闲期才能让
+#: 连接池被释放、集群进入官方 scale-to-zero。环境变量
+#: ``ZHONGZHUAN_V3_WORKER_POLL_SECONDS`` 可覆盖。
+DEFAULT_POLL_INTERVAL_SECONDS: float = 3600.0
 
 #: 空闲时每 N 秒打一行 INFO（轮询次数 / 认领次数 / 最近一次认领耗时）。
 #:
@@ -344,7 +351,7 @@ class BackgroundWorker:
 
         Deliberately *not* a "reset": if the notification arrives while the loop
         is busy (or before it starts), the event stays set and is consumed by the
-        next :meth:`_idle_wait`.  That ordering is what makes the 1s → 30s
+        next :meth:`_idle_wait`.  That ordering is what makes the 1s → hourly
         interval change safe -- a job enqueued between the ``peek_claimable``
         miss and the sleep can never be missed, it can only be found sooner.
         """
@@ -1267,9 +1274,9 @@ class BackgroundWorker:
         The line carries **per-interval deltas** (what the interval length in
         the message refers to) *and* the cumulative totals, so a reader can
         judge the poll rate without knowing when the process started.  A
-        healthy deployment idles at exactly one poll per ``poll_interval``
-        (≈60 polls / 1800s); a regression to a tight loop shows up as orders
-        of magnitude more, which is the whole point of this line.
+        healthy deployment at the 2026-09-28 defaults (poll 3600s, report
+        1800s) idles at ≈0–1 polls / 1800s; a regression to a tight loop shows
+        up as orders of magnitude more, which is the whole point of this line.
         """
         if idle_report_seconds <= 0:
             return self._clock()

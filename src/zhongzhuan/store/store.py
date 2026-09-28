@@ -76,7 +76,14 @@ class _NoopTransaction:
 
 
 async def create_store(config) -> Store:
-    """Factory: create TiDBStore or SqliteStore based on config/env."""
+    """Factory: create TiDBStore or SqliteStore based on config/env.
+
+    TiDB 路径带**启动降级**（2026-09-28）：启动时连不上不再抛异常杀死进程
+    （旧不变量「库连不上时绝对不要重启」的根源），而是返回一个**懒建池**的
+    store —— 后台查询会在下次执行时按需重连。代价是降级期间首批 DB 读取
+    会失败，调用方（``__main__.run_foreground``）对启动期读取各自做了
+    try/except，进程会带着空 key 池 + 响亮的 warning 起来。
+    """
     from loguru import logger
 
     tidb_host = os.getenv("ZHONGZHUAN_TIDB_HOST", "")
@@ -84,7 +91,8 @@ async def create_store(config) -> Store:
     if config.storage.backend == "tidb" or tidb_host:
         from .tidb_store import TiDBStore
 
-        store = await TiDBStore.create(
+        idle_release = os.getenv("ZHONGZHUAN_TIDB_IDLE_RELEASE_SECONDS")
+        store = TiDBStore(
             host=tidb_host or os.getenv("ZHONGZHUAN_TIDB_HOST", ""),
             port=int(os.getenv("ZHONGZHUAN_TIDB_PORT", "4000")),
             user=os.getenv("ZHONGZHUAN_TIDB_USER", ""),
@@ -92,8 +100,19 @@ async def create_store(config) -> Store:
             database=os.getenv("ZHONGZHUAN_TIDB_DATABASE", "zhongzhuan"),
             ssl=os.getenv("ZHONGZHUAN_TIDB_SSL", "true") == "true",
             pool_size=int(os.getenv("ZHONGZHUAN_TIDB_POOL_SIZE", "20")),
+            idle_release_seconds=int(idle_release) if idle_release not in (None, "") else None,
         )
-        logger.info("使用 TiDB Cloud 存储")
+        try:
+            await store.ensure_ready()
+            logger.info(
+                "使用 TiDB Cloud 存储 "
+                f"(pool_size={store._pool_size}, idle_release={store._idle_release_seconds:g}s)"
+            )
+        except Exception as exc:  # noqa: BLE001 - 启动降级：不杀进程，按需重连
+            logger.warning(
+                f"TiDB 不可达，进入降级模式（{type(exc).__name__}: {exc}）；"
+                "进程继续启动，DB 查询将在下次执行时按需重连"
+            )
         return store
 
     from .sqlite_store import SqliteStore

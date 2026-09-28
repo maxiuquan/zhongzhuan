@@ -66,9 +66,16 @@ _INSTRUCTION_ROLES = ("system", "developer")
 #: 语义等价性：内存值不变时，DB 里那行本来就与内存一致（上一轮写的就是它），
 #: 因此跳过写不会让快照变陈旧；任何实际的健康状态迁移都会改变指纹而被写入。
 _HEALTH_SNAPSHOT_INTERVAL_SECONDS = float(os.environ.get("ZHONGZHUAN_HEALTH_SNAPSHOT_INTERVAL_SECONDS", "30"))
-#: 每 N 个快照周期强制全量写一次（默认 60 × 30s ≈ 30 分钟）作兜底，同时充当
-#: 「写量统计」的上报周期 —— 部署后可从日志读到增量策略的真实写量。
-_HEALTH_FULL_SYNC_EVERY = max(1, int(os.environ.get("ZHONGZHUAN_HEALTH_FULL_SYNC_EVERY", "60")))
+#: 每 N 个快照周期强制全量写一次作兜底，同时充当「写量统计」的上报周期 ——
+#: 部署后可从日志读到增量策略的真实写量。
+#:
+#: 2026-09-28（TiDB RU 在线税事故）：默认 60→120（30 分钟 → 60 分钟）。
+#: 停机对照实验实锤：有活连接就有 ≈20 RU/s 固定基线（不在 Statements 体现），
+#: 每次唤醒会让集群醒约 5–10 分钟（空闲释放 + 平台休眠滞后）。全量兜底是
+#: 无流量时段唯一周期性「摸库」动作之一，把它降到每小时一次 = 每天少 ~24 次
+#: 唤醒（≈0.3–0.6M RU/天）。增量的正确性不依赖兜底频率（见
+#: ``_health_snapshot_once``），只是失鲜上限变长。
+_HEALTH_FULL_SYNC_EVERY = max(1, int(os.environ.get("ZHONGZHUAN_HEALTH_FULL_SYNC_EVERY", "120")))
 
 #: v3 后台 worker 的空闲轮询间隔（秒）—— **安全网，不是主触发**。
 #:
@@ -77,8 +84,13 @@ _HEALTH_FULL_SYNC_EVERY = max(1, int(os.environ.get("ZHONGZHUAN_HEALTH_FULL_SYNC
 #: 索引 → 每秒一次全表扫描、零 job 也照跑。控制台实测该语句占当月 RU 的 98.6%
 #: （≈124M RU/月，免费额度 50M 的 2.5 倍），与「每月 13 号爆额度」吻合。
 #: 现在同进程入队由 `BackgroundWorker.notify()` 事件即时唤醒（延迟≈0），
-#: 30 秒只兜「别的进程入的队」—— 当前单实例部署用不到。
-_V3_WORKER_POLL_SECONDS = max(0.05, float(os.environ.get("ZHONGZHUAN_V3_WORKER_POLL_SECONDS", "30")))
+#: 安全网只兜「别的进程入的队」与进程崩溃后的租约回收 —— 单实例部署里，
+#: 进程重启本身就会触发 worker 起步即首轮 peek，崩溃恢复不依赖这个间隔。
+#:
+#: 2026-09-28（TiDB RU 在线税事故）：默认 30→3600。每次「摸库」会让集群
+#: 醒约 5–10 分钟（连接释放 120s + 平台休眠滞后 ≈5min），唤醒频率必须压到
+#: 小时级；同进程 enqueue 走 notify()，background=true 启动延迟不受影响。
+_V3_WORKER_POLL_SECONDS = max(0.05, float(os.environ.get("ZHONGZHUAN_V3_WORKER_POLL_SECONDS", "3600")))
 
 #: 急停开关：`ZHONGZHUAN_V3_BACKGROUND_WORKER=0` 时 `_v3_background_worker()`
 #: 恒返回 None —— 既不启动轮询循环，也让 `background=true` 请求落到既有的
