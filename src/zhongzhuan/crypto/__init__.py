@@ -62,6 +62,11 @@ async def init(data_dir: Path, store_get_key=None) -> None:
         pass
 
 
+def ready() -> bool:
+    """AES key 是否已就绪（TiDB 恢复前为 False，供 /healthz 判断降级态）。"""
+    return _aes_key is not None
+
+
 def _get_key() -> bytes:
     if _aes_key is None:
         raise RuntimeError("crypto not initialized, call crypto.init() first")

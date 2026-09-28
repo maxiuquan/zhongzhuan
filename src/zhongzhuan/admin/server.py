@@ -83,10 +83,33 @@ class AdminServer:
         mount_ui(app, self)
 
         # T33 (R-P2-07/08)：admin 控制面也暴露分层健康检查（复用 observability.health）。
+        app.router.add_get("/healthz", self._health_store)
         app.router.add_get("/healthz/live", self._health_liveness)
         app.router.add_get("/healthz/ready", self._health_readiness)
         app.router.add_get("/healthz/deps", self._health_dependencies)
         return app
+
+    async def _health_store(self, _request: web.Request) -> web.Response:
+        """存储/密钥降级可见性（2026-09-28 静默降级事故的补救）。
+
+        **零 SQL**：``store.status()`` 是纯内存快照（SELECT 1 会唤醒休眠
+        集群、烧在线税，健康检查轮询绝不能碰库）。“库真的通不通”由
+        ``pool_alive`` + ``crypto_ready`` + 请求路径的真实表现间接反映。
+        非 ``/api/`` 路径天然绕过 JWT（auth middleware 白名单），无需登录。
+        """
+        from ..crypto import ready as crypto_ready
+
+        payload = {
+            "status": "ok",
+            "backend": self.store.dialect,
+            "store": self.store.status(),
+            "crypto_ready": crypto_ready(),
+        }
+        # 降级态仍然 200（本端点只做可见性，不做拨测判定）：
+        # crypto 未就绪 = key 池残缺，代理请求会 fail-closed，运维据此报警。
+        if not payload["crypto_ready"] and not payload["store"].get("pool_alive", True):
+            payload["status"] = "degraded"
+        return web.json_response(payload)
 
     # ------------------------------------------------------------------
     # T33 分层健康检查（admin 侧：迁移完成 + store 就绪）

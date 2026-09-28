@@ -21,6 +21,14 @@ class Store(ABC):
         """
         return f"INSERT OR REPLACE INTO {table}" if self.dialect == "sqlite" else f"REPLACE INTO {table}"
 
+    def status(self) -> dict:
+        """In-memory store health snapshot for /healthz.
+
+        **必须零 SQL**：任何真实查询都会把已休眠的 TiDB 集群唤醒（在线税
+        回归），健康检查轮询绝不允许碰库。具体后端覆盖本方法补充池状态。
+        """
+        return {"backend": self.dialect}
+
     @abstractmethod
     async def execute(self, sql: str, params: tuple | None = None) -> int:
         """Execute a write statement. Returns lastrowid."""

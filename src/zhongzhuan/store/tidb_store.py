@@ -45,6 +45,25 @@ DEFAULT_POOL_RECYCLE_SECONDS: int = 300
 #: （退回常驻池行为，等价于改版前的 20 RU/s 在线税）。
 DEFAULT_IDLE_RELEASE_SECONDS: int = int(os.getenv("ZHONGZHUAN_TIDB_IDLE_RELEASE_SECONDS", "120"))
 
+#: 连接级（可安全重试一次）的 pymysql/MySQL 错误码：server gone away(2006)、
+#: 查询中断线(2013)、broken pipe(2055)、连接被杀(1927)。命中即视为
+#: 「借到的连接已死 / 池已失效」——语句未及送达或单语句未提交，重建池后
+#: 重试一次是安全的（本项目语句均为点查/幂等 upsert）。
+_RETRYABLE_ERRNOS = {2006, 2013, 2055, 1927}
+
+#: 连接级错误的文本特征（覆盖 InterfaceError("Not connected")、TLS 握手
+#: 失败、connect_timeout 的 TimeoutError 等不带 errno 的形态）。
+_RETRYABLE_MARKERS = (
+    "lost connection",
+    "connection reset",
+    "connection refused",
+    "server has gone away",
+    "not connected",
+    "broken pipe",
+    "timed out",
+    "ssl",
+)
+
 
 class TiDBStore(Store):
     """Async TiDB store using aiomysql connection pool (lazy + idle-released)."""
@@ -219,13 +238,12 @@ class TiDBStore(Store):
             return
 
     async def execute(self, sql: str, params: tuple | None = None) -> int:
-        conn, pool = await self._acquire()
-        try:
+        async def _op(conn):
             async with conn.cursor() as cur:
                 await cur.execute(sql.replace("?", "%s"), params or ())
                 return cur.lastrowid or 0
-        finally:
-            self._release(conn, pool)
+
+        return await self._run_statement(_op)
 
     async def execute_rowcount(self, sql: str, params: tuple | None = None) -> int:
         """同 :meth:`execute`，但返回受影响行数（``cursor.rowcount``）。
@@ -233,32 +251,116 @@ class TiDBStore(Store):
         aiomysql 对未命中任何行的 UPDATE/DELETE 返回 0；负值统一钳到 0，
         调用方只做 ``> 0`` 判断。
         """
-        conn, pool = await self._acquire()
-        try:
+
+        async def _op(conn):
             async with conn.cursor() as cur:
                 await cur.execute(sql.replace("?", "%s"), params or ())
                 affected = int(cur.rowcount or 0)
                 return affected if affected > 0 else 0
-        finally:
-            self._release(conn, pool)
+
+        return await self._run_statement(_op)
 
     async def fetchone(self, sql: str, params: tuple | None = None) -> tuple | None:
-        conn, pool = await self._acquire()
-        try:
+        async def _op(conn):
             async with conn.cursor() as cur:
                 await cur.execute(sql.replace("?", "%s"), params or ())
                 return await cur.fetchone()
-        finally:
-            self._release(conn, pool)
+
+        return await self._run_statement(_op)
 
     async def fetchall(self, sql: str, params: tuple | None = None) -> list[tuple]:
-        conn, pool = await self._acquire()
-        try:
+        async def _op(conn):
             async with conn.cursor() as cur:
                 await cur.execute(sql.replace("?", "%s"), params or ())
                 return await cur.fetchall()
+
+        return await self._run_statement(_op)
+
+    # ------------------------------------------------------------------
+    # 连接级故障的自愈：借到死连接 → 丢池重建 → 重试一次
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_retryable(exc: BaseException) -> bool:
+        """是否为「连接死了/池失效」级别的错误（只对这些重试）。"""
+        try:
+            import pymysql.err
+
+            if isinstance(exc, pymysql.err.OperationalError):
+                code = exc.args[0] if exc.args else None
+                if code in _RETRYABLE_ERRNOS:
+                    return True
+        except ImportError:  # pragma: no cover - aiomysql 必带 pymysql
+            pass
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+            return True
+        text = str(exc).lower()
+        return any(marker in text for marker in _RETRYABLE_MARKERS)
+
+    async def _run_statement(self, op):
+        """执行单语句，对连接级错误自愈：丢弃当前池、重建、重试一次。
+
+        重试的安全前提：失败要么发生在语句发出前（借到被服务端/中间设备
+        掐断的死连接——公网链路 340s idle timeout 的常态），要么语句在
+        断线中未及提交（autocommit 单语句）。**只重试一次**：第二次失败
+        说明是真故障（网络/服务不可用），原样抛给调用方，防雪崩。
+        事务期间（``_tx_conn`` 绑定）不走此路径——事务语义不能透明重放。
+        """
+        try:
+            return await self._run_statement_once(op)
+        except Exception as exc:  # noqa: BLE001 - 判定后决定是否重试
+            if self._tx_conn is not None or not self._is_retryable(exc):
+                raise
+            from loguru import logger
+
+            logger.warning(
+                f"TiDB connection-level error ({type(exc).__name__}: {exc}); "
+                "discarding pool and retrying statement once"
+            )
+            await self._discard_pool()
+            return await self._run_statement_once(op)
+
+    async def _run_statement_once(self, op):
+        conn, pool = await self._acquire()
+        try:
+            return await op(conn)
         finally:
             self._release(conn, pool)
+
+    async def _discard_pool(self) -> None:
+        """连接级故障后丢弃当前池（下条语句经 ensure/懒建路径重建）。
+
+        旧池 ``close()`` 是标记式的：在途连接归还时才真正断开，不会打断
+        并发请求；摘引用在锁内完成，与 reaper 互斥。
+        """
+        async with self._pool_lock:
+            pool = self._pool
+            self._pool = None
+        if pool is None:
+            return
+        pool.close()
+
+        async def _reap() -> None:
+            try:
+                await asyncio.wait_for(pool.wait_closed(), timeout=5.0)
+            except Exception:  # noqa: BLE001 - 后台清理，失败不熔断
+                pass
+
+        asyncio.create_task(_reap())
+
+    def status(self) -> dict:
+        """/healthz 用的**纯内存**状态快照：不发 SQL（SELECT 1 会唤醒休眠
+        集群、烧在线税，绝不能放健康检查轮询里）。"""
+        idle_for = max(0.0, time.monotonic() - self._last_used)
+        return {
+            "backend": "tidb",
+            "pool_alive": self._pool is not None,
+            "busy_connections": self._busy,
+            "idle_seconds": round(idle_for, 1),
+            "idle_release_seconds": self._idle_release_seconds,
+            "pool_recycle_seconds": self._pool_recycle_seconds,
+            "migrated": self._migrated,
+        }
 
     async def _acquire(self) -> tuple[aiomysql.Connection, aiomysql.Pool | None]:
         """取一条连接：事务进行中复用事务连接，否则从（必要时新建的）池里取。
@@ -338,14 +440,42 @@ class _TiDBTransaction:
         self._cur: aiomysql.cursor.SSCursor | None = None
         self._locked = False
 
+    async def _open_tx_conn(self) -> None:
+        """借连接并 BEGIN；连接级失败（死连接/池失效）丢池重建后重试一次。"""
+        for attempt in (1, 2):
+            try:
+                self._conn, self._pool = await self._store._acquire()
+                self._cur = await self._conn.cursor()
+                await self._conn.begin()
+                return
+            except Exception as exc:  # noqa: BLE001 - 判定后决定是否重试
+                # 本轮借出的连接/游标先清理干净，避免泄漏
+                if self._cur is not None:
+                    try:
+                        await self._cur.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._cur = None
+                if self._conn is not None:
+                    self._store._release(self._conn, self._pool)
+                    self._conn = None
+                    self._pool = None
+                if attempt == 2 or not self._store._is_retryable(exc):
+                    raise
+                from loguru import logger
+
+                logger.warning(
+                    f"TiDB transaction begin hit connection-level error "
+                    f"({type(exc).__name__}: {exc}); discarding pool and retrying once"
+                )
+                await self._store._discard_pool()
+
     async def __aenter__(self):
         # 先拿事务锁再取连接：保证同一 store 上的并发事务段串行进入。
         await self._store._tx_lock.acquire()
         self._locked = True
         try:
-            self._conn, self._pool = await self._store._acquire()
-            self._cur = await self._conn.cursor()
-            await self._conn.begin()
+            await self._open_tx_conn()
             self._store._tx_conn = self._conn
         except BaseException:
             self._store._tx_conn = None

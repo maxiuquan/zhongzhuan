@@ -165,3 +165,134 @@ async def test_release_goes_back_to_borrowed_pool(store) -> None:
 
     s._release(conn, pool)
     assert conn in pool.acquired or pool.freesize == pool.size
+
+
+# ----------------------------------------------------------------------
+# 连接级故障自愈（2026-09-28 补丁②：借池失败 → 丢池重建 → 重试一次）
+# ----------------------------------------------------------------------
+
+def _lost_connection() -> Exception:
+    import pymysql.err
+
+    return pymysql.err.OperationalError(2013, "Lost connection to MySQL server during query")
+
+
+@pytest.mark.asyncio
+async def test_statement_retry_recovers_on_fresh_pool(store) -> None:
+    """借到死连接：语句在旧池上失败 → 丢池 → 新池上重试成功。"""
+    s, pools = store
+    await _execute_one(s)
+    first_pool = pools[0]
+
+    calls: list[_FakePool] = []
+
+    async def op(conn: _FakeConn) -> str:
+        calls.append(conn._pool)
+        if conn._pool is first_pool:
+            raise _lost_connection()
+        return "ok"
+
+    assert await s._run_statement(op) == "ok"
+    assert calls[0] is first_pool, "首次执行应在旧池连接上进行"
+    assert calls[1] is pools[1], "重试应落在新重建的池上"
+    assert first_pool.close_count == 1, "死连接所在旧池必须被丢弃"
+    assert s._pool is pools[1]
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_error_propagates(store) -> None:
+    """非连接级错误（SQL 语义错误等）绝不重试、绝不丢池。"""
+    s, pools = store
+    await _execute_one(s)
+
+    calls: list[int] = []
+
+    async def op(conn: _FakeConn) -> None:
+        calls.append(1)
+        raise ValueError("syntax error in test op")
+
+    with pytest.raises(ValueError):
+        await s._run_statement(op)
+
+    assert len(calls) == 1, "只执行一次，没有重试"
+    assert len(pools) == 1 and s._pool is pools[0], "池未被丢弃"
+
+
+@pytest.mark.asyncio
+async def test_retry_gives_up_after_once(store) -> None:
+    """重建后仍失败 = 真故障，只重试一次就抛（防雪崩）。"""
+    s, pools = store
+    await _execute_one(s)
+
+    calls: list[int] = []
+
+    async def op(conn: _FakeConn) -> None:
+        calls.append(1)
+        raise _lost_connection()
+
+    with pytest.raises(Exception):
+        await s._run_statement(op)
+
+    assert len(calls) == 2, "第一次 + 重建后重试一次，共两次"
+    assert len(pools) == 2, "恰好重建过一个新池"
+
+
+@pytest.mark.asyncio
+async def test_transaction_bound_statements_not_retried(store) -> None:
+    """事务绑定期间语句失败绝不透明重放（事务语义不能重放）。"""
+    s, pools = store
+    conn, _ = await s._acquire()
+    s._tx_conn = conn
+
+    calls: list[int] = []
+
+    async def op(c: _FakeConn) -> None:
+        calls.append(1)
+        raise _lost_connection()
+
+    with pytest.raises(Exception):
+        await s._run_statement(op)
+
+    assert len(calls) == 1
+    assert s._pool is pools[0], "事务路径不触发丢池"
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (None, False),  # 占位，运行时替换
+    ],
+)
+def test_is_retryable_matrix(exc, expected) -> None:
+    """连接级错误识别矩阵：errno / 文本特征 / 超时 各形态都要命中。"""
+    import pymysql.err
+
+    cases = [
+        (pymysql.err.OperationalError(2013, "Lost connection"), True),
+        (pymysql.err.OperationalError(2006, "MySQL server has gone away"), True),
+        (pymysql.err.OperationalError(2055, "Broken pipe"), True),
+        (pymysql.err.OperationalError(1064, "You have an error in your SQL syntax"), False),
+        (pymysql.err.OperationalError(1146, "Table doesn't exist"), False),
+        (pymysql.err.InterfaceError(0, "Not connected"), True),
+        (RuntimeError("connection reset by peer"), True),
+        (RuntimeError("SSL handshake failed"), True),
+        (asyncio.TimeoutError(), True),
+        (ValueError("totally unrelated"), False),
+    ]
+    for exc, expected in cases:
+        assert TiDBStore._is_retryable(exc) is expected, f"{exc!r} -> {expected}"
+
+
+@pytest.mark.asyncio
+async def test_status_is_pure_memory(store) -> None:
+    """/healthz 的 status() 必须零 SQL（SELECT 1 会唤醒休眠集群烧在线税）。"""
+    s, pools = store
+    await _execute_one(s)
+    snap = s.status()
+    assert snap["backend"] == "tidb"
+    assert snap["pool_alive"] is True
+    assert snap["busy_connections"] == 0
+    assert snap["idle_seconds"] >= 0
+    assert "idle_release_seconds" in snap and "pool_recycle_seconds" in snap
+    # 纯内存佐证：不触发任何 _create_pool_locked / acquire —— pools 数不变
+    assert len(pools) == 1

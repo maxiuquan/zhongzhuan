@@ -503,12 +503,22 @@ async def run_foreground(
         proxy_handler = getattr(proxy, "_proxy_handler", None)
 
         async def _crypto_recovery() -> None:
+            consecutive_failures = 0
             while True:
                 await asyncio.sleep(30)
                 try:
                     await crypto_init(data_dir, store_get_key=_get_config)
                     break
-                except Exception:  # noqa: BLE001 - 继续等 TiDB 恢复
+                except Exception as exc:  # noqa: BLE001 - 继续等 TiDB 恢复
+                    consecutive_failures += 1
+                    # 静默降级事故的补救：降级期不能只留 DEBUG 级沉默 —— 每
+                    # 10 次失败（≈5 分钟）打一行 ERROR，让"库挂了很久没人知道"
+                    # 在日志里可见。
+                    if consecutive_failures % 10 == 0:
+                        logger.error(
+                            f"crypto init still failing after {consecutive_failures} attempts "
+                            f"({consecutive_failures * 30}s): {type(exc).__name__}: {exc}"
+                        )
                     continue
             logger.info("crypto init succeeded (TiDB recovered); reloading key pool")
             if proxy_handler is not None:
