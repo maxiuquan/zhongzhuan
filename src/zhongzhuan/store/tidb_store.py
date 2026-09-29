@@ -82,6 +82,8 @@ class TiDBStore(Store):
         pool_size: int = 20,
         idle_release_seconds: int | None = None,
         pool_recycle_seconds: int = DEFAULT_POOL_RECYCLE_SECONDS,
+        ssl_ca: str | None = None,
+        ssl_verify: bool = True,
     ) -> None:
         self._host = host
         self._port = port
@@ -89,6 +91,12 @@ class TiDBStore(Store):
         self._password = password
         self._database = database
         self._ssl = ssl
+        #: 自定义 CA 证书路径（如 Aiven 服务 CA）。设置后加载到默认上下文，
+        #: 证书链按该 CA 校验（Aiven 等用私有 CA 的托管 MySQL 必需）。
+        self._ssl_ca = ssl_ca or None
+        #: False = 仍走 TLS 加密但不校验服务端证书（ssl-mode=REQUIRED 的
+        #: 最宽松等价；仅建议内网/迁移过渡期使用）。
+        self._ssl_verify = ssl_verify
         self._pool_size = max(1, int(pool_size))
         self._idle_release_seconds = (
             DEFAULT_IDLE_RELEASE_SECONDS if idle_release_seconds is None else float(idle_release_seconds)
@@ -128,6 +136,8 @@ class TiDBStore(Store):
         pool_size: int = 20,
         idle_release_seconds: int | None = None,
         pool_recycle_seconds: int = DEFAULT_POOL_RECYCLE_SECONDS,
+        ssl_ca: str | None = None,
+        ssl_verify: bool = True,
     ) -> TiDBStore:
         """构建并**立即建池 + 跑 migration**（连接失败抛异常，供调用方 skip/降级判断）。"""
         store = cls(
@@ -140,6 +150,8 @@ class TiDBStore(Store):
             pool_size=pool_size,
             idle_release_seconds=idle_release_seconds,
             pool_recycle_seconds=pool_recycle_seconds,
+            ssl_ca=ssl_ca,
+            ssl_verify=ssl_verify,
         )
         await store.ensure_ready()
         return store
@@ -158,6 +170,11 @@ class TiDBStore(Store):
             import ssl as _ssl
 
             ssl_ctx = _ssl.create_default_context()
+            if self._ssl_ca:
+                ssl_ctx.load_verify_locations(cafile=self._ssl_ca)
+            if not self._ssl_verify:
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = _ssl.CERT_NONE
 
         # minsize=1：不再预建 N 条常驻连接（旧实现 minsize=maxsize=pool_size，
         # 启动即拉满 —— 正是「有连接在场就烧 20 RU/s」的直接来源之一）。

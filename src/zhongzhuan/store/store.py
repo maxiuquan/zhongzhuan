@@ -109,6 +109,8 @@ async def create_store(config) -> Store:
             ssl=os.getenv("ZHONGZHUAN_TIDB_SSL", "true") == "true",
             pool_size=int(os.getenv("ZHONGZHUAN_TIDB_POOL_SIZE", "20")),
             idle_release_seconds=int(idle_release) if idle_release not in (None, "") else None,
+            ssl_ca=os.getenv("ZHONGZHUAN_TIDB_SSL_CA", "") or None,
+            ssl_verify=os.getenv("ZHONGZHUAN_TIDB_SSL_VERIFY", "true") == "true",
         )
         try:
             await store.ensure_ready()
