@@ -146,7 +146,7 @@ async def main() -> None:
         cols, rows = data[table]
         if args.write:
             # D1 侧实际列可能与导出顺序不同 → 按列名对齐，缺列报错
-            d1_cols = {r[0] for r in await store.fetchall(f'PRAGMA table_info("{table}")')}
+            d1_cols = {r[1] for r in await store.fetchall(f'PRAGMA table_info("{table}")')}
             missing = set(cols) - d1_cols
             if missing:
                 raise RuntimeError(f"{table}: columns not in D1: {sorted(missing)}")
