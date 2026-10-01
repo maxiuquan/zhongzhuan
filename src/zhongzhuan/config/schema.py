@@ -148,7 +148,7 @@ class LimitsSchema(BaseModel):
 class StorageSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    backend: Literal["auto", "sqlite", "tidb"] = "auto"
+    backend: Literal["auto", "sqlite", "tidb", "d1"] = "auto"
     sqlite_db_path: str = Field("data.db", min_length=1)
     #: YAML compat alias for ``sqlite_db_path``.
     db_path: str = ""

@@ -95,6 +95,12 @@ async def create_store(config) -> Store:
     from loguru import logger
 
     tidb_host = os.getenv("ZHONGZHUAN_TIDB_HOST", "")
+    d1_account_id = os.getenv("ZHONGZHUAN_D1_ACCOUNT_ID", "")
+
+    if config.storage.backend == "d1" or (d1_account_id and not tidb_host):
+        from .d1_store import create_store_from_env
+
+        return await create_store_from_env()
 
     if config.storage.backend == "tidb" or tidb_host:
         from .tidb_store import TiDBStore

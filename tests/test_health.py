@@ -433,3 +433,74 @@ async def test_healthz_stale_check_skipped_for_release_mode(monkeypatch):
         assert body["status"] == "ok"
     finally:
         await runner.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-01 D1 迁移：HTTP 后端无常驻池，用 consecutive_db_errors 表达
+# 「所有到库的访问都在失败」（≥3 ≈ 90s 全失败，对齐 worker 30s 节奏）。
+# ---------------------------------------------------------------------------
+
+
+class _D1StoreStub:
+    """模拟 D1Store.status() 快照（HTTP 后端，无池/无 idle_seconds）。"""
+
+    def __init__(self, *, consecutive_db_errors=0):
+        self.dialect = "sqlite"
+        self._snapshot = {
+            "backend": "d1",
+            "mode": "http-rest",
+            "idle_release_seconds": None,
+            "migrated": True,
+            "last_query_epoch": 1727800000,
+            "consecutive_db_errors": consecutive_db_errors,
+            "total_queries": 100,
+        }
+
+    def status(self):
+        return dict(self._snapshot)
+
+
+@pytest.mark.asyncio
+async def test_healthz_d1_consecutive_errors_reports_degraded(monkeypatch):
+    import os
+
+    monkeypatch.setattr("zhongzhuan.crypto.ready", lambda: True)
+    monkeypatch.setattr(os, "getenv", lambda k, d=None: "60" if k == "ZHONGZHUAN_HEALTHZ_STALE_SECONDS" else d)
+
+    store = _D1StoreStub(consecutive_db_errors=5)
+    runner = web.AppRunner(_make_admin_app(store))
+    await runner.setup()
+    port = _free_port()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    try:
+        async with ClientSession() as sess:
+            async with sess.get(f"http://127.0.0.1:{port}/healthz") as resp:
+                body = await resp.json()
+        assert body["status"] == "degraded"
+        assert body["reason"] == "db_consecutive_errors_5"
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_healthz_d1_healthy_reports_ok(monkeypatch):
+    import os
+
+    monkeypatch.setattr("zhongzhuan.crypto.ready", lambda: True)
+    monkeypatch.setattr(os, "getenv", lambda k, d=None: "60" if k == "ZHONGZHUAN_HEALTHZ_STALE_SECONDS" else d)
+
+    store = _D1StoreStub(consecutive_db_errors=0)
+    runner = web.AppRunner(_make_admin_app(store))
+    await runner.setup()
+    port = _free_port()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    try:
+        async with ClientSession() as sess:
+            async with sess.get(f"http://127.0.0.1:{port}/healthz") as resp:
+                body = await resp.json()
+        assert body["status"] == "ok"
+        assert body["backend"] == "d1"
+    finally:
+        await runner.cleanup()

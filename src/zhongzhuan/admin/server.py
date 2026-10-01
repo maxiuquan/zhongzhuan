@@ -111,7 +111,7 @@ class AdminServer:
         store_status = self.store.status()
         payload = {
             "status": "ok",
-            "backend": self.store.dialect,
+            "backend": store_status.get("backend", self.store.dialect),
             "store": store_status,
             "crypto_ready": crypto_ready(),
         }
@@ -133,6 +133,13 @@ class AdminServer:
         elif stale:
             payload["status"] = "degraded"
             payload["reason"] = f"db_no_successful_query_for_{idle}s"
+        else:
+            # D1 等 HTTP 后端没有常驻池，上面的 idle_seconds 陈旧检测不适用；
+            # 用「连续失败语句数」表达同样的事故可见性（≥3 ≈ 90s 全失败）。
+            db_errors = store_status.get("consecutive_db_errors")
+            if isinstance(db_errors, int) and db_errors >= 3:
+                payload["status"] = "degraded"
+                payload["reason"] = f"db_consecutive_errors_{db_errors}"
         return web.json_response(payload)
 
     # ------------------------------------------------------------------
