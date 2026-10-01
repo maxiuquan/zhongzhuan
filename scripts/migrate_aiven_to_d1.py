@@ -113,7 +113,7 @@ async def import_table(store: D1Store, table: str, columns: list[str], rows: lis
         chunk = rows[i : i + BATCH_STATEMENTS]
         stmts = [insert_statement(table, columns, r) for r in chunk]
         # /raw 多语句：分号连接（探针确认依序执行、结果按语句展开）
-        await store.execute("; ".join(stmts))
+        await store.execute_script("; ".join(stmts))
         written += len(chunk)
     return written
 

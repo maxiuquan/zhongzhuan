@@ -132,11 +132,13 @@ class D1Store(Store):
             self._session = aiohttp.ClientSession(timeout=self._timeout)
         return self._session
 
-    async def _raw(self, sql: str, params: tuple | list | None):
-        """执行单语句并返回该语句的 result dict（columns/rows/meta）。
+    async def _raw(self, sql: str, params: tuple | list | None, *, multi: bool = False):
+        """执行语句并返回 result dict（``multi=False`` 单语句）或列表（``multi=True``）。
 
         重试语义与 TiDBStore 一致：单语句 autocommit，连接级/平台级瞬断
         （网络错误、429/5xx）**重试一次**是安全的；其余错误原样抛出。
+        ``multi=True`` 走多语句脚本通道（迁移灌数据用），要求每条语句的
+        ``success`` 都为真，返回按语句展开的 result 列表。
         """
         sql, params = self._inline_blob_params(sql, params)
         body: dict = {"sql": sql}
@@ -158,6 +160,14 @@ class D1Store(Store):
                         raise D1Error(resp.status, {"errors": [{"message": f"non-JSON response: {exc}"}]}) from exc
                     if resp.status == 200 and isinstance(data, dict) and data.get("success"):
                         results = data.get("result") or []
+                        if multi:
+                            if not results:
+                                raise D1Error(200, {"errors": [{"message": "empty statement result list"}]})
+                            for r in results:
+                                if not r.get("success"):
+                                    raise D1Error(200, {"errors": [{"message": f"statement failed in script: {r}"}][:1]})
+                            self._on_success()
+                            return results
                         if len(results) != 1:
                             # 单语句契约被破坏（意外多语句/空结果）。
                             raise D1Error(
@@ -235,6 +245,14 @@ class D1Store(Store):
         result = await self._raw(sql, params or ())
         meta = result.get("meta") or {}
         return int(meta.get("last_row_id") or 0)
+
+    async def execute_script(self, sql: str) -> int:
+        """执行多语句脚本（``;`` 分隔，仅迁移/灌数据用），返回语句条数。
+
+        逐语句 autocommit、无原子性；每条语句 ``success`` 必须为真。
+        """
+        results = await self._raw(sql, None, multi=True)
+        return len(results)
 
     async def execute_rowcount(self, sql: str, params: tuple | None = None) -> int:
         """同 :meth:`execute`，返回受影响行数（meta.changes，钳非负）。"""
