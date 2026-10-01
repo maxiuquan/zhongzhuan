@@ -908,10 +908,9 @@ class ProxyHandler:
         # 强引用防 GC，完成后 add_done_callback 自动 discard，stop 时统一取消。
         self._bg_tasks: set[asyncio.Task] = set()
         self._bg_running = False
-        #: 健康快照增量写的路由池标识 + 上次落库指纹（2026-09-19 写放大修复）。
-        #: `_health_pool_sig` 变了（reload 换了 list 对象、或增删了 key）→ 指纹
-        #: 基准整体作废，下一轮全量重写。见 :meth:`_health_snapshot_once`。
-        self._health_pool_sig: tuple | None = None
+        #: 健康快照增量写的上次落库指纹（2026-09-19 写放大修复）。按 key_id 存，
+        #: 与 key 池 list 对象身份无关 —— reload 不清空基线（2026-10-01 D1 写
+        #: 配额事故，见 :meth:`_health_snapshot_once` 注释）。
         self._health_last_saved: dict[int, tuple] = {}
         #: P0-6: the v3 ``background=true`` worker, owned by this handler's
         #: background-task lifecycle.  ``None`` until ``start_background_tasks``
@@ -4272,12 +4271,11 @@ class ProxyHandler:
         if self.store is None:
             return 0
         keys = self._keys
-        # 路由池标识：(list 对象身份, 参与快照的 key 数)。reload_keys 会整体替换
-        # self._keys，增删 key 也会改变数量 —— 两者都让旧指纹基准不可信。
-        pool_sig = (id(keys), sum(1 for k in keys if k.key_id > 0))
-        if pool_sig != self._health_pool_sig:
-            self._health_pool_sig = pool_sig
-            self._health_last_saved.clear()
+        # 2026-10-01（D1 写配额事故）：不再因 reload 清空指纹基线。基线按
+        # key_id 存、与 list 对象身份无关；reload_keys 会把旧 key 的学到状态
+        # 搬到新对象上，逐 key diff 本身就能正确识别"真变了"的 key。此前
+        # reload 即全量重写 209 行，在 D1 上 = 每点一次 admin 写操作烧 209 行
+        # 写配额（3664 次 INSERT ÷ 209 = 17.5 次全量，与面板操作窗数吻合）。
         write_all = force_full or not self._health_last_saved
 
         written = 0

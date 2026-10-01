@@ -12,11 +12,13 @@ key，另每 ``_HEALTH_FULL_SYNC_EVERY`` 个周期强制全量兜底一次。
 
 覆盖判据
 --------
-* 首轮、路由池变更（reload / 增删 key）→ 全量写
-* 稳定期 → **零写**（这是 RU 收益的来源）
+* 首轮 → 全量写
+* 稳定期 → **零写**（这是 RU/写配额收益的来源）
 * 单个 key 状态迁移 → 只写那一个
 * 写失败**不推进**基准 → 下一轮重试（快照不得静默失鲜）
 * 周期全量兜底确实按 ``_HEALTH_FULL_SYNC_EVERY`` 触发
+* reload / 增删 key **不再**作废基准（2026-10-01 D1 写配额事故：原先每次
+  admin 写操作触发 reload → 209 行全量重写；新 key 无基准仍会落库）
 """
 
 import asyncio
@@ -164,12 +166,18 @@ async def test_failure_counters_change_is_persisted(store, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 路由池变更：基准作废 → 全量重建
+# 路由池变更：基准保留（2026-10-01 D1 写配额事故修复）
 # --------------------------------------------------------------------------- #
 
 
-async def test_reload_keys_triggers_full_rewrite(store, monkeypatch):
-    """真实 reload_keys() 替换 self._keys 对象 → 指纹基准作废，全量重写。"""
+async def test_reload_keys_keeps_fingerprint_baseline(store, monkeypatch):
+    """reload_keys() 替换 self._keys 对象 → **不再**作废指纹基准。
+
+    旧行为：reload 即全量重写（209 key × 每次 admin 写操作），在 D1 上 =
+    每点一次「测试」烧 209 行写配额（实测 3664 INSERT ÷ 209 = 17.5 次全量，
+    与面板操作窗数吻合）。基线按 key_id 存、与 list 对象身份无关，逐 key
+    diff 就能正确识别真变化的 key；同 key_id 状态未变 → 零写。
+    """
     calls = _spy_saves(monkeypatch)
     keys = [_kh(1), _kh(2)]
     h = _handler(keys, store=store)
@@ -178,10 +186,8 @@ async def test_reload_keys_triggers_full_rewrite(store, monkeypatch):
 
     calls.clear()
     await h.reload_keys()
-    written = await h._health_snapshot_once()
-
-    assert written == 2
-    assert sorted(calls) == [1, 2]
+    assert await h._health_snapshot_once() == 0
+    assert calls == []
 
 
 async def _reload_copy(keys: list[KeyHealth]) -> list[KeyHealth]:
@@ -189,8 +195,26 @@ async def _reload_copy(keys: list[KeyHealth]) -> list[KeyHealth]:
     return [_kh(k.key_id) for k in keys]
 
 
-async def test_added_key_triggers_full_rewrite(store, monkeypatch):
-    """池子新增 key → 数量变化使基准作废，全量重写。"""
+async def test_reload_still_persists_genuinely_changed_key(store, monkeypatch):
+    """reload 后基准保留，但真变化的状态仍按 diff 落库（不得漏写）。"""
+    calls = _spy_saves(monkeypatch)
+    keys = [_kh(1), _kh(2)]
+    h = _handler(keys, store=store)
+    h._load_keys_fn = lambda: _reload_copy(keys)
+    await h._health_snapshot_once()
+
+    calls.clear()
+    keys[1].status = STATE_RATE_LIMITED
+    keys[1].cooldown_until = 1_799_999_999.0
+    await h.reload_keys()  # 新对象会从旧对象继承非健康状态
+    written = await h._health_snapshot_once()
+
+    assert written == 1
+    assert calls == [2]
+
+
+async def test_added_key_writes_only_new_key(store, monkeypatch):
+    """池子新增 key → 只有新 key 无基准需落库，老 key 不重写。"""
     calls = _spy_saves(monkeypatch)
     keys = [_kh(1), _kh(2)]
     h = _handler(keys, store=store)
@@ -200,8 +224,8 @@ async def test_added_key_triggers_full_rewrite(store, monkeypatch):
     keys.append(_kh(9))
     written = await h._health_snapshot_once()
 
-    assert written == 3
-    assert sorted(calls) == [1, 2, 9]
+    assert written == 1
+    assert calls == [9]
 
 
 # --------------------------------------------------------------------------- #
