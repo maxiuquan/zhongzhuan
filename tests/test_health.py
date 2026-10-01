@@ -326,3 +326,110 @@ async def test_metrics_endpoint_prometheus_scrapeable(store):
 
     for metric in ALL_METRICS:
         assert f"# HELP {metric.name}" in body, metric.name
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-01 补丁：/healthz 数据陈旧检测（Aiven 关停 20h 而报 ok 的事故）
+# ---------------------------------------------------------------------------
+
+
+class _StaleStoreStub:
+    """模拟常驻池模式下的 store.status() 快照。"""
+
+    def __init__(self, *, idle_seconds, idle_release_seconds=0, pool_alive=True):
+        self.dialect = "mysql"
+        self._snapshot = {
+            "backend": "tidb",
+            "pool_alive": pool_alive,
+            "busy_connections": 0,
+            "idle_seconds": idle_seconds,
+            "idle_release_seconds": idle_release_seconds,
+            "pool_recycle_seconds": 300,
+            "migrated": True,
+        }
+
+    def status(self):
+        return dict(self._snapshot)
+
+
+def _make_admin_app(store):
+    from zhongzhuan.admin.server import AdminServer
+
+    return AdminServer(store).app()
+
+
+@pytest.mark.asyncio
+async def test_healthz_stale_db_reports_degraded(monkeypatch):
+    """常驻池模式 + idle_seconds 超阈值 → degraded + db_stale 原因。
+
+    复现 2026-10-01 事故：Aiven 被平台关停后 pool_alive/crypto_ready 都是
+    过期内存态仍报 ok，只有 idle_seconds 暴露真相。
+    """
+    import os
+
+    monkeypatch.setattr("zhongzhuan.crypto.ready", lambda: True)
+    # 阈值压到 60s，让 71164s 的快照远超阈值
+    monkeypatch.setattr(os, "getenv", lambda k, d=None: "60" if k == "ZHONGZHUAN_HEALTHZ_STALE_SECONDS" else d)
+
+    store = _StaleStoreStub(idle_seconds=71164.6)
+    runner = web.AppRunner(_make_admin_app(store))
+    await runner.setup()
+    port = _free_port()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    try:
+        async with ClientSession() as sess:
+            async with sess.get(f"http://127.0.0.1:{port}/healthz") as resp:
+                assert resp.status == 200
+                body = await resp.json()
+        assert body["status"] == "degraded"
+        assert body["reason"].startswith("db_no_successful_query_for_")
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_healthz_fresh_db_reports_ok(monkeypatch):
+    """同模式、idle_seconds 在阈值内 → 保持 ok（不误报）。"""
+    import os
+
+    monkeypatch.setattr("zhongzhuan.crypto.ready", lambda: True)
+    monkeypatch.setattr(os, "getenv", lambda k, d=None: "60" if k == "ZHONGZHUAN_HEALTHZ_STALE_SECONDS" else d)
+
+    store = _StaleStoreStub(idle_seconds=7.0)
+    runner = web.AppRunner(_make_admin_app(store))
+    await runner.setup()
+    port = _free_port()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    try:
+        async with ClientSession() as sess:
+            async with sess.get(f"http://127.0.0.1:{port}/healthz") as resp:
+                body = await resp.json()
+        assert body["status"] == "ok"
+        assert "reason" not in body
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_healthz_stale_check_skipped_for_release_mode(monkeypatch):
+    """空闲释放模式（idle_release_seconds>0）下 idle 大是正常的 → 不判陈旧。"""
+    import os
+
+    monkeypatch.setattr("zhongzhuan.crypto.ready", lambda: True)
+    monkeypatch.setattr(os, "getenv", lambda k, d=None: "60" if k == "ZHONGZHUAN_HEALTHZ_STALE_SECONDS" else d)
+
+    store = _StaleStoreStub(idle_seconds=71164.6, idle_release_seconds=120)
+    runner = web.AppRunner(_make_admin_app(store))
+    await runner.setup()
+    port = _free_port()
+    site = web.TCPSite(runner, "127.0.0.1", port)
+    await site.start()
+    try:
+        async with ClientSession() as sess:
+            async with sess.get(f"http://127.0.0.1:{port}/healthz") as resp:
+                body = await resp.json()
+        assert body["status"] == "ok"
+    finally:
+        await runner.cleanup()

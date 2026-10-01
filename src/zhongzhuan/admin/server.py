@@ -96,19 +96,43 @@ class AdminServer:
         集群、烧在线税，健康检查轮询绝不能碰库）。“库真的通不通”由
         ``pool_alive`` + ``crypto_ready`` + 请求路径的真实表现间接反映。
         非 ``/api/`` 路径天然绕过 JWT（auth middleware 白名单），无需登录。
+
+        2026-10-01 补丁（Aiven 关停 20h 而 healthz 报 ok 的事故）：新增
+        **数据陈旧检测**——常驻池模式（``idle_release_seconds == 0``）下，
+        worker 安全网每 30s 必有一次成功查询，``idle_seconds`` 超过阈值
+        即说明“所有到库的访问都在失败”，必须报 degraded（pool_alive /
+        crypto_ready 是内存态，库被平台关停时它们**不会**变化，唯独
+        ``idle_seconds`` 不会撒谎）。
         """
+        import os
+
         from ..crypto import ready as crypto_ready
 
+        store_status = self.store.status()
         payload = {
             "status": "ok",
             "backend": self.store.dialect,
-            "store": self.store.status(),
+            "store": store_status,
             "crypto_ready": crypto_ready(),
         }
+        stale_after = float(os.getenv("ZHONGZHUAN_HEALTHZ_STALE_SECONDS", "900"))
+        idle = store_status.get("idle_seconds")
+        permanent_pool = store_status.get("idle_release_seconds") == 0
+        stale = (
+            permanent_pool
+            and stale_after > 0
+            and isinstance(idle, (int, float))
+            and idle > stale_after
+        )
         # 降级态仍然 200（本端点只做可见性，不做拨测判定）：
-        # crypto 未就绪 = key 池残缺，代理请求会 fail-closed，运维据此报警。
-        if not payload["crypto_ready"] and not payload["store"].get("pool_alive", True):
+        # - crypto 未就绪 = key 池残缺，代理请求会 fail-closed；
+        # - db_stale = 常驻池模式下太久没有成功查询，库大概率已不可达。
+        if not payload["crypto_ready"] and not store_status.get("pool_alive", True):
             payload["status"] = "degraded"
+            payload["reason"] = "crypto_not_ready_and_pool_down"
+        elif stale:
+            payload["status"] = "degraded"
+            payload["reason"] = f"db_no_successful_query_for_{idle}s"
         return web.json_response(payload)
 
     # ------------------------------------------------------------------
