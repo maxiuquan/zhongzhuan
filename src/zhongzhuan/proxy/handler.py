@@ -75,6 +75,10 @@ _HEALTH_SNAPSHOT_INTERVAL_SECONDS = float(os.environ.get("ZHONGZHUAN_HEALTH_SNAP
 #: 无流量时段唯一周期性「摸库」动作之一，把它降到每小时一次 = 每天少 ~24 次
 #: 唤醒（≈0.3–0.6M RU/天）。增量的正确性不依赖兜底频率（见
 #: ``_health_snapshot_once``），只是失鲜上限变长。
+#:
+#: 2026-10-02（D1 配额对账）：兜底语义升级为「读回对账」——不再盲目全量
+#: 重写，改为读回 DB 真值逐 key 比对、只写不一致的行（D1 读配额是写配额
+#: 的 50 倍）。本常量现在是「对账周期」。
 _HEALTH_FULL_SYNC_EVERY = max(1, int(os.environ.get("ZHONGZHUAN_HEALTH_FULL_SYNC_EVERY", "120")))
 
 #: v3 后台 worker 的空闲轮询间隔（秒）—— **安全网，不是主触发**。
@@ -109,15 +113,18 @@ def _health_fingerprint(k: Any) -> tuple:
 
     仅这 7 个字段会被 ``save_health`` 写库，因此也只有它们能构成「需要重写」
     的依据；``updated_at`` 由 ``save_health`` 自填，不参与比较。
+    各字段做类型归一化（None→默认值 / float 化冷却时间），与
+    ``store.key_health.row_to_fingerprint`` 的 DB 侧归一化对称，保证
+    「读回对账」时两边可直接 ``==`` 比较。
     """
     return (
-        k.status,
-        k.cooldown_until,
-        k.rpm_limit,
-        k.tpm_limit,
-        k.success_count,
-        k.total_failures,
-        k.recent_429_count,
+        k.status or "",
+        float(k.cooldown_until or 0.0),
+        int(k.rpm_limit or 0),
+        int(k.tpm_limit or 0),
+        int(k.success_count or 0),
+        int(k.total_failures or 0),
+        int(k.recent_429_count or 0),
     )
 
 
@@ -4266,7 +4273,7 @@ class ProxyHandler:
         从 :meth:`_health_snapshot_loop` 拆出来是为了可测：单轮行为可以脱离
         ``sleep`` 直接断言，无需起后台任务再掐秒表。
         """
-        from ..store.key_health import save_health, KeyHealthRow
+        from ..store.key_health import KeyHealthRow, load_all_health, row_to_fingerprint, save_health
 
         if self.store is None:
             return 0
@@ -4276,15 +4283,35 @@ class ProxyHandler:
         # 搬到新对象上，逐 key diff 本身就能正确识别"真变了"的 key。此前
         # reload 即全量重写 209 行，在 D1 上 = 每点一次 admin 写操作烧 209 行
         # 写配额（3664 次 INSERT ÷ 209 = 17.5 次全量，与面板操作窗数吻合）。
-        write_all = force_full or not self._health_last_saved
+        #
+        # 2026-10-02（D1 配额对账）：force_full 与首轮由「盲目全量重写」改为
+        # 「读回对账」——把 DB 真实行读回来与内存指纹逐 key 比对，只写不一致
+        # 的行。D1 读写配额 50:1（500 万 vs 10 万行/天），用读换写；自愈保证
+        # 不变（基线撒谎 / 外部改库 / 写路径 bug → 一个兜底周期内被发现修复）。
+        # 读回失败则退回旧的「全量重写」——宁可多写，不能失鲜。
+        reconcile = force_full or not self._health_last_saved
+        db_truth: dict[int, tuple] | None = None
+        if reconcile:
+            try:
+                db_truth = {
+                    key_id: row_to_fingerprint(row)
+                    for key_id, row in (await load_all_health(self.store)).items()
+                }
+            except Exception as exc:
+                _lg.warning(f"health reconcile read-back failed, falling back to full rewrite: {exc}")
 
         written = 0
         for k in keys:
             if k.key_id <= 0:
                 continue  # 跳过 env/dummy key (key_id=0)
             fp = _health_fingerprint(k)
-            if not write_all and self._health_last_saved.get(k.key_id) == fp:
-                continue
+            if db_truth is not None:
+                if db_truth.get(k.key_id) == fp:
+                    # DB 与内存一致：不写，仅把基线对齐（首轮也借此免写）。
+                    self._health_last_saved[k.key_id] = fp
+                    continue
+            elif self._health_last_saved.get(k.key_id) == fp:
+                continue  # 读回不可用的增量轮：退回基线 diff 行为
             try:
                 await save_health(
                     self.store,
@@ -4309,11 +4336,13 @@ class ProxyHandler:
         return written
 
     async def _health_snapshot_loop(self) -> None:
-        """优化点4：周期把 key 健康状态快照到 DB（重启后可恢复）。
+        """        优化点4：周期把 key 健康状态快照到 DB（重启后可恢复）。
 
         2026-09-19（TiDB 配额事故）：由「每周期无条件全量写」改为**增量写** ——
-        只落指纹变化的 key，每 ``_HEALTH_FULL_SYNC_EVERY`` 个周期强制全量兜底
-        一次。参数与等价性论证见模块顶部常量注释。
+        只落指纹变化的 key。2026-10-02（D1 配额对账）：每
+        ``_HEALTH_FULL_SYNC_EVERY`` 个周期的兜底由「强制全量重写」升级为
+        「读回对账」——读回 DB 真值逐 key 比对，只写不一致的行。
+        参数与等价性论证见模块顶部常量注释。
         """
         cycles = 0
         #: 自上次全量起累计的写次数，随全量周期一起上报，用于核对优化效果。

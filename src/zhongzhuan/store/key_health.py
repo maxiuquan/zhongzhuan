@@ -62,6 +62,24 @@ def _upsert_sql(dialect: str) -> str:
              recent_429_count=excluded.recent_429_count, updated_at=excluded.updated_at"""
 
 
+def row_to_fingerprint(r: KeyHealthRow) -> tuple:
+    """DB 行 → 与 ``handler._health_fingerprint`` 同构的 7 元组（类型归一化）。
+
+    用于「读回对账」：把 DB 真实行转成与内存指纹可直接 ``==`` 比较的形态。
+    D1 REST 的 JSON 可能把 REAL 0.0 序列化成 int 0、NULL 列变 None，先归一
+    化避免「值相等但类型不同」的假阳性漂移。
+    """
+    return (
+        r.status or "",
+        float(r.cooldown_until or 0.0),
+        int(r.rpm_limit or 0),
+        int(r.tpm_limit or 0),
+        int(r.success_count or 0),
+        int(r.failure_count or 0),
+        int(r.recent_429_count or 0),
+    )
+
+
 async def save_health(s: "Store", r: KeyHealthRow) -> None:
     """Upsert a key health snapshot."""
     now = int(time.time())

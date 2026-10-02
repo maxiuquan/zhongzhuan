@@ -12,11 +12,12 @@ key，另每 ``_HEALTH_FULL_SYNC_EVERY`` 个周期强制全量兜底一次。
 
 覆盖判据
 --------
-* 首轮 → 全量写
+* 首轮 → 读回对账：DB 已一致的 key 免写，仅缺行/漂移行落库
 * 稳定期 → **零写**（这是 RU/写配额收益的来源）
 * 单个 key 状态迁移 → 只写那一个
 * 写失败**不推进**基准 → 下一轮重试（快照不得静默失鲜）
-* 周期全量兜底确实按 ``_HEALTH_FULL_SYNC_EVERY`` 触发
+* 周期兜底按 ``_HEALTH_FULL_SYNC_EVERY`` 触发**读回对账**（2026-10-02：
+  不再盲目全量重写，DB 漂移一个周期内被发现并修复）
 * reload / 增删 key **不再**作废基准（2026-10-01 D1 写配额事故：原先每次
   admin 写操作触发 reload → 209 行全量重写；新 key 无基准仍会落库）
 """
@@ -278,14 +279,15 @@ async def test_missing_store_is_noop(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# 周期全量兜底
+# 周期兜底：读回对账（2026-10-02 D1 配额对账）
 # --------------------------------------------------------------------------- #
 
 
-async def test_loop_runs_periodic_full_sync(store, monkeypatch):
-    """循环按 _HEALTH_FULL_SYNC_EVERY 周期全量兜底一次。
+async def test_loop_runs_periodic_reconcile(store, monkeypatch):
+    """循环按 _HEALTH_FULL_SYNC_EVERY 周期触发读回对账。
 
-    周期 1 全量（基准为空）、周期 2 零写、周期 3 强制全量 → 每个 key 恰写 2 次。
+    周期 1 首轮（DB 空 → 全部落库）、周期 2 零写、周期 3 对账（DB 与内存
+    一致 → 零写）。对账只读不写，写配额不再随兜底周期线性消耗。
     """
     monkeypatch.setattr(handler_mod, "_HEALTH_SNAPSHOT_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(handler_mod, "_HEALTH_FULL_SYNC_EVERY", 3)
@@ -296,17 +298,85 @@ async def test_loop_runs_periodic_full_sync(store, monkeypatch):
     h._bg_running = True
     task = asyncio.create_task(h._health_snapshot_loop())
     try:
-        for _ in range(400):
-            await asyncio.sleep(0.005)
-            if len(calls) >= 4:  # 2 个 key × 2 轮全量
-                break
+        await asyncio.sleep(0.05)  # ≥3 个周期，覆盖首轮 + 兜底对账轮
     finally:
         h._bg_running = False
         await asyncio.wait_for(task, timeout=2)
 
     counts = Counter(calls)
-    assert counts[1] == 2, f"key 1 期望「首轮 + 兜底轮」两次，实际 {counts[1]}"
-    assert counts[2] == 2
+    assert counts[1] == 1, f"key 1 期望「仅首轮」一次，对账轮应零写，实际 {counts[1]}"
+    assert counts[2] == 1
+
+
+async def test_full_sync_repairs_drifted_db_row(store, monkeypatch):
+    """对账的核心价值：DB 被外部改动/基线撒谎 → 一个周期内被发现并修复。
+
+    旧行为（盲目全量重写）靠重写全部 209 行掩盖成本；对账只写漂移的那行。
+    """
+    _spy_saves(monkeypatch)
+    keys = [_kh(1), _kh(2)]
+    h = _handler(keys, store=store)
+    await h._health_snapshot_once()
+
+    # 模拟漂移：绕过应用直接改 DB（外部改库 / 恢复备份 / 写路径 bug）
+    await store.execute("UPDATE key_health SET success_count=999 WHERE key_id=?", (2,))
+
+    calls = _spy_saves(monkeypatch)
+    written = await h._health_snapshot_once(force_full=True)
+
+    assert written == 1
+    assert calls == [2]
+    rows = await store.fetchall("SELECT success_count FROM key_health WHERE key_id=?", (2,))
+    assert rows[0][0] == keys[1].success_count  # 修复回内存真值
+
+
+async def test_full_sync_no_writes_when_db_consistent(store, monkeypatch):
+    """对账轮 DB 与内存完全一致 → 零写（这是相对盲目全量的收益本体）。"""
+    calls = _spy_saves(monkeypatch)
+    h = _handler([_kh(1), _kh(2)], store=store)
+    await h._health_snapshot_once()
+
+    calls.clear()
+    assert await h._health_snapshot_once(force_full=True) == 0
+    assert calls == []
+
+
+async def test_first_round_skips_rows_already_consistent(store, monkeypatch):
+    """首轮（重启场景）读回对账：DB 已有一致的行 → 免写，仅缺行落库。
+
+    重启后内存状态本就从 DB 恢复，绝大多数 key 一致 → 重启不再固定烧
+    209 行写配额。
+    """
+    from zhongzhuan.store.key_health import KeyHealthRow, save_health
+
+    calls = _spy_saves(monkeypatch)
+    # 预置 key 1 的 DB 行与内存默认状态完全一致；key 2 缺行。
+    await save_health(
+        store,
+        KeyHealthRow(
+            key_id=1,
+            status=STATE_HEALTHY,
+            cooldown_until=0.0,
+            rpm_limit=1000,
+            tpm_limit=0,
+            success_count=0,
+            failure_count=0,
+            recent_429_count=0,
+        ),
+    )
+    calls.clear()
+
+    keys = [_kh(1), _kh(2)]
+    h = _handler(keys, store=store)
+    written = await h._health_snapshot_once()
+
+    assert written == 1
+    assert calls == [2]  # key 1 免写，key 2 缺行落库
+
+    # 基线已建立：下一轮零写；key 1 变化仍正常落库
+    assert await h._health_snapshot_once() == 0
+    keys[0].success_count += 1
+    assert await h._health_snapshot_once() == 1
 
 
 async def test_loop_exits_when_bg_running_cleared(store, monkeypatch):
