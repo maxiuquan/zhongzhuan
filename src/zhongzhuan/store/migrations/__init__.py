@@ -25,6 +25,7 @@ from .v014_model_tag_note import MIGRATION as M014
 from .v015_group_fallback import MIGRATION as M015
 from .v016_access_token_prefix_index import MIGRATION as M016
 from .v017_background_jobs_claim_index import MIGRATION as M017
+from .v018_key_health_failure_class import MIGRATION as M018
 
 #: Ordered migration registry.  Keep ascending by ``version``.
 MIGRATIONS: tuple[Migration, ...] = (
@@ -44,6 +45,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     M015,
     M016,
     M017,
+    M018,
 )
 
 __all__ = ["MIGRATIONS", "Migration"]

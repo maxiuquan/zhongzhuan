@@ -163,6 +163,9 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             kh.success_count = sh.success_count
             kh.total_failures = sh.failure_count
             kh.recent_429_count = sh.recent_429_count
+            # v018：失败原因/最近失败时间随快照落库，重启后面板仍可见。
+            kh.failure_class = sh.failure_class or ""
+            kh.last_failure_at = sh.last_failure_at or 0.0
             # 已过期的瞬态冷却不恢复（2026-10-02 僵尸状态修复）：DB 里可能
             # 存着冷却早就过期的 error/rate_limited 行，原样拷回会让 key 带着
             # 健康状态皮、拿着 0.3~0.5 的调度降权重跑。与 reload_keys 的

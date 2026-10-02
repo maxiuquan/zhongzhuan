@@ -33,6 +33,9 @@ class KeyHealthRow:
     success_count: int
     failure_count: int
     recent_429_count: int
+    # v018：失败原因与最近失败时间（重启后面板仍可见）。
+    failure_class: str = ""
+    last_failure_at: float = 0.0
 
 
 def _upsert_sql(dialect: str) -> str:
@@ -44,26 +47,32 @@ def _upsert_sql(dialect: str) -> str:
     if dialect == "mysql":
         # MySQL / TiDB：ON DUPLICATE KEY UPDATE + VALUES(col) 引用新行值。
         return """INSERT INTO key_health(key_id, status, cooldown_until, rpm_limit, tpm_limit,
-                                  success_count, failure_count, recent_429_count, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?)
+                                  success_count, failure_count, recent_429_count,
+                                  failure_class, last_failure_at, updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)
            ON DUPLICATE KEY UPDATE
              status=VALUES(status), cooldown_until=VALUES(cooldown_until),
              rpm_limit=VALUES(rpm_limit), tpm_limit=VALUES(tpm_limit),
              success_count=VALUES(success_count), failure_count=VALUES(failure_count),
-             recent_429_count=VALUES(recent_429_count), updated_at=VALUES(updated_at)"""
+             recent_429_count=VALUES(recent_429_count),
+             failure_class=VALUES(failure_class), last_failure_at=VALUES(last_failure_at),
+             updated_at=VALUES(updated_at)"""
     # SQLite：ON CONFLICT ... DO UPDATE + excluded.col 引用新行值。
     return """INSERT INTO key_health(key_id, status, cooldown_until, rpm_limit, tpm_limit,
-                                  success_count, failure_count, recent_429_count, updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?)
+                                  success_count, failure_count, recent_429_count,
+                                  failure_class, last_failure_at, updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(key_id) DO UPDATE SET
              status=excluded.status, cooldown_until=excluded.cooldown_until,
              rpm_limit=excluded.rpm_limit, tpm_limit=excluded.tpm_limit,
              success_count=excluded.success_count, failure_count=excluded.failure_count,
-             recent_429_count=excluded.recent_429_count, updated_at=excluded.updated_at"""
+             recent_429_count=excluded.recent_429_count,
+             failure_class=excluded.failure_class, last_failure_at=excluded.last_failure_at,
+             updated_at=excluded.updated_at"""
 
 
 def row_to_fingerprint(r: KeyHealthRow) -> tuple:
-    """DB 行 → 与 ``handler._health_fingerprint`` 同构的 7 元组（类型归一化）。
+    """DB 行 → 与 ``handler._health_fingerprint`` 同构的 9 元组（类型归一化）。
 
     用于「读回对账」：把 DB 真实行转成与内存指纹可直接 ``==`` 比较的形态。
     D1 REST 的 JSON 可能把 REAL 0.0 序列化成 int 0、NULL 列变 None，先归一
@@ -77,6 +86,8 @@ def row_to_fingerprint(r: KeyHealthRow) -> tuple:
         int(r.success_count or 0),
         int(r.failure_count or 0),
         int(r.recent_429_count or 0),
+        r.failure_class or "",
+        float(r.last_failure_at or 0.0),
     )
 
 
@@ -94,6 +105,8 @@ async def save_health(s: "Store", r: KeyHealthRow) -> None:
             r.success_count,
             r.failure_count,
             r.recent_429_count,
+            r.failure_class,
+            r.last_failure_at,
             now,
         ),
     )
@@ -103,7 +116,8 @@ async def load_all_health(s: "Store") -> dict[int, KeyHealthRow]:
     """Load all key health rows into a dict keyed by key_id."""
     rows = await s.fetchall(
         """SELECT key_id, status, cooldown_until, rpm_limit, tpm_limit,
-                  success_count, failure_count, recent_429_count
+                  success_count, failure_count, recent_429_count,
+                  failure_class, last_failure_at
            FROM key_health"""
     )
     return {
@@ -116,6 +130,8 @@ async def load_all_health(s: "Store") -> dict[int, KeyHealthRow]:
             success_count=row[5],
             failure_count=row[6],
             recent_429_count=row[7],
+            failure_class=row[8] if len(row) > 8 else "",
+            last_failure_at=row[9] if len(row) > 9 else 0.0,
         )
         for row in rows
     }

@@ -111,8 +111,10 @@ _V3_BACKGROUND_WORKER_ENABLED = os.environ.get("ZHONGZHUAN_V3_BACKGROUND_WORKER"
 def _health_fingerprint(k: Any) -> tuple:
     """``key_health`` 行里所有会被持久化的字段（顺序与 ``KeyHealthRow`` 一致）。
 
-    仅这 7 个字段会被 ``save_health`` 写库，因此也只有它们能构成「需要重写」
-    的依据；``updated_at`` 由 ``save_health`` 自填，不参与比较。
+    仅这 9 个字段会被 ``save_health`` 写库，因此也只有它们能构成「需要重写」
+    的依据；``updated_at`` 由 ``save_health`` 自填，不参与比较。v018 起纳入
+    ``failure_class`` / ``last_failure_at``（失败原因持久化，面板「Key 健康」
+    模块的数据源）。
     各字段做类型归一化（None→默认值 / float 化冷却时间），与
     ``store.key_health.row_to_fingerprint`` 的 DB 侧归一化对称，保证
     「读回对账」时两边可直接 ``==`` 比较。
@@ -125,6 +127,8 @@ def _health_fingerprint(k: Any) -> tuple:
         int(k.success_count or 0),
         int(k.total_failures or 0),
         int(k.recent_429_count or 0),
+        k.failure_class or "",
+        float(k.last_failure_at or 0.0),
     )
 
 
@@ -4329,6 +4333,8 @@ class ProxyHandler:
                         success_count=k.success_count,
                         failure_count=k.total_failures,
                         recent_429_count=k.recent_429_count,
+                        failure_class=k.failure_class,
+                        last_failure_at=k.last_failure_at,
                     ),
                 )
             except Exception as exc:

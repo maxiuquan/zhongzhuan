@@ -453,3 +453,87 @@ def register_routes(app: web.Application, ctx) -> None:
         return web.json_response({"ok": True, "key_id": key_id})
 
     app.router.add_post("/api/keys/{id}/reactivate", reactivate)
+
+    # ------------------------------------------------------------------ #
+    # 「Key 健康」模块（2026-10-02）：失效 key 聚合视图的数据源
+    # ------------------------------------------------------------------ #
+
+    _REASON_LABELS = {
+        "permanent": "凭据失效（401/403）",
+        "banned": "封禁（403 CF/WAF）",
+        "rate_limit": "限流（429）",
+        "transient": "上游错误（5xx/超时）",
+        "balance": "余额耗尽（402）",
+        "no_retry": "不可重试错误",
+        "unknown": "未知错误",
+    }
+    _STATUS_ORDER = {"invalid": 0, "error": 1, "rate_limited": 2}
+
+    async def health_report(request):
+        """失效 key 健康报告：非 healthy 的 key + 渠道/模型归属 + 失败原因。
+
+        健康状态取 proxy 内存权威（:func:`fetch_proxy_key_health`，含 v018
+        持久化的 failure_class / last_failure_at），渠道/模型归属取 DB
+        （api_keys ⋈ models）。proxy 不可达时返回 ok=false，前端显示降级
+        提示而不是白屏。
+        """
+        from collections import Counter
+
+        try:
+            health = await fetch_proxy_key_health()
+        except Exception:
+            health = []
+        if not health:
+            return web.json_response(
+                {"ok": False, "error": "proxy 健康状态不可达", "items": [], "summary": {}}
+            )
+
+        status_counts = Counter(h.get("status", "?") for h in health)
+        failed = [h for h in health if h.get("status") != "healthy"]
+
+        try:
+            rows = await ctx.store.fetchall(
+                """SELECT k.id, k.label, m.upstream_model, m.upstream_base
+                   FROM api_keys k LEFT JOIN models m ON k.model_id = m.id"""
+            )
+            meta = {r[0]: (r[1] or "", r[2] or "", r[3] or "") for r in rows}
+        except Exception:
+            meta = {}
+
+        def _channel(base: str) -> str:
+            try:
+                host = urlparse(base).netloc
+            except Exception:
+                host = ""
+            return host or (base[:40] if base else "(未知)")
+
+        items = []
+        for h in failed:
+            label, model, base = meta.get(h.get("key_id"), ("", "", ""))
+            fc = h.get("failure_class") or ""
+            items.append(
+                {
+                    "key_id": h.get("key_id"),
+                    "channel": _channel(base),
+                    "model": model or "(未知模型)",
+                    "label": label or "",
+                    "status": h.get("status", ""),
+                    "failure_class": fc,
+                    "reason": _REASON_LABELS.get(fc, "原因未知（重启前遗留）"),
+                    "cooldown_remaining": h.get("cooldown_remaining", 0.0),
+                    "backoff_level": h.get("backoff_level", 0),
+                    "last_failure_at": h.get("last_failure_at") or 0.0,
+                    "consecutive_failures": h.get("consecutive_failures", 0),
+                    "total_failures": h.get("total_failures", 0),
+                }
+            )
+        # 稳定排序：invalid 最前（最需要人处理），其次 error、rate_limited。
+        items.sort(key=lambda x: (_STATUS_ORDER.get(x["status"], 3), x["key_id"]))
+        summary = {
+            "total": len(health),
+            "failed": len(failed),
+            "by_status": {k: v for k, v in sorted(status_counts.items()) if k != "healthy"},
+        }
+        return web.json_response({"ok": True, "items": items, "summary": summary})
+
+    app.router.add_get("/api/keys/health-report", health_report)

@@ -248,6 +248,7 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
       <div class="nav-section">资源</div>
       <div class="nav-item" data-tab="models" onclick="showTab('models')"><span class="icon">&#9650;</span>模型管理</div>
       <div class="nav-item" data-tab="keys" onclick="showTab('keys')"><span class="icon">&#9755;</span>Key 池</div>
+      <div class="nav-item" data-tab="keyhealth" onclick="showTab('keyhealth')"><span class="icon">&#9888;</span>Key 健康</div>
       <div class="nav-item" data-tab="groups" onclick="showTab('groups')"><span class="icon">&#9638;</span>分组策略</div>
       <div class="nav-item" data-tab="exposure" onclick="showTab('exposure')"><span class="icon">&#9783;</span>暴露管理</div>
       <div class="nav-section">访问控制</div>
@@ -359,6 +360,19 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
           </div>
           <table><thead><tr><th>标签</th><th>模型</th><th>Key</th><th>优先级</th><th>启用</th><th>连通性</th><th>健康</th><th>操作</th></tr></thead>
           <tbody id="keyTable"></tbody></table>
+        </div>
+      </div>
+
+      <!-- Key 健康 -->
+      <div class="tab" id="tab-keyhealth">
+        <div class="card">
+          <div class="card-header">
+            <h2>失效 Key</h2>
+            <div class="actions"><button class="btn small" onclick="loadKeyHealth()">刷新</button></div>
+          </div>
+          <div id="keyHealthSummary" style="padding:8px 12px;color:var(--text-muted);font-size:13px"></div>
+          <table><thead><tr><th>渠道</th><th>模型</th><th>Key</th><th>状态</th><th>原因</th><th>最近失败 / 测试</th><th>失败次数</th><th>操作</th></tr></thead>
+          <tbody id="keyHealthTable"></tbody></table>
         </div>
       </div>
 
@@ -588,7 +602,7 @@ function doLogout() {
 }
 
 // ---- Tab 切换 ----
-const titles = {dashboard:"仪表盘", models:"模型管理", keys:"Key 池", groups:"分组策略", exposure:"暴露管理", tokens:"访问令牌", logs:"请求日志"};
+const titles = {dashboard:"仪表盘", models:"模型管理", keys:"Key 池", keyhealth:"Key 健康", groups:"分组策略", exposure:"暴露管理", tokens:"访问令牌", logs:"请求日志"};
 function showTab(name) {
   document.querySelectorAll(".tab").forEach(t => { t.style.display = "none"; t.classList.remove("active"); });
   document.querySelectorAll(".nav-item").forEach(a => a.classList.remove("active"));
@@ -600,6 +614,7 @@ function showTab(name) {
   if (name === "dashboard") loadOverview();
   if (name === "models") { loadModels(); loadFallbackStatus(); loadCascade(); }
   if (name === "keys") { loadModels(); loadKeys(); }
+  if (name === "keyhealth") loadKeyHealth();
   if (name === "groups") loadGroups();
   if (name === "exposure") loadExposure();
   if (name === "tokens") loadTokens();
@@ -1273,6 +1288,84 @@ async function testAllKeys() {
     loadKeys();
   }
   alert("测试完成\\n\\n成功: " + okCount + " 个\\n失败: " + failCount + " 个");
+}
+
+// ---- Key 健康（2026-10-02）：失效 key 聚合视图 ----
+// 数据源 /api/keys/health-report：proxy 内存健康状态（含 v018 持久化的
+// 失败原因）+ DB 渠道/模型归属。测试复用连通性探针（不污染健康状态），
+// 恢复复用 reactivate（全量重置状态/冷却/退避档）。
+const keyHealthResults = {};
+
+async function loadKeyHealth() {
+  const tbody = document.getElementById("keyHealthTable");
+  const summary = document.getElementById("keyHealthSummary");
+  if (!tbody) return;
+  const r = await api("/api/keys/health-report");
+  if (!r) { tbody.innerHTML = '<tr><td colspan="8" class="empty">加载失败，请重试</td></tr>'; return; }
+  if (!r.ok) {
+    summary.textContent = "";
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">' + esc(r.error || "proxy 健康状态不可达") + '</td></tr>';
+    return;
+  }
+  const s = r.summary;
+  const byStatus = Object.entries(s.by_status || {}).map(([k, v]) => k + " " + v).join(" · ");
+  summary.textContent = "Key 总数 " + s.total + " · 失效 " + s.failed + (byStatus ? "（" + byStatus + "）" : "");
+  if (r.items.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">全部 Key 健康，无失效项</td></tr>';
+    return;
+  }
+  tbody.innerHTML = r.items.map(it => {
+    const tr = keyHealthResults[it.key_id];
+    let testCell = "";
+    if (tr) testCell = tr.ok
+      ? ' <span class="tag ok" title="连通性测试通过">OK ' + tr.latency + 'ms</span>'
+      : ' <span class="tag err" title="' + esc(tr.error || "") + '">测试失败</span>';
+    const statusTag = it.status === "invalid"
+      ? '<span class="tag err">失效</span>'
+      : (it.cooldown_remaining > 0
+        ? '<span class="tag warn">冷却 ' + Math.ceil(it.cooldown_remaining) + 's</span>'
+        : '<span class="tag warn">异常</span>');
+    const lastFail = it.last_failure_at > 0 ? fmtTime(it.last_failure_at) : "未知";
+    return '<tr>' +
+      '<td>' + esc(it.channel) + '</td>' +
+      '<td>' + esc(it.model) + '</td>' +
+      '<td>' + esc(it.label || ("#" + it.key_id)) + '</td>' +
+      '<td>' + statusTag + '</td>' +
+      '<td>' + esc(it.reason) + '</td>' +
+      '<td>' + lastFail + testCell + '</td>' +
+      '<td>' + it.total_failures + '</td>' +
+      '<td><button class="btn small" onclick="testKeyHealth(' + it.key_id + ')">测试</button>' +
+        ' <button class="btn small" onclick="reactivateFromHealth(' + it.key_id + ')">恢复</button></td>' +
+      '</tr>';
+  }).join("");
+}
+
+async function testKeyHealth(id) {
+  const btn = event?.target;
+  const origText = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "测试中..."; }
+  const r = await api("/api/keys/" + id + "/test", {method:"POST"});
+  if (btn) { btn.disabled = false; btn.textContent = origText; }
+  if (!r) return;
+  keyHealthResults[id] = {ok: r.ok, latency: r.latency_ms, error: r.error};
+  await loadKeyHealth();
+  if (r.ok) {
+    alert("连通性测试通过\\n\\n延迟: " + r.latency_ms + "ms\\nURL: " + r.url);
+  } else {
+    alert("连通性测试失败\\n\\n状态码: " + r.status + "\\n错误: " + r.error + "\\nURL: " + r.url);
+  }
+}
+
+async function reactivateFromHealth(id) {
+  if (!confirm("确认恢复 Key " + id + "？\\n\\n失效标记/冷却/退避档全部重置，回到分组原排名参与路由。")) return;
+  const r = await api("/api/keys/" + id + "/reactivate", {method:"POST"});
+  if (r === null) return;
+  if (r.ok) {
+    delete keyHealthResults[id];
+    loadKeyHealth();
+  } else {
+    alert("恢复失败: " + (r.error || "未知错误"));
+  }
 }
 
 function showKeyModal(presetModelId) {
