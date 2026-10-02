@@ -23,6 +23,7 @@ key，另每 ``_HEALTH_FULL_SYNC_EVERY`` 个周期强制全量兜底一次。
 """
 
 import asyncio
+import time
 from collections import Counter
 
 import pytest
@@ -30,6 +31,7 @@ import pytest
 from zhongzhuan.proxy import handler as handler_mod
 from zhongzhuan.proxy.handler import ProxyHandler
 from zhongzhuan.proxy.ratelimit import (
+    STATE_ERROR,
     STATE_HEALTHY,
     STATE_RATE_LIMITED,
     KeyHealth,
@@ -150,6 +152,45 @@ async def test_cooldown_transition_is_persisted(store, monkeypatch):
 
     # 再跑一轮：已稳定，不再写。
     assert await h._health_snapshot_once() == 0
+
+
+async def test_expired_transient_cooldown_normalized_and_persisted(store, monkeypatch):
+    """僵尸状态修复（2026-10-02）：快照循环把过期瞬态冷却归位并落库。
+
+    DB 里可能存着冷却早已过期的 error/rate_limited 行；快照循环在算指纹前
+    先 normalize，归位后的 healthy 状态经 diff 自然落库，一个周期自愈。
+    """
+    calls = _spy_saves(monkeypatch)
+    k = _kh(5)
+    k.status = STATE_ERROR
+    k.cooldown_until = time.time() - 3600  # 冷却早已过期
+    h = _handler([k], store=store)
+
+    written = await h._health_snapshot_once()
+
+    assert k.status == STATE_HEALTHY
+    assert k.cooldown_until == 0.0
+    assert written == 1
+    assert calls == [5]
+    assert (await _read_health(store))[5][0] == STATE_HEALTHY
+
+    # 归位后稳定：零写。
+    calls.clear()
+    assert await h._health_snapshot_once() == 0
+    assert calls == []
+
+
+async def test_active_cooldown_not_normalized_by_snapshot(store, monkeypatch):
+    """冷却未过期的 error key 不被快照归位（只清过期账）。"""
+    _spy_saves(monkeypatch)
+    k = _kh(6)
+    k.status = STATE_ERROR
+    k.cooldown_until = time.time() + 600
+    h = _handler([k], store=store)
+
+    await h._health_snapshot_once()
+
+    assert k.status == STATE_ERROR
 
 
 async def test_failure_counters_change_is_persisted(store, monkeypatch):

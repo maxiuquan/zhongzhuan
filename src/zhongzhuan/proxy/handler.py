@@ -4304,6 +4304,11 @@ class ProxyHandler:
         for k in keys:
             if k.key_id <= 0:
                 continue  # 跳过 env/dummy key (key_id=0)
+            # 过期瞬态冷却归位（2026-10-02 僵尸状态修复）：status 只能靠
+            # 「下一次成功」归位，而调度降权让低频 key 选不中、永远等不到
+            # 成功。快照循环是唯一保证每把 key 都被摸到的地方，在此归位后
+            # 指纹变化自然走下方 diff 落库，DB 脏数据一个周期内自愈。
+            k.normalize_expired_cooldown()
             fp = _health_fingerprint(k)
             if db_truth is not None:
                 if db_truth.get(k.key_id) == fp:

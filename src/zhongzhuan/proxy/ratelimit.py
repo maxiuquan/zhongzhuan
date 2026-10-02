@@ -221,6 +221,27 @@ class KeyHealth:
             self.status = STATE_HEALTHY
             self.cooldown_until = 0.0
 
+    def normalize_expired_cooldown(self) -> bool:
+        """退避到期归位：瞬态冷却（error/rate_limited）过期后置回 healthy。
+
+        ``is_available()`` 是纯时间戳判断，冷却到期即「可用」，但 ``status``
+        只有等下一次成功才归位 —— 而调度降权（error 0.3 / rate_limited 0.5）
+        会让低频模型的 key 长期选不中、等不到那次成功，形成跨重启的僵尸
+        状态（2026-10-02 实测 51 把 key 冷却过期最长 31 天仍挂在 error，
+        启动恢复原样拷回、快照又原样落库，永生）。快照循环与启动恢复调用
+        本方法统一清账，语义与 ``reload_keys`` 的「瞬态冷却已过期 → 归位
+        healthy」规则（handler.py）一致。
+
+        ``invalid`` 不归位（等管理端「确认恢复」）；``backoff_level`` /
+        ``failure_class`` 不动（前者靠成功逐级衰减，后者仅作「上次失败
+        原因」展示）。返回是否发生了归位。
+        """
+        if self.status in (STATE_ERROR, STATE_RATE_LIMITED) and self.cooldown_until <= time.time():
+            self.status = STATE_HEALTHY
+            self.cooldown_until = 0.0
+            return True
+        return False
+
     def reactivate(self) -> None:
         """管理端「确认恢复」：重置为 healthy，回到分组原排名参与 failover。
 

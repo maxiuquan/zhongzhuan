@@ -163,6 +163,11 @@ async def _load_keys_from_store(store: Store, cfg) -> list[KeyHealth]:
             kh.success_count = sh.success_count
             kh.total_failures = sh.failure_count
             kh.recent_429_count = sh.recent_429_count
+            # 已过期的瞬态冷却不恢复（2026-10-02 僵尸状态修复）：DB 里可能
+            # 存着冷却早就过期的 error/rate_limited 行，原样拷回会让 key 带着
+            # 健康状态皮、拿着 0.3~0.5 的调度降权重跑。与 reload_keys 的
+            # 「过期归位 healthy」规则一致。
+            kh.normalize_expired_cooldown()
             # 恢复学到的更严格限额
             if sh.rpm_limit > 0 and (kh.rpm_limit == 0 or sh.rpm_limit < kh.rpm_limit):
                 kh.rpm_limit = sh.rpm_limit

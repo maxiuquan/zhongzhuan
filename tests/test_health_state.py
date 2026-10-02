@@ -133,6 +133,58 @@ class TestClassifyFailure:
         assert should_retry is True
         assert k.status == STATE_ERROR
 
+
+class TestNormalizeExpiredCooldown:
+    """过期瞬态冷却归位（2026-10-02 僵尸状态修复）。
+
+    背景：status 只能靠「下一次成功」归位，而调度降权（error 0.3 /
+    rate_limited 0.5）让低频 key 选不中 → 永远等不到成功 → 跨重启僵尸
+    （实测 51 把 key 冷却过期最长 31 天仍挂 error）。
+    """
+
+    def test_expired_rate_limited_recovers(self):
+        k = _kh()
+        mark_rate_limited(k, retry_after=30.0)
+        k.cooldown_until = time.time() - 1  # 冷却已过期
+        assert k.normalize_expired_cooldown() is True
+        assert k.status == STATE_HEALTHY
+        assert k.cooldown_until == 0.0
+        assert k.is_available()
+
+    def test_expired_error_recovers(self):
+        k = _kh()
+        mark_server_error(k)
+        k.cooldown_until = time.time() - 3600
+        assert k.normalize_expired_cooldown() is True
+        assert k.status == STATE_HEALTHY
+
+    def test_active_cooldown_untouched(self):
+        k = _kh()
+        mark_rate_limited(k, retry_after=30.0)
+        assert k.normalize_expired_cooldown() is False
+        assert k.status == STATE_RATE_LIMITED
+
+    def test_invalid_never_normalized(self):
+        k = _kh()
+        mark_auth_failure(k)  # invalid + cooldown=0（已"过期"）
+        assert k.normalize_expired_cooldown() is False
+        assert k.status == STATE_INVALID
+
+    def test_healthy_untouched(self):
+        k = _kh()
+        assert k.normalize_expired_cooldown() is False
+        assert k.status == STATE_HEALTHY
+
+    def test_failure_class_and_backoff_level_preserved(self):
+        """归位只翻状态，退避等级靠成功逐级衰减、失败原因留作展示。"""
+        k = _kh()
+        mark_server_error(k)
+        k.backoff_level = 2
+        k.cooldown_until = time.time() - 1
+        k.normalize_expired_cooldown()
+        assert k.backoff_level == 2
+        assert k.failure_class == "transient"
+
     def test_400_returns_false_and_does_not_mark(self):
         """400 是请求侧错误，不可重试，且不标记 key 健康度（T07 修正）。"""
         k = _kh()
