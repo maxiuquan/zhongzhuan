@@ -10,8 +10,13 @@
 说明唯一的降级 key 已经失败、组内没有其他可用候选，应立即失败返回，而不是
 进入退避/死线循环。
 
+2026-10-16 更新（单 key 渠道激进重试）：degraded 失败后若该 key 的新冷却
+剩余 ≤ 30s（单 key 渠道瞬时失败封顶 10s），等到期**透明重试一次**再快速
+失败——所以现在的契约是「恰好重试 2 次、总耗时 ≈ 10s（封顶 30s）内结束」，
+而不是旧的一次失败立即 503。
+
 本测试把 key 打冷却并绑定到指定模型，使请求触发降级路径；上游返回 554 后断言
-请求在数秒内结束且客户端收到显式 ``all keys cooling`` 错误帧。
+请求在数秒内结束、上游恰好被打 2 次、客户端收到显式 ``all keys cooling`` 错误帧。
 """
 
 from __future__ import annotations
@@ -38,9 +43,11 @@ def _free_port() -> int:
 
 @pytest.fixture
 async def upstream_554():
-    """上游对所有 /v1/chat/completions 返回 554（网关错误）。"""
+    """上游对所有 /v1/chat/completions 返回 554（网关错误），并统计命中次数。"""
+    hits = {"n": 0}
 
     async def handler(request: web.Request) -> web.Response:
+        hits["n"] += 1
         return web.Response(status=554, text="upstream gateway error")
 
     app = web.Application()
@@ -51,17 +58,18 @@ async def upstream_554():
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
-    yield f"http://127.0.0.1:{port}"
+    yield f"http://127.0.0.1:{port}", hits
     await runner.cleanup()
 
 
 @pytest.mark.asyncio
 async def test_stream_proxy_degraded_key_fails_fast(upstream_554):
-    """全组冷却的降级 key 失败后必须立即失败，不得挂到硬死线。"""
-    upstream = UpstreamClient(base_url=upstream_554, timeout=5.0)
+    """全组冷却的降级 key 失败后：等待重试一次（有界），随后立即失败，不得挂到硬死线。"""
+    base_url, hits = upstream_554
+    upstream = UpstreamClient(base_url=base_url, timeout=5.0)
     await upstream.start()
     proxy = ProxyServer(
-        upstream_clients={upstream_554: upstream},
+        upstream_clients={base_url: upstream},
         api_key="sk-1",
         proxy_timeout=5.0,
     )
@@ -73,7 +81,7 @@ async def test_stream_proxy_degraded_key_fails_fast(upstream_554):
         key_id=300168,
         api_key="sk-1",
         window=SlidingWindow(60, 1000),
-        upstream_base=upstream_554,
+        upstream_base=base_url,
         model_name=model,
         model_id=1,
     )
@@ -82,7 +90,7 @@ async def test_stream_proxy_degraded_key_fails_fast(upstream_554):
     assert k.cooldown_until > time.time()
 
     proxy = ProxyServer(
-        upstream_clients={upstream_554: upstream},
+        upstream_clients={base_url: upstream},
         keys=[k],
         proxy_timeout=5.0,
     )
@@ -109,8 +117,11 @@ async def test_stream_proxy_degraded_key_fails_fast(upstream_554):
         # 必须显式告知客户端：所有 key 都在冷却，而不是挂到死线才 504。
         assert b"event: error" in raw, raw
         assert b"all keys cooling" in raw, raw
-        # 旧行为会挂 15 分钟（900s）；修复后应秒级结束。
-        assert elapsed < 10.0, f"degraded request hung for {elapsed:.1f}s, expected < 10s"
+        # 2026-10-16 契约：首次失败后冷却剩余 10s（单 key 封顶档），等待重试
+        # 恰好一次 → 上游共被打 2 次；随后二次失败快速失败。
+        assert hits["n"] == 2, f"expected exactly 2 upstream attempts, got {hits['n']}"
+        # 旧行为会挂 15 分钟（900s）；等待重试一次后应仍以秒级（~10s）结束。
+        assert 5.0 <= elapsed < 25.0, f"degraded request took {elapsed:.1f}s, expected ~10s (bounded)"
     finally:
         await runner.cleanup()
         await upstream.close()

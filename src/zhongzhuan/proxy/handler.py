@@ -311,6 +311,13 @@ def _ma_normalize_upstream_body(body: dict[str, Any]) -> None:
 #: 三次尝试全部落空，剩下一半 key 根本没被碰过，客户端却已经拿到空回复。
 _V3_STREAM_MAX_SWITCHES = 5
 
+#: 单 key 渠道 degraded 等待重试的最大等待秒数（2026-10-16）。
+#:
+#: 全候选冷却时降级 key 试一次又失败：若其新冷却剩余 ≤ 该值（单 key 渠道
+#: 瞬时失败封顶 10s，正常总能等到），等冷却到期后透明重试一次再放弃；
+#: 超过该值（如 429 长 Retry-After）照旧立即 503 快速失败。
+_SINGLE_KEY_DEGRADED_MAX_WAIT: float = 30.0
+
 #: 多代理编排器会话空闲驱逐 TTL（秒）：30 分钟无新请求即从内存驱逐
 #: （``_sticky_cleanup_loop`` 执行）。与会话粘性 TTL（默认 1800s）对齐。
 _MULTI_AGENT_SESSION_IDLE_TTL: float = 1800.0
@@ -1936,6 +1943,8 @@ class ProxyHandler:
 
         t0 = time.time()
         max_switches = min(len(candidates), _V3_STREAM_MAX_SWITCHES + 1)
+        # 单 key 渠道判定：瞬时失败退避封顶 10s（retry.SINGLE_KEY_BACKOFF_MAX_LEVEL）。
+        single_key = len(candidates) == 1
         tried: set[int] = set()
         resp = None
         payload_bytes = b""
@@ -1959,6 +1968,7 @@ class ProxyHandler:
                 inbound_protocol="responses",
                 session_key=self._session_key(request, prep.body_obj),
                 required_caps=capability_values(prep.sanitized),
+                single_key=single_key,
             )
             if resp.status_code >= 400:
                 # 499 是客户端自己走了，重试毫无意义；4xx（除 429）是请求本身
@@ -1986,7 +1996,7 @@ class ProxyHandler:
                     f"[v3] key_id={attempt_key.key_id} upstream returned EMPTY 200 "
                     f"(no output/content); switching key ({len(tried)}/{max_switches} tried)"
                 )
-                mark_empty_response(attempt_key)
+                mark_empty_response(attempt_key, single_key=single_key)
                 continue
             if _parsed is None and payload_bytes.lstrip().startswith(b"data:"):
                 # 上游把非流请求当流式回了个 SSE 空流（data: [DONE]）——多半是
@@ -2005,6 +2015,7 @@ class ProxyHandler:
                     session_key=self._session_key(request, prep.body_obj),
                     required_caps=capability_values(prep.sanitized),
                     stringify_content=True,
+                    single_key=single_key,
                 )
                 if getattr(resp, "status_code", 502) >= 400:
                     if resp.status_code == 499 or (
@@ -2054,6 +2065,7 @@ class ProxyHandler:
                         inbound_protocol="responses",
                         session_key=self._session_key(request, prep.body_obj),
                         required_caps=capability_values(prep.sanitized),
+                        single_key=len(fb_cands) == 1,
                     )
                     if getattr(fr, "status_code", 502) == 200:
                         try:
@@ -2198,6 +2210,8 @@ class ProxyHandler:
 
         t0 = time.time()
         max_switches = min(len(candidates), _V3_STREAM_MAX_SWITCHES + 1)
+        # 单 key 渠道判定：瞬时失败退避封顶 10s（retry.SINGLE_KEY_BACKOFF_MAX_LEVEL）。
+        single_key = len(candidates) == 1
         tried: set[int] = set()
         #: 以硬性 HTTP 错误（>=400）收场的 key。空流/连接问题的 key 不在其中——
         #: 这类上游可能只是不支持流式（非流形态可用），供末尾的非流降级重试。
@@ -2309,7 +2323,7 @@ class ProxyHandler:
                     upstream_resp = await upstream_gen.__anext__()
                 except StopAsyncIteration:
                     await self._aclose_quietly(upstream_gen)
-                    mark_network_failure(key)
+                    mark_network_failure(key, single_key=single_key)
                     break
                 except (ConnectionResetError, ConnectionError, OSError) as exc:
                     await self._aclose_quietly(upstream_gen)
@@ -2319,12 +2333,12 @@ class ProxyHandler:
                         # fault, so its health is left untouched (R-P1-25).
                         return web.Response(status=499, text="Client Closed Request")
                     _lg.error(f"[v3-stream] key_id={key.key_id} connection error: {type(exc).__name__}: {exc}")
-                    mark_network_failure(key)
+                    mark_network_failure(key, single_key=single_key)
                     break
                 except Exception as exc:  # noqa: BLE001 - attribute, never leak a traceback
                     await self._aclose_quietly(upstream_gen)
                     _lg.error(f"[v3-stream] key_id={key.key_id} exception: {type(exc).__name__}: {exc}")
-                    mark_network_failure(key)
+                    mark_network_failure(key, single_key=single_key)
                     break
 
                 upstream_headers = dict(upstream_resp.headers)
@@ -2357,7 +2371,7 @@ class ProxyHandler:
                         await self._aclose_quietly(upstream_gen)
                         continue
                     _retryable, _flabel = classify_failure_labelled(
-                        key, upstream_resp.status_code, upstream_headers, error_body
+                        key, upstream_resp.status_code, upstream_headers, error_body, single_key=single_key
                     )
                     if _flabel == "unknown":
                         # 规则盲区：异步交给 agnes 补判（非阻塞，不影响本次路由）
@@ -2575,7 +2589,7 @@ class ProxyHandler:
                     f"(clean finish, zero content frames); switching key "
                     f"({len(tried)}/{max_switches} tried)"
                 )
-            mark_empty_response(key)
+            mark_empty_response(key, single_key=single_key)
             continue
 
         # ---- 所有候选 key 都在首字节前失败 ----
@@ -2718,6 +2732,8 @@ class ProxyHandler:
             pool = ordered
         session_key = self._session_key(request, prep.body_obj)
         required_caps = capability_values(prep.sanitized)
+        # 单 key 渠道判定（退避封顶 10s，与主流式路径口径一致）。
+        single_key = len(candidates) == 1
         last_status = 0
         last_body = b""
         for k in pool:
@@ -2742,6 +2758,7 @@ class ProxyHandler:
                 inbound_protocol="responses",
                 session_key=session_key,
                 required_caps=required_caps,
+                single_key=single_key,
             )
             last_status = getattr(resp, "status_code", 502)
             last_body = payload
@@ -2769,6 +2786,7 @@ class ProxyHandler:
                         session_key=session_key,
                         required_caps=required_caps,
                         stringify_content=True,
+                        single_key=single_key,
                     )
                     last_status = getattr(resp, "status_code", 502)
                     last_body = payload
@@ -3514,6 +3532,7 @@ class ProxyHandler:
         required_caps: frozenset[str],
         force_translate: bool = False,
         stringify_content: bool = False,
+        single_key: bool = False,
     ) -> tuple[Any, bytes, str, bool]:
         """Execute one non-stream create against the production upstream chain.
 
@@ -3564,11 +3583,11 @@ class ProxyHandler:
             if transport is not None and transport.is_closing():
                 return _http_json(499, b"Client Closed Request"), b"", "", False
             _lg.error(f"[v3] key_id={key.key_id} connection error: {type(exc).__name__}: {exc}")
-            mark_network_failure(key)
+            mark_network_failure(key, single_key=single_key)
             return _http_json(502, {"error": "upstream connection failed"}), b"", "", False
         except Exception as exc:
             _lg.error(f"[v3] key_id={key.key_id} exception: {type(exc).__name__}: {exc}")
-            mark_network_failure(key)
+            mark_network_failure(key, single_key=single_key)
             return _http_json(502, {"error": "upstream request failed"}), b"", "", False
 
         data = await resp.aread()
@@ -3581,7 +3600,9 @@ class ProxyHandler:
         resp_headers.pop("content-length", None)
 
         if resp.status_code >= 400:
-            should_retry, _flabel = classify_failure_labelled(key, resp.status_code, resp_headers, data)
+            should_retry, _flabel = classify_failure_labelled(
+                key, resp.status_code, resp_headers, data, single_key=single_key
+            )
             if _flabel == "unknown":
                 # 规则盲区：异步交给 agnes 补判（非阻塞，不影响本次路由）
                 self._maybe_agnes_classify(key.key_id, resp.status_code, data)
@@ -3615,6 +3636,7 @@ class ProxyHandler:
                     session_key=session_key,
                     required_caps=required_caps,
                     force_translate=True,
+                    single_key=single_key,
                 )
                 return _r, _p, _ob, _tr
             # D self-heal: the upstream rejected reasoning_effort. Strip it and
@@ -3642,6 +3664,7 @@ class ProxyHandler:
                     session_key=session_key,
                     required_caps=required_caps,
                     force_translate=force_translate,
+                    single_key=single_key,
                 )
                 return _r, _p, _ob, _tr
             result = _V3UpstreamResult(resp.status_code, data, outbound_protocol, need_translation)
@@ -4775,11 +4798,11 @@ class ProxyHandler:
                         return web.Response(status=499, text="Client Closed Request")
                     # Otherwise it may be an upstream connection failure; log and retry.
                     _lg.error(f"[{id(request):x}] key_id={k.key_id} connection error: {type(e).__name__}: {e}")
-                    mark_network_failure(k)
+                    mark_network_failure(k, single_key=len(candidates) == 1)
                     continue
                 except Exception as e:
                     _lg.error(f"[{id(request):x}] key_id={k.key_id} exception: {type(e).__name__}: {e}")
-                    mark_network_failure(k)
+                    mark_network_failure(k, single_key=len(candidates) == 1)
                     continue
 
                 data = await resp.aread()
@@ -4810,7 +4833,7 @@ class ProxyHandler:
                         body = data
 
                     # 优化点2：用 classify_failure 统一处理状态码分流（消除重复）
-                    should_retry = classify_failure(k, resp.status_code, resp_headers, data)
+                    should_retry = classify_failure(k, resp.status_code, resp_headers, data, single_key=len(candidates) == 1)
 
                     _lg.info(
                         f"[{id(request):x}] key_id={k.key_id} failure status={status} "
@@ -4892,7 +4915,7 @@ class ProxyHandler:
                         f"[{id(request):x}] key_id={k.key_id} upstream returned empty 200 "
                         f"(no content); switching to another key"
                     )
-                    mark_empty_response(k)
+                    mark_empty_response(k, single_key=len(candidates) == 1)
                     continue
 
                 mark_success(k)
@@ -4980,6 +5003,8 @@ class ProxyHandler:
         degraded_mode: bool = False,
     ) -> web.StreamResponse:
         _stream_start = time.time()
+        # 单 key 渠道判定：瞬时失败退避封顶 10s（retry.SINGLE_KEY_BACKOFF_MAX_LEVEL）。
+        single_key = len(candidates) == 1
         resp = web.StreamResponse(status=200)
         resp.headers["Content-Type"] = "text/event-stream; charset=utf-8"
         resp.headers["Cache-Control"] = "no-cache"
@@ -5029,6 +5054,9 @@ class ProxyHandler:
             # 分组兜底（2026-08-17）：主组全部候选失败后，用配置的兜底分组再试
             # 一轮。标记放在 while 外——continue 重开一轮时不得重置，否则死循环。
             fb_attempted = False
+            # 单 key 渠道 degraded 等待重试闩（2026-10-16）：degraded 失败后允许
+            # 「等到冷却到期再重试一次」，只等一轮，二次失败照旧快速失败。
+            degraded_waited = False
             while True:
                 tried: set[int] = set()
                 attempt = 0
@@ -5037,10 +5065,9 @@ class ProxyHandler:
                 # the upstream is systemically unavailable — do NOT retry.
                 first_exc_type: str | None = None
                 all_same_type = True
-                # 同 __call__：候选分支返回 Optional，由 `if k is None` 收口。
-                k: KeyHealth | None
 
                 for _ in range(len(candidates)):
+                    k: KeyHealth | None = None
                     # First attempt in each round: prefer sticky session key
                     if session_key and not tried:
                         # T35：进程重启后从 ResponseStore 恢复 binding，保持粘性连续性。
@@ -5065,6 +5092,16 @@ class ProxyHandler:
                             k = self._next_failover_key(candidates, tried, failover_order)
                         else:
                             k = pick_key([x for x in candidates if x.key_id not in tried])
+                    if k is None and degraded_mode and not degraded_waited:
+                        # 2026-10-16 degraded 强制放行：pick_key 对冷却中的 key 打
+                        # -1 分并返回 None（scheduler.score 首行短路），导致「降级
+                        # 试一次」从未真正打到上游、degraded 沦为立即 503（WorkBuddy
+                        # "all keys cooling" 实证）。冷却剩余无论多长都放行一次——
+                        # 失败后的有界等待由轮尾 degraded 分支（degraded_waited 闩
+                        # + 30s 等待上限）兜住。
+                        _degraded_pool = [x for x in candidates if x.key_id not in tried]
+                        if _degraded_pool:
+                            k = _degraded_pool[0]
                     if k is None:
                         break
                     tried.add(k.key_id)
@@ -5181,7 +5218,7 @@ class ProxyHandler:
                                 except Exception:
                                     err_body = b""
                                     err_txt = ""
-                                _retryable = classify_failure(k, _st, _up_headers, err_body)
+                                _retryable = classify_failure(k, _st, _up_headers, err_body, single_key=single_key)
                                 _lg.info(
                                     f"[{id(request):x}] streaming: key_id={k.key_id} "
                                     f"upstream status={_st} key_state={k.status} "
@@ -5351,7 +5388,7 @@ class ProxyHandler:
                                     f"interrupted after {chunk_count} chunks; counting as "
                                     f"failure (audit=502, upstream truncated)"
                                 )
-                                mark_network_failure(k)
+                                mark_network_failure(k, single_key=single_key)
                             else:
                                 if client_gone:
                                     # 写侧客户端断开：key 本身没问题，维持
@@ -5436,7 +5473,7 @@ class ProxyHandler:
                         _lg.warning(f"[{id(request):x}] streaming: key_id={k.key_id} client disconnected")
                         return resp
                     except Exception as e:
-                        mark_network_failure(k)
+                        mark_network_failure(k, single_key=single_key)
                         exc_type_str = type(e).__name__
                         _lg.error(f"[{id(request):x}] streaming: key_id={k.key_id} exception: {exc_type_str}: {e}")
                         # Track exception type for circuit breaker
@@ -5471,7 +5508,14 @@ class ProxyHandler:
                 # backoff retry / fallback-group path below — NOT the breaker.
                 # (`None not in ("",)` was always True, which wrongly short-circuited
                 #  all-554 rounds into an immediate 502 — 2026-08-17 线上实证.)
-                if attempt > 0 and all_same_type and first_exc_type:
+                # 2026-10-16：degraded 模式首放行一轮——单 key 渠道允许「等冷却
+                # 到期重试一次」（见下方 degraded 分支），熔断延迟到该轮之后再生效。
+                if (
+                    attempt > 0
+                    and all_same_type
+                    and first_exc_type
+                    and not (degraded_mode and not degraded_waited)
+                ):
                     _lg.error(
                         f"[{id(request):x}] streaming: all {attempt} key(s) failed with "
                         f"{first_exc_type}, upstream appears unavailable. "
@@ -5504,7 +5548,29 @@ class ProxyHandler:
                 # instead of looping until the 900s hard deadline.
                 # 2026-08-22 实证：juhe/mimo-v2.5-pro 全组冷却后降级 key 300168
                 # 持续 554，导致请求挂 15 分钟后才 504。
+                #
+                # 2026-10-16 单 key 渠道激进重试：degraded 失败后若该 key 的新
+                # 冷却剩余 ≤ 30s（单 key 渠道瞬时失败封顶 10s，见
+                # retry.SINGLE_KEY_BACKOFF_MAX_LEVEL），等冷却到期后透明重试
+                # 一次（对客户端只是多等几秒，SSE keepalive 仍在发心跳），
+                # 而不是立即 503 "all keys cooling"。只等一轮（degraded_waited
+                # 闩），二次失败照旧快速失败——上游真挂时最坏多等 30s。
                 if degraded_mode:
+                    _wait = candidates[0].cooldown_until - time.time() if candidates else 0.0
+                    if (
+                        not degraded_waited
+                        and _wait <= _SINGLE_KEY_DEGRADED_MAX_WAIT
+                        and time.time() - _stream_start + max(_wait, 0.0) < STREAM_HARD_DEADLINE_SECONDS
+                    ):
+                        degraded_waited = True
+                        _lg.warning(
+                            f"[{id(request):x}] streaming: degraded key failed for "
+                            f"model {requested_model!r}; cooldown remaining {_wait:.1f}s "
+                            f"(<= {_SINGLE_KEY_DEGRADED_MAX_WAIT:.0f}s), waiting then retrying once"
+                        )
+                        if _wait > 0:
+                            await asyncio.sleep(_wait)
+                        continue
                     _lg.error(
                         f"[{id(request):x}] streaming: degraded key also failed for "
                         f"model {requested_model!r}; all candidates are cooling"

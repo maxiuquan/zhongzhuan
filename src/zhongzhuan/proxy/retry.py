@@ -28,6 +28,7 @@ from .ratelimit import (
     CLASS_NO_RETRY,
     CLASS_UNKNOWN,
     BALANCE_COOLDOWN_SECONDS,
+    BACKOFF_MAX_LEVEL,
     backoff_seconds,
 )
 
@@ -36,6 +37,28 @@ def _bump_failure(k: KeyHealth) -> None:
     """Record one failure on both counters (T07: total vs consecutive)."""
     k.total_failures += 1
     k.consecutive_failures += 1
+
+
+#: 单 key 渠道的瞬时退避封顶档位（BACKOFF_STEPS[1] = 10s）。
+#:
+#: 多 key 组的逐级退避（5s→10s→60s→600s）本质是"把流量让给其他 key"的
+#: 调度手段；单 key 渠道没有可让路的候选，冷却唯一的效果是把请求拒之
+#: 门外（2026-10-16 线上实证：vsllm 上游 60s 掐线 → 唯一 key 连续失败
+#: 逐级锁到 60s/600s，期间所有请求直接 503 "all keys cooling"）。封顶
+#: 10s：上游真挂的代价只是每个请求多打一次上游，换来上游一恢复即自愈。
+SINGLE_KEY_BACKOFF_MAX_LEVEL: int = 1
+
+
+def _apply_transient_backoff(k: KeyHealth, single_key: bool = False) -> None:
+    """瞬时类失败的退避抬级；单 key 渠道封顶在 10s 档。
+
+    429（rate_limited）不走这里——立即重试只会更糟，继续尊重 Retry-After。
+    """
+    if single_key:
+        k.backoff_level = min(k.backoff_level + 1, SINGLE_KEY_BACKOFF_MAX_LEVEL)
+    else:
+        k.backoff_level = min(k.backoff_level + 1, BACKOFF_MAX_LEVEL)
+    k.cooldown_until = time.time() + backoff_seconds(k.backoff_level)
 
 
 #: 永久失效的关键字（body 小写匹配，覆盖裸状态码无法区分的情形）。
@@ -159,24 +182,22 @@ def mark_rate_limited(k: KeyHealth, retry_after: float = 0.0) -> None:
         k.cooldown_until = time.time() + backoff_seconds(k.backoff_level)
 
 
-def mark_server_error(k: KeyHealth) -> None:
+def mark_server_error(k: KeyHealth, single_key: bool = False) -> None:
     """5xx: upstream server error. Short exponential backoff."""
     _bump_failure(k)
     k.status = STATE_ERROR
     k.failure_class = CLASS_TRANSIENT
     k.last_failure_at = time.time()
-    k.backoff_level = min(k.backoff_level + 1, 3)
-    k.cooldown_until = time.time() + backoff_seconds(k.backoff_level)
+    _apply_transient_backoff(k, single_key)
 
 
-def mark_network_failure(k: KeyHealth) -> None:
+def mark_network_failure(k: KeyHealth, single_key: bool = False) -> None:
     """Connection error / timeout. Short backoff (often transient)."""
     _bump_failure(k)
     k.status = STATE_ERROR
     k.failure_class = CLASS_TRANSIENT
     k.last_failure_at = time.time()
-    k.backoff_level = min(k.backoff_level + 1, 3)
-    k.cooldown_until = time.time() + backoff_seconds(k.backoff_level)
+    _apply_transient_backoff(k, single_key)
 
 
 def mark_failure(k: KeyHealth) -> None:
@@ -184,7 +205,7 @@ def mark_failure(k: KeyHealth) -> None:
     mark_server_error(k)
 
 
-def mark_empty_response(k: KeyHealth) -> None:
+def mark_empty_response(k: KeyHealth, single_key: bool = False) -> None:
     """Upstream returned HTTP 200 but with *no content* (empty completion).
 
     Treated as a soft failure (short exponential backoff, like a 5xx) so the
@@ -197,8 +218,7 @@ def mark_empty_response(k: KeyHealth) -> None:
     k.status = STATE_ERROR
     k.failure_class = CLASS_TRANSIENT
     k.last_failure_at = time.time()
-    k.backoff_level = min(k.backoff_level + 1, 3)
-    k.cooldown_until = time.time() + backoff_seconds(k.backoff_level)
+    _apply_transient_backoff(k, single_key)
 
 
 def mark_success(k: KeyHealth) -> None:
@@ -359,19 +379,26 @@ def looks_like_proxy_block(status_code: int, headers: dict, body: bytes = b"") -
     return False
 
 
-def classify_failure(k: KeyHealth, status_code: int, headers: dict, body: bytes = b"") -> bool:
+def classify_failure(
+    k: KeyHealth, status_code: int, headers: dict, body: bytes = b"", single_key: bool = False
+) -> bool:
     """根据上游状态码/响应体分类失败并更新 key 健康状态（2026-08-15 v1）。
 
     返回 True 表示可重试（应换下一个 key），False 表示请求侧错误（应直接返回客户端）。
     分类委托 :func:`classify_label`，状态迁移交给对应的 mark_* 函数：
       permanent → invalid（等确认恢复）；banned → 长冷却；rate_limit/transient → 逐级退避；
       no_retry → 不标记；unknown → 按 transient 降级处理（不阻塞，可交给 agnes 异步补判）。
+
+    ``single_key``：该请求的候选池只有一把 key 时传 True——transient/unknown
+    类失败的退避封顶 10s（见 :data:`SINGLE_KEY_BACKOFF_MAX_LEVEL`）。
     """
-    retryable, _label = classify_failure_labelled(k, status_code, headers, body)
+    retryable, _label = classify_failure_labelled(k, status_code, headers, body, single_key=single_key)
     return retryable
 
 
-def classify_failure_labelled(k: KeyHealth, status_code: int, headers: dict, body: bytes = b"") -> tuple[bool, str]:
+def classify_failure_labelled(
+    k: KeyHealth, status_code: int, headers: dict, body: bytes = b"", single_key: bool = False
+) -> tuple[bool, str]:
     """同 :func:`classify_failure`，但额外返回分类标签（供调用方决定 agnes 补判）。"""
     label = classify_label(status_code, headers, body)
     if label == CLASS_PERMANENT:
@@ -394,12 +421,12 @@ def classify_failure_labelled(k: KeyHealth, status_code: int, headers: dict, bod
         mark_rate_limited(k, ra_sec)
         return True, label
     if label == CLASS_TRANSIENT:
-        mark_server_error(k)
+        mark_server_error(k, single_key=single_key)
         return True, label
     if label == CLASS_UNKNOWN:
         # 规则盲区：按瞬时降级（当前请求继续 failover），分类结论交给
         # agnes 异步补判（config 开关控制，见 handler._maybe_agnes_classify）。
-        mark_server_error(k)
+        mark_server_error(k, single_key=single_key)
         return True, label
     # no_retry：请求侧问题，不重试，也不记健康度（T07 修正历史误判）。
     return False, label
