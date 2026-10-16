@@ -5541,6 +5541,40 @@ class ProxyHandler:
                     )
                     break
 
+                # 2026-10-17 空转快速失败：候选池全为 invalid（permanent）时立即
+                # 终止，不进退避循环。典型场景：单 key 渠道唯一 key 被 401/403
+                # 标 invalid（scheduler.score 对 invalid/冷却 key 返 None），此后
+                # 每轮 "all 0 key(s)" 空转 30s 直到 900s 硬死线（线上实证
+                # 2026-10-17 vsllm/claude-opus-5-5 key 360017 invalid token，
+                # 请求白挂 15 分钟）。invalid 等时间不会自愈（需管理端确认恢复
+                # 或重启），等待毫无意义。
+                # 注意：attempt 的大小不作条件——首轮唯一 key 401 后（attempt==1）
+                # 候选池即已全 invalid，同样不该等。混合状态（invalid + error
+                # 冷却）不在此列——error key 冷却到期可自愈，保持既有退避行为。
+                if reason_for_exhaustion(candidates) == "all_invalid":
+                    _lg.error(
+                        f"[{id(request):x}] streaming: no selectable key for "
+                        f"model {requested_model!r}; all candidates invalid "
+                        f"(permanent failure) — failing fast"
+                    )
+                    try:
+                        await resp.write(
+                            b'event: error\ndata: {"error":{"type":"upstream_error",'
+                            b'"message":"all keys invalid (401/402/permanent), '
+                            b'awaiting manual recovery"}}\n\n'
+                            b"data: [DONE]\n\n"
+                        )
+                    except Exception:
+                        pass
+                    self._log_gate_failure(
+                        request,
+                        requested_model,
+                        503,
+                        "all candidates invalid (permanent); failing fast instead of spinning",
+                        inbound_protocol,
+                    )
+                    break
+
                 # Degraded-mode fast-fail: when every healthy candidate was on
                 # cooldown we picked the *shortest-cooldown* key to try once.
                 # If that single key also fails there is nothing useful to retry
