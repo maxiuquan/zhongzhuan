@@ -318,6 +318,13 @@ _V3_STREAM_MAX_SWITCHES = 5
 #: 超过该值（如 429 长 Retry-After）照旧立即 503 快速失败。
 _SINGLE_KEY_DEGRADED_MAX_WAIT: float = 30.0
 
+#: 提交前失败（上游拒绝帧 / 空完成 / 首字节前截断）的最大透明重试次数（2026-10-18）。
+#:
+#: token101 审核是分钟级时间窗：同请求稍后重试可通过，但窗口内连续重试大概率
+#: 还是拒。给 3 次（换 key/轮）后仍失败 → 显式 SSE error 帧收场，不再挂到
+#: 900s 硬死线。按 2s 起步退避，3 次约 10-40s，窗口短时能自愈，长时快速报错。
+_MAX_PRECOMMIT_RETRIES = 3
+
 #: 多代理编排器会话空闲驱逐 TTL（秒）：30 分钟无新请求即从内存驱逐
 #: （``_sticky_cleanup_loop`` 执行）。与会话粘性 TTL（默认 1800s）对齐。
 _MULTI_AGENT_SESSION_IDLE_TTL: float = 1800.0
@@ -734,6 +741,7 @@ from .context import RequestContextBuilder
 from .ratelimit import KeyHealth, STATE_HEALTHY, STATE_INVALID
 from .retry import (
     mark_network_failure,
+    mark_server_error,
     mark_success,
     mark_empty_response,
     learn_rate_limits,
@@ -857,6 +865,90 @@ def _extract_usage_from_chat_stream_chunk(chunk: bytes) -> dict | None:
             if isinstance(usage, dict) and usage:
                 return usage
     return None
+
+
+def _json_stream_has_payload(obj: Any) -> bool:
+    """True when a parsed SSE frame carries *meaningful* model output.
+
+    Used to decide whether an upstream stream has committed anything to the
+    client.  Covers the three wire formats that flow through this proxy:
+
+    - OpenAI chat: ``delta.content`` / ``delta.tool_calls`` / ``delta.function_call``
+      / ``delta.reasoning_content``
+    - Anthropic Messages: ``content_block_delta.delta.text`` /
+      ``content_block_delta.delta.partial_json`` / ``content_block_start``
+    - OpenAI Responses: ``response.output_text.delta.delta`` (string) /
+      ``response.function_call_arguments.delta``
+
+    Role-only or empty-string deltas (the shape token101's rejection stream
+    emits — 2026-10-18 实证) do NOT count.
+    """
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            if key in ("tool_calls", "function_call", "content_block", "content_block_start") and val:
+                return True
+            if (
+                key in ("content", "text", "reasoning_content", "partial_json", "delta", "input_json_delta")
+                and isinstance(val, str)
+                and val.strip()
+            ):
+                return True
+            if _json_stream_has_payload(val):
+                return True
+    elif isinstance(obj, list):
+        return any(_json_stream_has_payload(v) for v in obj)
+    return False
+
+
+def _scan_upstream_sse(buf: bytearray, chunk: bytes) -> tuple[bool, str | None]:
+    """Scan one raw upstream SSE chunk for (saw_payload, top_level_error_message).
+
+    ``buf`` carries the incomplete trailing line across calls (chunks may
+    split JSON frames at arbitrary byte boundaries).  Handles both well-formed
+    ``data: {...}`` frames and the *bare JSON line* error variant emitted by
+    new_api bridges (2026-10-18 token101: rejection arrived as a raw
+    ``{"error":{...}}`` line with no ``data:`` prefix).  Only a *top-level*
+    ``error`` key counts as an error frame — the string "error" inside model
+    content (code samples etc.) is never touched, because content is a JSON
+    *value* here, not a sibling key.
+    """
+    buf.extend(chunk)
+    data = bytes(buf)
+    saw_payload = False
+    err_msg: str | None = None
+    start = 0
+    while True:
+        nl = data.find(b"\n", start)
+        if nl == -1:
+            break
+        line = data[start:nl]
+        start = nl + 1
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith(b"data:"):
+            s = s[5:].strip()
+        if not s or s == b"[DONE]":
+            continue
+        if not (s.startswith(b"{") and s.endswith(b"}")):
+            continue
+        try:
+            obj = json.loads(s)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        err = obj.get("error")
+        if err:
+            err_msg = (
+                str(err.get("message"))[:300] if isinstance(err, dict) and err.get("message") else str(err)[:300]
+            )
+            continue
+        if not saw_payload and _json_stream_has_payload(obj):
+            saw_payload = True
+    del buf[:]
+    buf.extend(data[start:])
+    return saw_payload, err_msg
 
 
 class ProxyHandler:
@@ -5003,21 +5095,6 @@ class ProxyHandler:
         degraded_mode: bool = False,
     ) -> web.StreamResponse:
         _stream_start = time.time()
-        # --- TEMP debug capture (2026-10-18, removable) ----------------------
-        # Env 门控：ZHONGZHUAN_DEBUG_CAPTURE_DIR + ZHONGZHUAN_DEBUG_CAPTURE_MODEL。
-        # 落盘原始请求体 + 上游透传 SSE 字节，用于诊断 token101 0/0 空流事故。
-        # 任何异常都不影响转发。定位后删掉本段 + .env 两个变量即可。
-        _cap_dir = os.environ.get("ZHONGZHUAN_DEBUG_CAPTURE_DIR", "")
-        _cap_tag = ""
-        if _cap_dir and os.environ.get("ZHONGZHUAN_DEBUG_CAPTURE_MODEL", "") == requested_model:
-            try:
-                os.makedirs(_cap_dir, exist_ok=True)
-                _cap_tag = time.strftime("%H%M%S") + f"_{id(request):x}"
-                with open(os.path.join(_cap_dir, f"{_cap_tag}_request.json"), "w", encoding="utf-8") as _cf:
-                    json.dump(body_obj, _cf, ensure_ascii=False)
-            except Exception:
-                _cap_tag = ""
-        # ----------------------------------------------------------------------
         # 单 key 渠道判定：瞬时失败退避封顶 10s（retry.SINGLE_KEY_BACKOFF_MAX_LEVEL）。
         single_key = len(candidates) == 1
         resp = web.StreamResponse(status=200)
@@ -5069,6 +5146,11 @@ class ProxyHandler:
             # 分组兜底（2026-08-17）：主组全部候选失败后，用配置的兜底分组再试
             # 一轮。标记放在 while 外——continue 重开一轮时不得重置，否则死循环。
             fb_attempted = False
+            # 提交前失败计数（2026-10-18）：上游拒绝帧/空完成/首字节前截断的
+            # 累计次数。这类失败对客户端透明（一个字节都没发出去），先静默
+            # 换 key/轮重试给上游窗口一个机会；超过上限则显式报错收场，
+            # 防止在分钟级审核窗口里白挂到 900s 硬死线。
+            _precommit_fail = 0
             # 单 key 渠道 degraded 等待重试闩（2026-10-16）：degraded 失败后允许
             # 「等到冷却到期再重试一次」，只等一轮，二次失败照旧快速失败。
             degraded_waited = False
@@ -5335,26 +5417,55 @@ class ProxyHandler:
                             # include_usage=true 时末 chunk 带 usage，从这里收集，
                             # 供下方日志/配额使用（2026-08-16 之前恒为 0/0）。
                             _raw_stream_usage: dict | None = None
-                            _cap_buf = bytearray()
                             # 异常来源区分（P0）：读侧 = 上游断流/截断；写侧 =
                             # 客户端断开。二者此前混为一谈——上游断流也被当成
                             # 成功 mark_success + 审计 200，退避状态被洗白。
                             upstream_broken = False
                             client_gone = False
+                            # —— 持流-提交（hold-until-payload，2026-10-18）——
+                            # token101 审核拒绝会以「HTTP 200 + 一串空 content 帧 +
+                            # 顶层 error 帧（甚至裸 JSON 行）」的合法 SSE 形态出现，
+                            # 旧逻辑照单转发并记 200 完成 0/0 token，客户端
+                            # （WorkBuddy）收到空流后无声结束对话。现在：见到首个
+                            # 有效负载（非空 content/text/tool_calls 等）之前，
+                            # 上游字节只持有不转发——拒绝/空流/首字节前截断都能
+                            # 对客户端透明地换 key 重试。
+                            _pending_out: list[bytes] = []
+                            _scan_buf = bytearray()
+                            _saw_payload = False
+                            _up_error_msg: str | None = None
                             try:
                                 async for chunk in upstream_resp.aiter_raw():
-                                    if chunk:
-                                        if stream_translator:
-                                            translated_chunks = await stream_translator.feed(chunk)
-                                            for tc in translated_chunks:
-                                                await resp.write(tc)
-                                        else:
-                                            await resp.write(chunk)
-                                            if _cap_tag:
-                                                _cap_buf.extend(chunk)
-                                            if _raw_stream_usage is None:
-                                                _raw_stream_usage = _extract_usage_from_chat_stream_chunk(chunk)
+                                    if not chunk:
+                                        continue
+                                    if not _saw_payload and _up_error_msg is None:
+                                        _p, _e = _scan_upstream_sse(_scan_buf, chunk)
+                                        if _e:
+                                            _up_error_msg = _e
+                                        if _p:
+                                            _saw_payload = True
+                                    if _up_error_msg is not None:
+                                        # 上游明确拒绝：不再透传任何字节（含已持有的
+                                        # 空帧），连接随即释放，走下方失败闸门重试。
+                                        break
+                                    if stream_translator:
+                                        out_chunks = await stream_translator.feed(chunk)
+                                    else:
+                                        out_chunks = [chunk]
+                                    if not _saw_payload:
+                                        # 未提交：持有，不写客户端。
+                                        _pending_out.extend(out_chunks)
                                         chunk_count += 1
+                                        continue
+                                    if _pending_out:
+                                        for _oc in _pending_out:
+                                            await resp.write(_oc)
+                                        _pending_out.clear()
+                                    for _oc in out_chunks:
+                                        await resp.write(_oc)
+                                    if not stream_translator and _raw_stream_usage is None:
+                                        _raw_stream_usage = _extract_usage_from_chat_stream_chunk(chunk)
+                                    chunk_count += 1
                             except (ConnectionResetError, ConnectionError, OSError):
                                 # 归属判定：客户端断开时 aiohttp 的 transport 会进入
                                 # closing；transport 仍开着则异常来自上游读侧。
@@ -5381,8 +5492,155 @@ class ProxyHandler:
                                     except Exception:
                                         pass
 
+                            # —— 失败闸门（2026-10-18）：凡未向客户端提交任何有效
+                            # 负载的失败，都丢弃持有缓冲、按对应类别标记后换 key/轮
+                            # 透明重试；审计如实记 502，不再出现「200 假完成 0/0」。
+                            _translator_usage: dict | None = None
+                            if stream_translator and hasattr(stream_translator, "usage"):
+                                _tu = stream_translator.usage
+                                if isinstance(_tu, dict):
+                                    _translator_usage = _tu
+
+                            if client_gone and not _saw_payload:
+                                # 客户端在拿到任何内容前就断开：不惩罚 key、不重试。
+                                _lg.warning(
+                                    f"[{id(request):x}] streaming: key_id={k.key_id} "
+                                    f"client gone before first payload ({chunk_count} chunks held)"
+                                )
+                                return resp
+
+                            if _up_error_msg is not None and not _saw_payload:
+                                # 上游拒绝帧（token101 审核时间窗，2026-10-18 实证）：
+                                # 语义上是暂时的（同请求稍后重试可通过），按 transient
+                                # 处理走既有退避/换 key/轮循环；超上限则显式报错。
+                                _lg.error(
+                                    f"[{id(request):x}] streaming: key_id={k.key_id} upstream "
+                                    f"rejected request ({_up_error_msg!r}); treating as "
+                                    f"transient failure and retrying"
+                                )
+                                mark_server_error(k, single_key=single_key)
+                                if self.store:
+                                    self._spawn(
+                                        self._log_and_deduct(
+                                            self.store,
+                                            client_ip=request.remote or "",
+                                            model_name=requested_model or "",
+                                            member_model=k.model_name,
+                                            key_id=k.key_id,
+                                            status=502,
+                                            latency_ms=int((time.time() - _stream_start) * 1000),
+                                            tokens_in=0,
+                                            tokens_out=0,
+                                            inbound_protocol=inbound_protocol,
+                                            outbound_protocol=outbound_protocol,
+                                            translated=need_translation,
+                                            token_id=request.get("token_id", 0),
+                                            error=f"upstream rejected: {_up_error_msg}"[:200],
+                                        )
+                                    )
+                                _precommit_fail += 1
+                                if _precommit_fail >= _MAX_PRECOMMIT_RETRIES:
+                                    _lg.error(
+                                        f"[{id(request):x}] streaming: upstream rejected "
+                                        f"{_precommit_fail}x for model {requested_model!r}; "
+                                        f"giving up with explicit error"
+                                    )
+                                    try:
+                                        await resp.write(
+                                            b'event: error\ndata: {"error":{"type":"upstream_error",'
+                                            b'"message":"upstream rejected the request '
+                                            b'(content audit window); retry later"}}\n\n'
+                                            b"data: [DONE]\n\n"
+                                        )
+                                    except Exception:
+                                        pass
+                                    return resp
+                                break
+
+                            if upstream_broken and not _saw_payload:
+                                # 首字节前截断：客户端还没收到任何东西，透明重试。
+                                _lg.error(
+                                    f"[{id(request):x}] streaming: key_id={k.key_id} upstream "
+                                    f"truncated before first payload ({chunk_count} chunks); "
+                                    f"retrying transparently"
+                                )
+                                mark_network_failure(k, single_key=single_key)
+                                if self.store:
+                                    self._spawn(
+                                        self._log_and_deduct(
+                                            self.store,
+                                            client_ip=request.remote or "",
+                                            model_name=requested_model or "",
+                                            member_model=k.model_name,
+                                            key_id=k.key_id,
+                                            status=502,
+                                            latency_ms=int((time.time() - _stream_start) * 1000),
+                                            tokens_in=0,
+                                            tokens_out=0,
+                                            inbound_protocol=inbound_protocol,
+                                            outbound_protocol=outbound_protocol,
+                                            translated=need_translation,
+                                            token_id=request.get("token_id", 0),
+                                            error="upstream stream truncated before first content",
+                                        )
+                                    )
+                                _precommit_fail += 1
+                                if _precommit_fail >= _MAX_PRECOMMIT_RETRIES:
+                                    try:
+                                        await resp.write(
+                                            b'event: error\ndata: {"error":{"type":"upstream_error",'
+                                            b'"message":"upstream unavailable (repeated '
+                                            b'pre-content truncation)"}}\n\ndata: [DONE]\n\n'
+                                        )
+                                    except Exception:
+                                        pass
+                                    return resp
+                                break
+
+                            if not _saw_payload and _raw_stream_usage is None and _translator_usage is None:
+                                # 空完成：有 chunks 但全为空帧、无 usage（无错误帧）。
+                                # 同样视为失败换 key——正常上游不会回纯空流。
+                                _lg.error(
+                                    f"[{id(request):x}] streaming: key_id={k.key_id} empty "
+                                    f"completion ({chunk_count} chunks, no payload, no usage); "
+                                    f"treating as failure and retrying"
+                                )
+                                mark_empty_response(k, single_key=single_key)
+                                if self.store:
+                                    self._spawn(
+                                        self._log_and_deduct(
+                                            self.store,
+                                            client_ip=request.remote or "",
+                                            model_name=requested_model or "",
+                                            member_model=k.model_name,
+                                            key_id=k.key_id,
+                                            status=502,
+                                            latency_ms=int((time.time() - _stream_start) * 1000),
+                                            tokens_in=0,
+                                            tokens_out=0,
+                                            inbound_protocol=inbound_protocol,
+                                            outbound_protocol=outbound_protocol,
+                                            translated=need_translation,
+                                            token_id=request.get("token_id", 0),
+                                            error="upstream empty completion",
+                                        )
+                                    )
+                                _precommit_fail += 1
+                                if _precommit_fail >= _MAX_PRECOMMIT_RETRIES:
+                                    try:
+                                        await resp.write(
+                                            b'event: error\ndata: {"error":{"type":"upstream_error",'
+                                            b'"message":"upstream returned empty completions '
+                                            b'repeatedly"}}\n\ndata: [DONE]\n\n'
+                                        )
+                                    except Exception:
+                                        pass
+                                    return resp
+                                break
+
                             # done() 是方法（StreamTranslator 协议）；属性式消费会拿到
                             # 恒真的 bound method，导致截断兜底收尾被永久跳过。
+                            # 仅在已提交有效负载后才有意义——未提交路径已在上方 break。
                             if stream_translator and not stream_translator.done():
                                 _lg.warning(
                                     f"[{id(request):x}] streaming: key_id={k.key_id} "
@@ -5447,21 +5705,12 @@ class ProxyHandler:
                             if _stream_tokens_in or _stream_tokens_out:
                                 k.record_tokens(_stream_tokens_in, _stream_tokens_out)
 
-                            # TEMP debug capture：落盘上游响应与元信息（可移除）。
-                            if _cap_tag:
-                                try:
-                                    with open(os.path.join(_cap_dir, f"{_cap_tag}_response.sse"), "wb") as _cf:
-                                        _cf.write(bytes(_cap_buf))
-                                    with open(os.path.join(_cap_dir, f"{_cap_tag}_meta.txt"), "w", encoding="utf-8") as _cf:
-                                        _cf.write(
-                                            f"model={requested_model} key_id={k.key_id} chunks={chunk_count} "
-                                            f"bytes={len(_cap_buf)} client_gone={client_gone} "
-                                            f"upstream_broken={upstream_broken} "
-                                            f"raw_usage={_raw_stream_usage!r}\n"
-                                        )
-                                except Exception:
-                                    pass
-                                _cap_tag = ""
+                            # usage-only 流（无内容但有 usage）从未触发提交冲洗：
+                            # 走到这里的都是完成路径，把持有的字节补发给客户端。
+                            if _pending_out:
+                                for _oc in _pending_out:
+                                    await resp.write(_oc)
+                                _pending_out.clear()
 
                             # Sticky session: remember which key served this conversation
                             if session_key:
