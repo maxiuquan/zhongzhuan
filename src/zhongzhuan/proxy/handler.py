@@ -5003,6 +5003,21 @@ class ProxyHandler:
         degraded_mode: bool = False,
     ) -> web.StreamResponse:
         _stream_start = time.time()
+        # --- TEMP debug capture (2026-10-18, removable) ----------------------
+        # Env 门控：ZHONGZHUAN_DEBUG_CAPTURE_DIR + ZHONGZHUAN_DEBUG_CAPTURE_MODEL。
+        # 落盘原始请求体 + 上游透传 SSE 字节，用于诊断 token101 0/0 空流事故。
+        # 任何异常都不影响转发。定位后删掉本段 + .env 两个变量即可。
+        _cap_dir = os.environ.get("ZHONGZHUAN_DEBUG_CAPTURE_DIR", "")
+        _cap_tag = ""
+        if _cap_dir and os.environ.get("ZHONGZHUAN_DEBUG_CAPTURE_MODEL", "") == requested_model:
+            try:
+                os.makedirs(_cap_dir, exist_ok=True)
+                _cap_tag = time.strftime("%H%M%S") + f"_{id(request):x}"
+                with open(os.path.join(_cap_dir, f"{_cap_tag}_request.json"), "w", encoding="utf-8") as _cf:
+                    json.dump(body_obj, _cf, ensure_ascii=False)
+            except Exception:
+                _cap_tag = ""
+        # ----------------------------------------------------------------------
         # 单 key 渠道判定：瞬时失败退避封顶 10s（retry.SINGLE_KEY_BACKOFF_MAX_LEVEL）。
         single_key = len(candidates) == 1
         resp = web.StreamResponse(status=200)
@@ -5320,6 +5335,7 @@ class ProxyHandler:
                             # include_usage=true 时末 chunk 带 usage，从这里收集，
                             # 供下方日志/配额使用（2026-08-16 之前恒为 0/0）。
                             _raw_stream_usage: dict | None = None
+                            _cap_buf = bytearray()
                             # 异常来源区分（P0）：读侧 = 上游断流/截断；写侧 =
                             # 客户端断开。二者此前混为一谈——上游断流也被当成
                             # 成功 mark_success + 审计 200，退避状态被洗白。
@@ -5334,6 +5350,8 @@ class ProxyHandler:
                                                 await resp.write(tc)
                                         else:
                                             await resp.write(chunk)
+                                            if _cap_tag:
+                                                _cap_buf.extend(chunk)
                                             if _raw_stream_usage is None:
                                                 _raw_stream_usage = _extract_usage_from_chat_stream_chunk(chunk)
                                         chunk_count += 1
@@ -5428,6 +5446,22 @@ class ProxyHandler:
                                 )
                             if _stream_tokens_in or _stream_tokens_out:
                                 k.record_tokens(_stream_tokens_in, _stream_tokens_out)
+
+                            # TEMP debug capture：落盘上游响应与元信息（可移除）。
+                            if _cap_tag:
+                                try:
+                                    with open(os.path.join(_cap_dir, f"{_cap_tag}_response.sse"), "wb") as _cf:
+                                        _cf.write(bytes(_cap_buf))
+                                    with open(os.path.join(_cap_dir, f"{_cap_tag}_meta.txt"), "w", encoding="utf-8") as _cf:
+                                        _cf.write(
+                                            f"model={requested_model} key_id={k.key_id} chunks={chunk_count} "
+                                            f"bytes={len(_cap_buf)} client_gone={client_gone} "
+                                            f"upstream_broken={upstream_broken} "
+                                            f"raw_usage={_raw_stream_usage!r}\n"
+                                        )
+                                except Exception:
+                                    pass
+                                _cap_tag = ""
 
                             # Sticky session: remember which key served this conversation
                             if session_key:
