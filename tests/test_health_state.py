@@ -268,6 +268,37 @@ class TestClassifyLabel:
         # 401 仍是永久（密钥级问题，不是余额）
         assert classify_label(401, {}, b"") == CLASS_PERMANENT
 
+    def test_insufficient_user_quota_is_transient_not_balance(self):
+        """new_api insufficient_user_quota 402 → transient（短退避自愈），不是 balance 1h。
+
+        2026-10-24 vsllm 实证：同一把 key 14:16:58 成功 179 chunks、14:17:21
+        报 insufficient_user_quota、上游面板稍后又正常出活——余额充足，是
+        大上下文请求预扣费校验的瞬时抖动。1h 余额冷却会让 3 把 key 白锁 1h。
+        """
+        from zhongzhuan.proxy.retry import classify_failure, classify_label
+        from zhongzhuan.proxy.ratelimit import (
+            KeyHealth,
+            SlidingWindow,
+            STATE_ERROR,
+            CLASS_TRANSIENT,
+        )
+
+        body = (
+            '{"error":{"message":"当前账户暂无生效套餐，请前往钱包页面激活订阅",'
+            '"type":"new_api_error","param":"","code":"insufficient_user_quota"}}'
+        ).encode("utf-8")
+        assert classify_label(402, {}, body) == CLASS_TRANSIENT
+        # 英文变体与任意状态码形态（body 优先于裸状态码）
+        assert classify_label(400, {}, b'{"code":"insufficient user quota"}') == CLASS_TRANSIENT
+
+        # 失败迁移：transient 短冷却（非 1h）
+        k = KeyHealth(key_id=2, api_key="sk-x", window=SlidingWindow(60, 0))
+        retryable = classify_failure(k, 402, {}, body)
+        assert retryable is True
+        assert k.status == STATE_ERROR
+        assert k.failure_class == CLASS_TRANSIENT
+        assert 0 < k.cooldown_until - time.time() <= 600.0
+
     def test_mark_balance_depleted_long_cooldown_auto_recovers(self):
         """mark_balance_depleted：STATE_ERROR + 1h 冷却，到期 is_available 自动恢复。"""
         from zhongzhuan.proxy.retry import classify_failure, mark_balance_depleted

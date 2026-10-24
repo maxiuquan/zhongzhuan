@@ -360,11 +360,13 @@ def register_routes(app: web.Application, ctx) -> None:
         try:
             if already_probed:
                 # 已探测过：只做基础连通性 ping，不重复探测思考等级。
-                async with httpx.AsyncClient(timeout=15.0) as client:
+                # 60s：vsllm 等上游非流式 25s+ 才回（2026-10-24 实证：15s 超时
+                # 时上游实际在处理并计费输出，测试误报超时）。
+                async with httpx.AsyncClient(timeout=60.0) as client:
                     ping_resp = await client.post(url, headers=headers, json=payload)
                 probe_map = None
             else:
-                async with httpx.AsyncClient(timeout=15.0) as client:
+                async with httpx.AsyncClient(timeout=60.0) as client:
                     # 基础连通性 ping 与思考等级探针同轮并发
                     ping_task = client.post(url, headers=headers, json=payload)
                     probe_task = _probe_reasoning_levels(client, url, headers, protocol, _make_base)
@@ -412,7 +414,7 @@ def register_routes(app: web.Application, ctx) -> None:
                     "latency_ms": latency,
                     "url": url,
                     "model": upstream_model,
-                    "error": "timeout (30s)",
+                    "error": "timeout (60s)",
                 }
             )
         except Exception as e:

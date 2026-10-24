@@ -81,6 +81,16 @@ _BALANCE_BODY_MARKERS = (
     "topup",
 )
 
+#: new_api "用户配额" 类 402：瞬时预扣费误报（2026-10-24 vsllm 实证：同一把
+#: key 14:16:58 成功 179 chunks、14:17:21 报 insufficient_user_quota、上游
+#: 面板 22:21 又正常出活——余额充足，是大上下文请求预扣费校验的瞬时抖动）。
+#: 按 transient 短退避处理（多 key 逐级 5s→10s→60s；单 key 封顶 10s），
+#: 不进 1h 余额长冷却；真欠费（insufficient_balance/topup）语义不变。
+_QUOTA_TRANSIENT_BODY_MARKERS = (
+    "insufficient_user_quota",
+    "insufficient user quota",
+)
+
 
 def classify_label(status_code: int, headers: dict, body: bytes = b"") -> str:
     """把一次上游失败分类成退避动作标签（纯函数，可单测）。
@@ -102,6 +112,9 @@ def classify_label(status_code: int, headers: dict, body: bytes = b"") -> str:
         low = str(raw).lower()
     if any(m in low for m in _PERMANENT_BODY_MARKERS):
         return CLASS_PERMANENT
+    # new_api 用户配额瞬时误报：短退避自愈（见 _QUOTA_TRANSIENT_BODY_MARKERS 注释）。
+    if any(m in low for m in _QUOTA_TRANSIENT_BODY_MARKERS):
+        return CLASS_TRANSIENT
     # 欠费（402 余额/免费额度耗尽）：临时态，长冷却自动恢复，非永久失效。
     if any(m in low for m in _BALANCE_BODY_MARKERS):
         return CLASS_BALANCE
